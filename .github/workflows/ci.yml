@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The CUDA backend builds without a CUDA toolkit (runtime loading).
+      - run: cargo clippy -p pbsolve-py -p pbsolve-cuda --features pbsolve-py/cuda-12 -- -D warnings
+      - run: cargo clippy -p pbsolve-py -p pbsolve-cuda --features pbsolve-py/cuda-13 -- -D warnings
+      - run: cargo test -p pbsolve-core
+
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install "maturin>=1.9,<2" pytest numpy
+      # Linux/Windows: CUDA-enabled build, which must fall back to CPU on GPU-less runners.
+      - if: runner.os != 'macOS'
+        run: maturin build --release --features cuda-12 -o dist
+      - if: runner.os == 'macOS'
+        run: maturin build --release -o dist
+      - run: pip install --find-links dist pbsolve
+      - run: pytest -q tests
+      - run: python -m pbsolve test
+
+  gpu:
+    # Requires a self-hosted runner with an NVIDIA GPU and driver.
+    if: ${{ vars.HAS_GPU_RUNNER == 'true' }}
+    runs-on: [self-hosted, linux, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install "maturin>=1.9,<2" pytest numpy nvidia-cuda-nvrtc-cu12
+      - run: maturin build --release --features cuda-12 -o dist && pip install --find-links dist pbsolve
+      - run: python -m pbsolve test
+      - run: pytest -q tests/test_platforms.py

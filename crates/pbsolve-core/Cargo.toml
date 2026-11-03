@@ -1,0 +1,13 @@
+[package]
+name = "pbsolve-core"
+description = "Backend-agnostic finite-difference Poisson-Boltzmann solver with a parallel CPU backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT AND BSD-3-Clause"  # portions derived from APBS, see THIRD_PARTY_NOTICES.md
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rayon.workspace = true
+thiserror.workspace = true

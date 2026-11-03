@@ -1,0 +1,162 @@
+//! Finite-volume discretisation of the LPBE, scaled by the cell volume so the
+//! matrix is symmetric positive definite:
+//!
+//! ```text
+//! (A u)_c = Σ_axes c_a [ε_{c-½}(u_c - u_{c-1}) + ε_{c+½}(u_c - u_{c+1})] + κ̄²_c V u_c
+//! c_x = h_y h_z / h_x  (etc.),   V = h_x h_y h_z
+//! ```
+//!
+//! Only interior nodes are unknowns; boundary rows are identically zero and
+//! Dirichlet values enter through the right-hand side.
+
+use crate::grid::Grid;
+use crate::surface::CoefficientMaps;
+use rayon::prelude::*;
+use std::f64::consts::PI;
+
+#[derive(Clone, Debug)]
+pub struct StencilOperator {
+    pub dims: [usize; 3],
+    /// Face coefficients c_x, c_y, c_z.
+    pub coef: [f64; 3],
+    pub eps_x: Vec<f64>,
+    pub eps_y: Vec<f64>,
+    pub eps_z: Vec<f64>,
+    /// κ̄² · V at every node.
+    pub kvol: Vec<f64>,
+    /// 1/diag(A) on interior nodes, 0 on boundary nodes (Jacobi preconditioner).
+    pub inv_diag: Vec<f64>,
+}
+
+impl StencilOperator {
+    pub fn new(grid: &Grid, maps: CoefficientMaps) -> Self {
+        let [hx, hy, hz] = grid.spacing;
+        let coef = [hy * hz / hx, hx * hz / hy, hx * hy / hz];
+        let vol = grid.cell_volume();
+        let kvol: Vec<f64> = maps.kappa_sq.iter().map(|k| k * vol).collect();
+        let [nx, ny, _] = grid.dims;
+        let (sx, sy, sz) = (1usize, nx, nx * ny);
+        let mut inv_diag = vec![0.0; grid.len()];
+        inv_diag.par_iter_mut().enumerate().for_each(|(c, d)| {
+            let (i, j, k) = grid.ijk(c);
+            if grid.is_boundary(i, j, k) {
+                return;
+            }
+            let diag = coef[0] * (maps.eps_x[c - sx] + maps.eps_x[c])
+                + coef[1] * (maps.eps_y[c - sy] + maps.eps_y[c])
+                + coef[2] * (maps.eps_z[c - sz] + maps.eps_z[c])
+                + kvol[c];
+            *d = 1.0 / diag;
+        });
+        Self {
+            dims: grid.dims,
+            coef,
+            eps_x: maps.eps_x,
+            eps_y: maps.eps_y,
+            eps_z: maps.eps_z,
+            kvol,
+            inv_diag,
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.dims[0] * self.dims[1] * self.dims[2]
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// y = A x on interior nodes, y = 0 on boundary nodes. Boundary values of
+    /// `x` ARE read (needed for right-hand-side assembly).
+    pub fn apply(&self, x: &[f64], y: &mut [f64]) {
+        let [nx, ny, nz] = self.dims;
+        let (sx, sy, sz) = (1usize, nx, nx * ny);
+        let [cx, cy, cz] = self.coef;
+        y.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+            if k == 0 || k == nz - 1 {
+                plane.fill(0.0);
+                return;
+            }
+            for j in 0..ny {
+                let row = &mut plane[j * nx..(j + 1) * nx];
+                if j == 0 || j == ny - 1 {
+                    row.fill(0.0);
+                    continue;
+                }
+                row[0] = 0.0;
+                row[nx - 1] = 0.0;
+                for (i, out) in row.iter_mut().enumerate().take(nx - 1).skip(1) {
+                    let c = i + nx * (j + ny * k);
+                    let xc = x[c];
+                    *out = cx * (self.eps_x[c - sx] * (xc - x[c - sx]) + self.eps_x[c] * (xc - x[c + sx]))
+                        + cy * (self.eps_y[c - sy] * (xc - x[c - sy]) + self.eps_y[c] * (xc - x[c + sy]))
+                        + cz * (self.eps_z[c - sz] * (xc - x[c - sz]) + self.eps_z[c] * (xc - x[c + sz]))
+                        + self.kvol[c] * xc;
+                }
+            }
+        });
+    }
+}
+
+/// b = 4π l_B0 q − A g_ext on interior nodes (0 on the boundary), so that the
+/// full solution is u = x + g_ext with A x = b.
+pub fn assemble_rhs(op: &StencilOperator, node_charge: &[f64], g_ext: &[f64], lb0: f64) -> Vec<f64> {
+    let mut ag = vec![0.0; op.len()];
+    op.apply(g_ext, &mut ag);
+    let src = 4.0 * PI * lb0;
+    node_charge
+        .par_iter()
+        .zip(ag.par_iter())
+        .zip(op.inv_diag.par_iter())
+        .map(|((q, a), d)| if *d == 0.0 { 0.0 } else { src * q - a })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::molecule::Atom;
+    use crate::params::PbParams;
+
+    fn pseudo_random(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed;
+        (0..n)
+            .map(|_| {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((s >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+            })
+            .collect()
+    }
+
+    #[test]
+    fn operator_is_symmetric() {
+        let grid = Grid::centered([0.0; 3], [12.0, 10.0, 11.0], [13, 11, 12]).unwrap();
+        let atoms = [Atom {
+            position: [0.5, 0.0, -0.3],
+            charge: 1.0,
+            radius: 2.0,
+        }];
+        let params = PbParams::default().with_salt(0.15, 2.0);
+        let op = StencilOperator::new(&grid, CoefficientMaps::solvated(&grid, &atoms, &params));
+        let mask = |v: &mut Vec<f64>| {
+            for (c, x) in v.iter_mut().enumerate() {
+                if op.inv_diag[c] == 0.0 {
+                    *x = 0.0;
+                }
+            }
+        };
+        let mut x = pseudo_random(grid.len(), 1);
+        let mut y = pseudo_random(grid.len(), 2);
+        mask(&mut x);
+        mask(&mut y);
+        let (mut ax, mut ay) = (vec![0.0; grid.len()], vec![0.0; grid.len()]);
+        op.apply(&x, &mut ax);
+        op.apply(&y, &mut ay);
+        let yax: f64 = y.iter().zip(&ax).map(|(a, b)| a * b).sum();
+        let xay: f64 = x.iter().zip(&ay).map(|(a, b)| a * b).sum();
+        assert!((yax - xay).abs() < 1e-9 * yax.abs().max(1.0), "{yax} vs {xay}");
+    }
+}

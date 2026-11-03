@@ -1,0 +1,12 @@
+[package]
+name = "pbsolve-io"
+description = "Readers for molecular structure, topology and trajectory files (PDB, PQR, mmCIF, GRO, mol2, Amber, CHARMM/NAMD, GROMACS, DCD, XTC, TRR, NetCDF)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT AND BSD-2-Clause"  # XTC decompression ported from xdrfile, see THIRD_PARTY_NOTICES.md
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true

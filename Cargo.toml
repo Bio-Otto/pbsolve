@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pbsolve-core",
+    "crates/pbsolve-cuda",
+    "crates/pbsolve-io",
+    "crates/pbsolve-py",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/Bio-Otto/pbsolve"
+authors = ["pbsolve contributors"]
+
+[workspace.dependencies]
+pbsolve-core = { path = "crates/pbsolve-core", version = "0.0.1" }
+pbsolve-cuda = { path = "crates/pbsolve-cuda", version = "0.0.1" }
+pbsolve-io = { path = "crates/pbsolve-io", version = "0.0.1" }
+rayon = "1.11"
+thiserror = "2"
+# Dynamic loading: no CUDA toolkit is needed at build time and the same binary
+# runs (CPU-only) on machines without an NVIDIA driver.
+cudarc = { version = "0.19.10", default-features = false, features = [
+    "std",
+    "driver",
+    "nvrtc",
+    "fallback-dynamic-loading",
+] }
+pyo3 = "0.30.1"
+numpy = "0.30.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Numerical tests (Born ion etc.) are far too slow without optimisation.
+[profile.test]
+opt-level = 3

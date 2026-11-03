@@ -1,0 +1,172 @@
+# pbsolve
+
+**Fast Poisson–Boltzmann electrostatics and solvation energies — Rust core, CPU/CUDA backends, Python API.**
+
+pbsolve computes electrostatic potentials and polar solvation energies of
+biomolecules from the Poisson–Boltzmann equation, on the CPU or on NVIDIA GPUs,
+and plugs directly into simulation and MM-PBSA workflows. The current release
+solves the linearized equation with finite differences and grid focusing; the
+design keeps the physics separate from the compute backends so that further
+solution methods and integrations can be added.
+
+* **One algorithm, many devices** — physics is written once in `pbsolve-core`;
+  CPU (rayon) and CUDA backends implement a 7-kernel `Backend` trait.
+* **Automatic GPU** — the CUDA build loads the driver and NVRTC at runtime;
+  without a GPU it transparently runs on the CPU (`platform="auto"`).
+* **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for
+  complex/receptor/ligand, batch trajectories, OpenMM bridge, OpenDX maps.
+* **Reads simulation output directly** — PDB, mmCIF, Amber, CHARMM/NAMD, GROMACS
+  and common trajectory formats, plus built-in preparation of PDB files.
+* **Validated and reproducible** — checked against analytic results and
+  established tools (`docs/VALIDATION.md`); deterministic on every platform.
+
+## Install
+
+```bash
+conda install -c conda-forge pbsolve        # once published; picks CUDA or CPU automatically
+# from source
+pip install .                               # CPU
+maturin develop --release --features cuda-12   # CPU + CUDA (no CUDA toolkit needed to build)
+```
+
+Check the installation (like `python -m openmm.testInstallation`):
+
+```bash
+pbsolve test        # Born ion on every available platform + cross-platform agreement
+pbsolve info        # build / CUDA status and the reason if CUDA is unavailable
+```
+
+## Input files
+
+pbsolve reads simulation output directly — no conversion step:
+
+| kind | formats |
+|---|---|
+| structures | PDB (multi-model), PQR, mmCIF, GRO, mol2 |
+| topologies (charges) | Amber prmtop, CHARMM/NAMD PSF, GROMACS top/itp (`#include` via `GMXLIB` or `-I`) |
+| coordinates | Amber inpcrd/rst7/ncrst |
+| trajectories | DCD (CHARMM/NAMD/OpenMM), XTC, TRR, Amber NetCDF, mdcrd, multi-model PDB/GRO |
+
+```python
+mol = pbsolve.io.load("complex.prmtop", "complex.inpcrd")            # Amber charges + radii
+mol = pbsolve.io.load("topol.top", "md.gro", radii="mbondi2")        # GROMACS, radii by scheme
+solute = mol.strip_solvent()                                          # water + monovalent ions
+lig = solute.select("resname LIG")                                    # boolean mask
+for xyz in pbsolve.io.frames(mol, "md.xtc", step=10, atoms=~mol.solvent_mask()):
+    ...
+```
+
+```bash
+pbsolve solvation complex.prmtop --coords complex.inpcrd
+pbsolve convert topol.top --coords md.gro --radii mbondi2 complex.pqr
+pbsolve mmpbsa complex.prmtop prod.nc --ligand "resname LIG" --step 10 --csv terms.csv
+```
+
+Radii come from the file when it has them (PQR, prmtop `RADII`), otherwise
+from an element scheme (`bondi`, `mbondi`, `mbondi2`, `parse`). Selections:
+`resname`, `name`, `resid`, `chain`, `segid`, `element`, `index`, `serial`,
+`protein`, `water`, `ions`, `hydrogen` with `and`/`or`/`not` and parentheses.
+The readers are checked against MDAnalysis/ParmEd on files written by tleap,
+OpenMM, cpptraj and GROMACS (`scripts/make_io_fixtures.sh`, `scripts/validate_io.py`).
+
+## Preparing PDB files
+
+`pbsolve.prep` adds hydrogens, repairs missing heavy atoms, optimises the
+hydrogen-bond network (HIS/ASN/GLN flips, hydroxyl and carboxyl hydrogens),
+assigns protonation states and AMBER/PARSE/CHARMM charges and radii. It follows
+the conventions of pdb2pqr and is validated against it (`docs/VALIDATION.md`).
+
+```bash
+pbsolve prep protein.pdb protein.pqr --ff amber              # add --noopt to skip the optimisation
+pbsolve prep protein.pdb protein.pqr --ph 5.0                # model-compound pKa rules
+pbsolve prep protein.pdb protein.pqr --titration propka      # PROPKA 3, if installed (optional package)
+pbsolve prep complex.pdb complex.pqr --ligand lig.mol2       # append a ligand with its own charges
+pbsolve solvation protein.pdb --ff amber                     # prepare + solve in one step
+```
+
+```python
+mol, report = pbsolve.prep.prepare("protein.pdb", forcefield="amber", ph=7.0)
+print(report.summary())
+```
+
+Waters are dropped; nucleic acids are not implemented yet.
+
+## Python API
+
+```python
+import numpy as np
+import pbsolve
+
+solver = pbsolve.Solver(platform="auto", grid_spacing=0.5, ionic_strength=0.15)
+coords, charges, radii = pbsolve.read_pqr("protein.pqr")     # Å, e, Å
+
+res = solver.polar_solvation(coords, charges, radii)
+print(res.energy, "kcal/mol on", res.platform, res.iterations)
+
+# MM-PBSA solvation terms for one frame (shared grid for all three species)
+frame = pbsolve.pbsa_solvation_frame(solver, coords, charges, radii, ligand_atoms=lig_idx)
+print(frame.delta_polar, frame.delta_nonpolar)
+
+# Electrostatic potential map for visualisation
+pot, origin, spacing, _ = solver.potential(coords, charges, radii)
+pbsolve.write_dx("potential.dx", pot, origin, spacing)
+```
+
+With OpenMM (see `examples/mmpbsa_openmm.py`):
+
+```python
+from pbsolve.openmm_bridge import OpenMMPBSA
+pbsa = OpenMMPBSA(system, topology, ligand_atoms=lig_idx, solver=solver, radii="mbondi2")
+terms = pbsa.frame(positions)            # OpenMM Quantity or Å array
+dG = delta_E_mm + terms.delta_solvation  # ΔE_MM from your OpenMM workflow
+```
+
+## Command line
+
+```bash
+pbsolve solvation protein.pqr --spacing 0.5 --ionic-strength 0.15 --dx pot.dx
+```
+
+## Validation
+
+`docs/VALIDATION.md` records the current checks: analytic references, grid
+convergence, cross-checks against other Poisson–Boltzmann software (the
+`pbsolve apbs` subcommand runs such comparisons when APBS is installed), and
+tests of the readers and the structure preparation against reference tools.
+
+## Status
+
+v0.0.1 is an early preview; the API may still change. Validation numbers and
+the GPU status are in `docs/VALIDATION.md`, design and roadmap in
+`docs/ARCHITECTURE.md`, packaging in `docs/PACKAGING.md`.
+
+## Layout
+
+```
+crates/pbsolve-core   physics + CPU backend (pure Rust, no Python)
+crates/pbsolve-cuda   CUDA backend (cudarc + NVRTC kernels in kernels/pb_kernels.cu)
+crates/pbsolve-io     structure, topology and trajectory readers
+crates/pbsolve-py     PyO3 bindings -> pbsolve._core
+python/pbsolve        Python API, structure preparation, MM-PBSA helpers, OpenMM bridge, CLI
+recipe/               conda recipe (CPU + CUDA 12/13 variants)
+scripts/              validation and maintenance scripts
+tests/                pytest suite;  `cargo test -p pbsolve-core` for Rust tests
+```
+
+## References
+
+* Baker NA, Sept D, Joseph S, Holst MJ, McCammon JA. Electrostatics of
+  nanosystems: application to microtubules and the ribosome. *PNAS* 98, 10037 (2001).
+* Jurrus E, et al. Improvements to the APBS biomolecular solvation software
+  suite. *Protein Sci.* 27, 112 (2018).
+* Sitkoff D, Sharp KA, Honig B. Accurate calculation of hydration free
+  energies using macroscopic solvent models. *J. Phys. Chem.* 98, 1978 (1994).
+
+pbsolve is an independent project and is not affiliated with or endorsed by the
+authors of the software cited above.
+
+## License
+
+MIT — see `LICENSE`. A few files contain code or data derived from APBS and
+pdb2pqr (BSD-3-Clause) and xdrfile (BSD-2-Clause), all compatible with MIT;
+see `THIRD_PARTY_NOTICES.md`, which must accompany redistributions.

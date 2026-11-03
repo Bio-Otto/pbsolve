@@ -1,0 +1,21 @@
+[package]
+name = "pbsolve-cuda"
+description = "CUDA backend for pbsolve (runtime-loaded driver + NVRTC; no nvcc at build time)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# Pick exactly one: the CUDA major version the runtime-loaded bindings target.
+# The conda recipe enables the one matching `cuda_compiler_version`.
+# Bindings use the x.0 API level so any driver of that major works.
+cuda-12 = ["dep:cudarc", "cudarc/cuda-12000"]
+cuda-13 = ["dep:cudarc", "cudarc/cuda-13000"]
+
+[dependencies]
+pbsolve-core.workspace = true
+cudarc = { workspace = true, optional = true }

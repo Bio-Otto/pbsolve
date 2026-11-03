@@ -1,0 +1,913 @@
+//! Python bindings (`pbsolve._core`). Keep this layer thin: argument
+//! conversion, platform selection and GIL release only. Physics lives in
+//! `pbsolve-core`, ergonomics in the pure-Python package.
+
+use numpy::ndarray::ArrayView2;
+use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
+use pbsolve_core::charge::spread_charges;
+use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
+use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
+use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, kt_in_kj_per_mol};
+use pbsolve_core::{
+    apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_solvation, solve_focused, solve_with_maps,
+    Atom, Backend, BoundaryCondition, CoefficientMaps, CpuBackend, DimePolicy, Grid, GridSpec, IonSpecies, Medium,
+    PbError, PbParams, PolarSolvation, SolveStats, SolverOptions, SurfaceMethod,
+};
+use pyo3::create_exception;
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::PyDict;
+
+create_exception!(
+    pbsolve,
+    ConvergenceError,
+    PyRuntimeError,
+    "The linear solver did not converge."
+);
+
+fn to_py(e: PbError) -> PyErr {
+    match e {
+        PbError::InvalidInput(_) | PbError::Parse { .. } => PyValueError::new_err(e.to_string()),
+        PbError::Io(_) => PyOSError::new_err(e.to_string()),
+        PbError::NotConverged { .. } => ConvergenceError::new_err(e.to_string()),
+        PbError::Backend(_) => PyRuntimeError::new_err(e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------- platforms
+
+enum Engine {
+    Cpu(CpuBackend),
+    #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
+    Cuda(pbsolve_cuda::CudaBackend),
+}
+
+macro_rules! dispatch {
+    ($engine:expr, $be:ident => $body:expr) => {
+        match $engine {
+            Engine::Cpu($be) => $body,
+            #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
+            Engine::Cuda($be) => $body,
+        }
+    };
+}
+
+impl Engine {
+    fn create(platform: &str, device: usize) -> PyResult<Self> {
+        match platform.to_ascii_lowercase().as_str() {
+            "cpu" => Ok(Engine::Cpu(CpuBackend::new())),
+            "cuda" => Self::cuda(device),
+            "auto" => {
+                if pbsolve_cuda::is_available() {
+                    Self::cuda(device).or_else(|_| Ok(Engine::Cpu(CpuBackend::new())))
+                } else {
+                    Ok(Engine::Cpu(CpuBackend::new()))
+                }
+            }
+            other => Err(PyValueError::new_err(format!(
+                "unknown platform '{other}' (expected 'auto', 'CPU' or 'CUDA')"
+            ))),
+        }
+    }
+
+    #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
+    fn cuda(device: usize) -> PyResult<Self> {
+        pbsolve_cuda::CudaBackend::new(device).map(Engine::Cuda).map_err(to_py)
+    }
+
+    #[cfg(not(any(feature = "cuda-12", feature = "cuda-13")))]
+    fn cuda(_device: usize) -> PyResult<Self> {
+        Err(PyRuntimeError::new_err(
+            pbsolve_cuda::unavailable_reason().unwrap_or_else(|| "CUDA unavailable".into()),
+        ))
+    }
+
+    fn platform(&self) -> &'static str {
+        dispatch!(self, be => be.platform())
+    }
+
+    fn device_name(&self) -> String {
+        dispatch!(self, be => be.device_name())
+    }
+
+    fn polar(&self, atoms: &[Atom], params: &PbParams, spec: &GridSpec) -> Result<PolarSolvation, PbError> {
+        dispatch!(self, be => polar_solvation(be, atoms, params, spec))
+    }
+
+    fn field(
+        &self,
+        atoms: &[Atom],
+        params: &PbParams,
+        spec: &GridSpec,
+        medium: Medium,
+    ) -> Result<FieldSolution, PbError> {
+        dispatch!(self, be => solve_focused(be, spec, atoms, params, medium))
+    }
+
+    fn with_maps(
+        &self,
+        grid: &Grid,
+        maps: CoefficientMaps,
+        charge: &[f64],
+        g_ext: &[f64],
+        temperature: f64,
+        opts: SolverOptions,
+    ) -> Result<(Vec<f64>, SolveStats), PbError> {
+        dispatch!(self, be => solve_with_maps(be, grid, maps, charge, g_ext, temperature, opts))
+    }
+}
+
+/// Platforms usable in this process, fastest first.
+#[pyfunction]
+fn available_platforms() -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if pbsolve_cuda::is_available() {
+        v.push("CUDA");
+    }
+    v.push("CPU");
+    v
+}
+
+/// Build and runtime information about CUDA support.
+#[pyfunction]
+fn cuda_info(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
+    let d = pyo3::types::PyDict::new(py);
+    d.set_item("compiled", pbsolve_cuda::compiled_with_cuda())?;
+    d.set_item("cuda_major", pbsolve_cuda::cuda_major())?;
+    d.set_item("available", pbsolve_cuda::is_available())?;
+    d.set_item("device_count", pbsolve_cuda::device_count())?;
+    d.set_item("reason", pbsolve_cuda::unavailable_reason())?;
+    Ok(d)
+}
+
+// ---------------------------------------------------------------- helpers
+
+fn coords_from(view: ArrayView2<'_, f64>) -> PyResult<Vec<[f64; 3]>> {
+    if view.ncols() != 3 {
+        return Err(PyValueError::new_err(format!(
+            "coordinates must have shape (N, 3), got {:?}",
+            view.shape()
+        )));
+    }
+    Ok(view.rows().into_iter().map(|r| [r[0], r[1], r[2]]).collect())
+}
+
+fn atoms_from(
+    coords: &PyReadonlyArray2<'_, f64>,
+    charges: &PyReadonlyArray1<'_, f64>,
+    radii: &PyReadonlyArray1<'_, f64>,
+) -> PyResult<Vec<Atom>> {
+    let xyz = coords_from(coords.as_array())?;
+    let q = charges.as_array().to_vec();
+    let r = radii.as_array().to_vec();
+    atoms_from_arrays(&xyz, &q, &r).map_err(to_py)
+}
+
+/// x-fastest storage -> C-order (nx, ny, nz) numpy array.
+fn to_numpy<'py>(py: Python<'py>, dims: [usize; 3], field: &[f64]) -> PyResult<Bound<'py, PyArray3<f64>>> {
+    let [nx, ny, nz] = dims;
+    let mut v = vec![0.0; field.len()];
+    for k in 0..nz {
+        for j in 0..ny {
+            for i in 0..nx {
+                v[(i * ny + j) * nz + k] = field[i + nx * (j + ny * k)];
+            }
+        }
+    }
+    PyArray1::from_vec(py, v).reshape([nx, ny, nz])
+}
+
+/// C-order (nx, ny, nz) numpy array -> x-fastest storage, checking the shape.
+fn from_numpy(
+    name: &str,
+    arr: &PyReadonlyArray3<'_, f64>,
+    dims: Option<[usize; 3]>,
+) -> PyResult<(Vec<f64>, [usize; 3])> {
+    let a = arr.as_array();
+    let shape = [a.shape()[0], a.shape()[1], a.shape()[2]];
+    if let Some(d) = dims {
+        if d != shape {
+            return Err(PyValueError::new_err(format!(
+                "{name} has shape {shape:?}, expected {d:?}"
+            )));
+        }
+    }
+    let [nx, ny, nz] = shape;
+    let mut v = vec![0.0; nx * ny * nz];
+    for ((i, j, k), x) in a.indexed_iter() {
+        v[i + nx * (j + ny * k)] = *x;
+    }
+    Ok((v, shape))
+}
+
+fn grid_dict<'py>(py: Python<'py>, g: &Grid) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("dims", g.dims)?;
+    d.set_item("spacing", g.spacing)?;
+    d.set_item("origin", g.origin)?;
+    d.set_item("lengths", g.lengths())?;
+    d.set_item("center", g.center())?;
+    Ok(d)
+}
+
+// ---------------------------------------------------------------- GridSpec
+
+/// Two-level focusing grid (APBS mg-auto: dime, cglen, fglen, cgcent=fgcent).
+#[pyclass(name = "GridSpec", module = "pbsolve", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyGridSpec {
+    inner: GridSpec,
+}
+
+#[pymethods]
+impl PyGridSpec {
+    #[new]
+    #[pyo3(signature = (center, dims, coarse_length, fine_length=None))]
+    fn new(
+        center: [f64; 3],
+        dims: [usize; 3],
+        coarse_length: [f64; 3],
+        fine_length: Option<[f64; 3]>,
+    ) -> PyResult<Self> {
+        let inner = GridSpec {
+            center,
+            dims,
+            coarse_length,
+            fine_length: fine_length.unwrap_or(coarse_length),
+        };
+        inner.validate().map_err(to_py)?;
+        Ok(Self { inner })
+    }
+
+    #[getter]
+    fn center(&self) -> [f64; 3] {
+        self.inner.center
+    }
+    #[getter]
+    fn dims(&self) -> [usize; 3] {
+        self.inner.dims
+    }
+    #[getter]
+    fn coarse_length(&self) -> [f64; 3] {
+        self.inner.coarse_length
+    }
+    #[getter]
+    fn fine_length(&self) -> [f64; 3] {
+        self.inner.fine_length
+    }
+    #[getter]
+    fn fine_spacing(&self) -> [f64; 3] {
+        self.inner.fine_spacing()
+    }
+    #[getter]
+    fn is_focused(&self) -> bool {
+        self.inner.is_focused()
+    }
+
+    /// Node counts APBS would actually use (it silently resets `dime` > 65
+    /// that is not 32c+1); `None` if APBS would reject the grid.
+    #[getter]
+    fn apbs_dims(&self) -> Option<[usize; 3]> {
+        self.inner.apbs_dims()
+    }
+
+    /// Focusing levels (coarse first) exactly as APBS mg-auto sets them up:
+    /// list of dicts with `dims`, `spacing`, `origin`, `lengths`, `center`.
+    #[getter]
+    fn levels<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let levels = self.inner.levels().map_err(to_py)?;
+        levels.iter().map(|g| grid_dict(py, g)).collect()
+    }
+
+    /// Equivalent APBS `mg-auto` keywords (full precision). Raises
+    /// `ValueError` if APBS would run a different grid (see `apbs_dims`).
+    fn to_apbs(&self) -> PyResult<String> {
+        self.inner.to_apbs().map_err(to_py)
+    }
+
+    fn __repr__(&self) -> String {
+        let h = self.inner.fine_spacing();
+        format!(
+            "GridSpec(dims={:?}, coarse_length={:?}, fine_length={:?}, fine_spacing=[{:.3}, {:.3}, {:.3}])",
+            self.inner.dims, self.inner.coarse_length, self.inner.fine_length, h[0], h[1], h[2]
+        )
+    }
+}
+
+// ---------------------------------------------------------------- results
+
+/// Result of a polar solvation calculation. `energy` is in kcal/mol.
+#[pyclass(name = "PolarResult", module = "pbsolve", frozen, get_all)]
+struct PyPolarResult {
+    energy: f64,
+    energy_kt: f64,
+    solvated_kt: f64,
+    reference_kt: f64,
+    iterations: Vec<usize>,
+    residuals: Vec<f64>,
+    grid: PyGridSpec,
+    platform: String,
+}
+
+#[pymethods]
+impl PyPolarResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "PolarResult(energy={:.4} kcal/mol, platform='{}', iterations={:?})",
+            self.energy, self.platform, self.iterations
+        )
+    }
+}
+
+impl PyPolarResult {
+    fn from_core(r: PolarSolvation, platform: &str) -> Self {
+        let stats = r.stats_solvated.iter().chain(&r.stats_reference);
+        Self {
+            energy: r.energy_kcal,
+            energy_kt: r.energy_kt,
+            solvated_kt: r.solvated_kt,
+            reference_kt: r.reference_kt,
+            iterations: stats.clone().map(|s| s.iterations).collect(),
+            residuals: stats.map(|s| s.relative_residual).collect(),
+            grid: PyGridSpec { inner: r.grid },
+            platform: platform.to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Solver
+
+/// Linearized Poisson–Boltzmann solver (APBS mg-auto style focusing).
+///
+/// Energies are returned in kcal/mol. Lengths in Å, charges in e,
+/// concentrations in mol/L.
+#[pyclass(name = "Solver", module = "pbsolve")]
+struct PySolver {
+    engine: Engine,
+    params: PbParams,
+    spacing: f64,
+    cfac: f64,
+    fadd: f64,
+    dime_policy: DimePolicy,
+}
+
+impl PySolver {
+    fn auto_grid(&self, atoms: &[Atom]) -> Result<GridSpec, PbError> {
+        GridSpec::auto_with(atoms, self.spacing, self.cfac, self.fadd, self.dime_policy)
+    }
+
+    fn spec_for(&self, atoms: &[Atom], grid: Option<PyGridSpec>) -> PyResult<GridSpec> {
+        match grid {
+            Some(g) => Ok(g.inner),
+            None => self.auto_grid(atoms).map_err(to_py),
+        }
+    }
+}
+
+#[pymethods]
+impl PySolver {
+    #[new]
+    #[pyo3(signature = (
+        platform = "auto", device = 0, grid_spacing = 0.5,
+        pdie = 1.0, sdie = 78.54, temperature = 298.15,
+        ionic_strength = 0.0, ion_radius = 2.0, ions = None,
+        srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
+        cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        platform: &str,
+        device: usize,
+        grid_spacing: f64,
+        pdie: f64,
+        sdie: f64,
+        temperature: f64,
+        ionic_strength: f64,
+        ion_radius: f64,
+        ions: Option<Vec<(f64, f64, f64)>>,
+        srad: f64,
+        sdens: f64,
+        surface: &str,
+        bcfl: &str,
+        cfac: f64,
+        fadd: f64,
+        tol: f64,
+        max_iter: usize,
+        dime_policy: &str,
+    ) -> PyResult<Self> {
+        let mut params = PbParams {
+            pdie,
+            sdie,
+            temperature,
+            srad,
+            sdens,
+            surface: SurfaceMethod::parse(surface).map_err(to_py)?,
+            bcfl: BoundaryCondition::parse(bcfl).map_err(to_py)?,
+            tol,
+            max_iter,
+            ..PbParams::default()
+        };
+        params = match ions {
+            Some(list) => {
+                params.ions = list
+                    .into_iter()
+                    .map(|(charge, concentration, radius)| IonSpecies {
+                        charge,
+                        concentration,
+                        radius,
+                    })
+                    .collect();
+                params
+            }
+            None => params.with_salt(ionic_strength, ion_radius),
+        };
+        params.validate().map_err(to_py)?;
+        if grid_spacing.is_nan() || grid_spacing <= 0.0 {
+            return Err(PyValueError::new_err("grid_spacing must be positive"));
+        }
+        Ok(Self {
+            engine: Engine::create(platform, device)?,
+            params,
+            spacing: grid_spacing,
+            cfac,
+            fadd,
+            dime_policy: DimePolicy::parse(dime_policy).map_err(to_py)?,
+        })
+    }
+
+    /// All solver settings as a dict (APBS keyword names where they exist).
+    #[getter]
+    fn params<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let p = &self.params;
+        let d = PyDict::new(py);
+        d.set_item("pdie", p.pdie)?;
+        d.set_item("sdie", p.sdie)?;
+        d.set_item("temperature", p.temperature)?;
+        let ions: Vec<(f64, f64, f64)> = p.ions.iter().map(|i| (i.charge, i.concentration, i.radius)).collect();
+        d.set_item("ions", ions)?;
+        d.set_item("ionic_strength", p.ionic_strength())?;
+        d.set_item("srad", p.srad)?;
+        d.set_item("sdens", p.sdens)?;
+        d.set_item("surface", p.surface.as_str())?;
+        d.set_item("bcfl", p.bcfl.as_str())?;
+        d.set_item("tol", p.tol)?;
+        d.set_item("max_iter", p.max_iter)?;
+        d.set_item("grid_spacing", self.spacing)?;
+        d.set_item("cfac", self.cfac)?;
+        d.set_item("fadd", self.fadd)?;
+        d.set_item("dime_policy", self.dime_policy.as_str())?;
+        Ok(d)
+    }
+
+    /// "CPU" or "CUDA".
+    #[getter]
+    fn platform(&self) -> &'static str {
+        self.engine.platform()
+    }
+
+    #[getter]
+    fn device_name(&self) -> String {
+        self.engine.device_name()
+    }
+
+    #[getter]
+    fn ionic_strength(&self) -> f64 {
+        self.params.ionic_strength()
+    }
+
+    /// psize-like automatic grid for the given atoms. Build it once from the
+    /// complex and reuse it for receptor and ligand (MM-PBSA).
+    fn make_grid(&self, coords: PyReadonlyArray2<'_, f64>, radii: PyReadonlyArray1<'_, f64>) -> PyResult<PyGridSpec> {
+        let xyz = coords_from(coords.as_array())?;
+        let r = radii.as_array().to_vec();
+        let q = vec![0.0; r.len()];
+        let atoms = atoms_from_arrays(&xyz, &q, &r).map_err(to_py)?;
+        self.auto_grid(&atoms).map(|inner| PyGridSpec { inner }).map_err(to_py)
+    }
+
+    /// Polar solvation free energy ΔG_polar (kcal/mol).
+    #[pyo3(signature = (coords, charges, radii, grid = None))]
+    fn polar_solvation(
+        &self,
+        py: Python<'_>,
+        coords: PyReadonlyArray2<'_, f64>,
+        charges: PyReadonlyArray1<'_, f64>,
+        radii: PyReadonlyArray1<'_, f64>,
+        grid: Option<PyGridSpec>,
+    ) -> PyResult<PyPolarResult> {
+        let atoms = atoms_from(&coords, &charges, &radii)?;
+        let spec = self.spec_for(&atoms, grid)?;
+        let res = py
+            .detach(|| self.engine.polar(&atoms, &self.params, &spec))
+            .map_err(to_py)?;
+        Ok(PyPolarResult::from_core(res, self.engine.platform()))
+    }
+
+    /// ΔG_polar (kcal/mol) for every frame of an (F, N, 3) trajectory.
+    /// With `grid=None` a grid is built per frame.
+    #[pyo3(signature = (frames, charges, radii, grid = None))]
+    fn polar_solvation_batch<'py>(
+        &self,
+        py: Python<'py>,
+        frames: PyReadonlyArray3<'py, f64>,
+        charges: PyReadonlyArray1<'py, f64>,
+        radii: PyReadonlyArray1<'py, f64>,
+        grid: Option<PyGridSpec>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let f = frames.as_array();
+        if f.shape()[2] != 3 {
+            return Err(PyValueError::new_err("frames must have shape (F, N, 3)"));
+        }
+        let q = charges.as_array().to_vec();
+        let r = radii.as_array().to_vec();
+        let mut systems = Vec::with_capacity(f.shape()[0]);
+        for frame in f.outer_iter() {
+            let xyz = coords_from(frame)?;
+            systems.push(atoms_from_arrays(&xyz, &q, &r).map_err(to_py)?);
+        }
+        let fixed = grid.map(|g| g.inner);
+        let out = py
+            .detach(|| -> Result<Vec<f64>, PbError> {
+                systems
+                    .iter()
+                    .map(|atoms| {
+                        let spec = match &fixed {
+                            Some(g) => g.clone(),
+                            None => self.auto_grid(atoms)?,
+                        };
+                        Ok(self.engine.polar(atoms, &self.params, &spec)?.energy_kcal)
+                    })
+                    .collect()
+            })
+            .map_err(to_py)?;
+        Ok(PyArray1::from_vec(py, out))
+    }
+
+    /// Electrostatic potential (kT/e) on the finest grid as an (nx, ny, nz)
+    /// array, plus the grid origin and spacing (Å). Use `reference=True` for
+    /// the homogeneous reference state. Returns (potential, origin, spacing, energy_kt).
+    #[pyo3(signature = (coords, charges, radii, grid = None, reference = false))]
+    #[allow(clippy::type_complexity)]
+    fn potential<'py>(
+        &self,
+        py: Python<'py>,
+        coords: PyReadonlyArray2<'py, f64>,
+        charges: PyReadonlyArray1<'py, f64>,
+        radii: PyReadonlyArray1<'py, f64>,
+        grid: Option<PyGridSpec>,
+        reference: bool,
+    ) -> PyResult<(Bound<'py, PyArray3<f64>>, [f64; 3], [f64; 3], f64)> {
+        let atoms = atoms_from(&coords, &charges, &radii)?;
+        let spec = self.spec_for(&atoms, grid)?;
+        let medium = if reference { Medium::Reference } else { Medium::Solvated };
+        let (sol, energy) = py
+            .detach(|| -> Result<_, PbError> {
+                let sol = self.engine.field(&atoms, &self.params, &spec, medium)?;
+                let e = electrostatic_energy_kt(&sol, &atoms)?;
+                Ok((sol, e))
+            })
+            .map_err(to_py)?;
+        let arr = to_numpy(py, sol.grid.dims, &sol.potential)?;
+        Ok((arr, sol.grid.origin, sol.grid.spacing, energy))
+    }
+
+    /// Coefficient maps of one focusing level (default: the finest, `level=-1`)
+    /// as C-order (nx, ny, nz) arrays: `eps_x`, `eps_y`, `eps_z` (ε on the
+    /// faces i+½, j+½, k+½), `kappa_sq` (κ̄², Å⁻², 0 where ions are excluded),
+    /// `charge` (e per node, trilinear spreading), plus the level's `origin`,
+    /// `spacing`, `dims` and the bulk `kappa_bar_sq`. Comparable one-to-one with
+    /// APBS `write dielx/diely/dielz/kappa/charge` (APBS writes kappa as 0/1
+    /// accessibility and charge as density e/Å³).
+    #[pyo3(signature = (coords, charges, radii, grid = None, reference = false, level = -1))]
+    #[allow(clippy::too_many_arguments)]
+    fn maps<'py>(
+        &self,
+        py: Python<'py>,
+        coords: PyReadonlyArray2<'py, f64>,
+        charges: PyReadonlyArray1<'py, f64>,
+        radii: PyReadonlyArray1<'py, f64>,
+        grid: Option<PyGridSpec>,
+        reference: bool,
+        level: isize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let atoms = atoms_from(&coords, &charges, &radii)?;
+        let spec = self.spec_for(&atoms, grid)?;
+        let mut levels = spec.levels().map_err(to_py)?;
+        let n = levels.len() as isize;
+        let idx = if level < 0 { n + level } else { level };
+        if idx < 0 || idx >= n {
+            return Err(PyValueError::new_err(format!(
+                "level {level} out of range for {n} focusing levels"
+            )));
+        }
+        let g = levels.swap_remove(idx as usize);
+        let medium = if reference { Medium::Reference } else { Medium::Solvated };
+        let (maps, q) = py
+            .detach(|| -> Result<_, PbError> {
+                let q = spread_charges(&g, &atoms)?;
+                Ok((coefficient_maps(&g, &atoms, &self.params, medium), q))
+            })
+            .map_err(to_py)?;
+        let d = grid_dict(py, &g)?;
+        d.set_item("eps_x", to_numpy(py, g.dims, &maps.eps_x)?)?;
+        d.set_item("eps_y", to_numpy(py, g.dims, &maps.eps_y)?)?;
+        d.set_item("eps_z", to_numpy(py, g.dims, &maps.eps_z)?)?;
+        d.set_item("kappa_sq", to_numpy(py, g.dims, &maps.kappa_sq)?)?;
+        d.set_item("charge", to_numpy(py, g.dims, &q)?)?;
+        let kbar2 = if reference {
+            0.0
+        } else {
+            kappa_bar_squared(&self.params.ions, self.params.temperature)
+        };
+        d.set_item("kappa_bar_sq", kbar2)?;
+        Ok(d)
+    }
+
+    /// Solves the LPBE with *given* coefficient maps, node charges (e) and
+    /// boundary values (only boundary nodes of `boundary` are read), on the
+    /// grid with `origin`/`spacing` (Å); temperature, tolerance and platform
+    /// come from this solver. Arrays are C-order (nx, ny, nz). Returns
+    /// (potential kT/e, iterations, relative residual).
+    ///
+    /// Feeding APBS' own maps here tests pbsolve's discretisation and linear
+    /// solver in isolation ("map injection").
+    #[pyo3(signature = (eps_x, eps_y, eps_z, kappa_sq, charge, boundary, origin, spacing))]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn solve_maps<'py>(
+        &self,
+        py: Python<'py>,
+        eps_x: PyReadonlyArray3<'py, f64>,
+        eps_y: PyReadonlyArray3<'py, f64>,
+        eps_z: PyReadonlyArray3<'py, f64>,
+        kappa_sq: PyReadonlyArray3<'py, f64>,
+        charge: PyReadonlyArray3<'py, f64>,
+        boundary: PyReadonlyArray3<'py, f64>,
+        origin: [f64; 3],
+        spacing: [f64; 3],
+    ) -> PyResult<(Bound<'py, PyArray3<f64>>, usize, f64)> {
+        let (ex, dims) = from_numpy("eps_x", &eps_x, None)?;
+        let (ey, _) = from_numpy("eps_y", &eps_y, Some(dims))?;
+        let (ez, _) = from_numpy("eps_z", &eps_z, Some(dims))?;
+        let (k2, _) = from_numpy("kappa_sq", &kappa_sq, Some(dims))?;
+        let (q, _) = from_numpy("charge", &charge, Some(dims))?;
+        let (g, _) = from_numpy("boundary", &boundary, Some(dims))?;
+        let center = [0, 1, 2].map(|a| origin[a] + 0.5 * (dims[a] - 1) as f64 * spacing[a]);
+        let mut grid = Grid::from_spacing(center, spacing, dims).map_err(to_py)?;
+        grid.origin = origin;
+        let maps = CoefficientMaps {
+            eps_x: ex,
+            eps_y: ey,
+            eps_z: ez,
+            kappa_sq: k2,
+        };
+        let opts = SolverOptions {
+            tol: self.params.tol,
+            max_iter: self.params.max_iter,
+        };
+        let temperature = self.params.temperature;
+        let (u, stats) = py
+            .detach(|| self.engine.with_maps(&grid, maps, &q, &g, temperature, opts))
+            .map_err(to_py)?;
+        Ok((to_numpy(py, dims, &u)?, stats.iterations, stats.relative_residual))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Solver(platform='{}', grid_spacing={}, pdie={}, sdie={}, ionic_strength={}, surface='{}', bcfl='{}', dime_policy='{}')",
+            self.engine.platform(),
+            self.spacing,
+            self.params.pdie,
+            self.params.sdie,
+            self.params.ionic_strength(),
+            self.params.surface.as_str(),
+            self.params.bcfl.as_str(),
+            self.dime_policy.as_str()
+        )
+    }
+}
+
+// ---------------------------------------------------------------- functions
+
+/// Per-atom solvent-accessible surface area (Å², Shrake–Rupley).
+#[pyfunction]
+#[pyo3(signature = (coords, radii, probe = 1.4, n_points = 960))]
+fn sasa<'py>(
+    py: Python<'py>,
+    coords: PyReadonlyArray2<'py, f64>,
+    radii: PyReadonlyArray1<'py, f64>,
+    probe: f64,
+    n_points: usize,
+) -> PyResult<Bound<'py, PyArray1<f64>>> {
+    let xyz = coords_from(coords.as_array())?;
+    let r = radii.as_array().to_vec();
+    let q = vec![0.0; r.len()];
+    let atoms = atoms_from_arrays(&xyz, &q, &r).map_err(to_py)?;
+    let out = py.detach(|| pbsolve_core::sasa::sasa(&atoms, probe, n_points));
+    Ok(PyArray1::from_vec(py, out))
+}
+
+/// k_B·T in kJ/mol (the unit APBS reports energies in).
+#[pyfunction]
+#[pyo3(signature = (temperature = 298.15))]
+fn kt_kj_per_mol(temperature: f64) -> f64 {
+    kt_in_kj_per_mol(temperature)
+}
+
+/// k_B·T in kcal/mol.
+#[pyfunction]
+#[pyo3(signature = (temperature = 298.15))]
+fn kt_kcal_per_mol(temperature: f64) -> f64 {
+    kt_in_kcal_per_mol(temperature)
+}
+
+/// Vacuum Bjerrum length e²/(4πε₀k_BT) in Å.
+#[pyfunction]
+#[pyo3(signature = (temperature = 298.15))]
+fn bjerrum_length(temperature: f64) -> f64 {
+    bjerrum_length_vacuum(temperature)
+}
+
+/// The `dime` APBS actually uses for a requested value (APBS resets
+/// `dime` > 65 that is not 32c+1 to a smaller value); `None` if APBS rejects it.
+#[pyfunction]
+fn apbs_effective_dime(dime: usize) -> Option<usize> {
+    core_apbs_effective_dime(dime)
+}
+
+// ---------------------------------------------------------------- file I/O
+
+fn io_err(e: pbsolve_io::IoError) -> PyErr {
+    match e {
+        pbsolve_io::IoError::Io(err) => PyOSError::new_err(err.to_string()),
+        other => PyValueError::new_err(other.to_string()),
+    }
+}
+
+fn io_format(format: Option<&str>) -> PyResult<Option<pbsolve_io::Format>> {
+    format.map(pbsolve_io::Format::parse).transpose().map_err(io_err)
+}
+
+fn opt_array(py: Python<'_>, v: impl Iterator<Item = Option<f64>>) -> Bound<'_, PyArray1<f64>> {
+    PyArray1::from_vec(py, v.map(|x| x.unwrap_or(f64::NAN)).collect())
+}
+
+/// Reads a structure / topology / coordinate file (format from the
+/// extension unless given). Returns a dict of per-atom lists/arrays
+/// (`names`, `resnames`, `resids`, `icodes`, `chains`, `segids`, `elements`,
+/// `atom_types`, `hetero`, `charges`, `radii`, `masses` — NaN where the format
+/// has no value), `bonds` (B, 2), `coords` (F, N, 3) in Å, `cells` (F, 6),
+/// `times` (F,), `format`, `periodic` and `notes`.
+#[pyfunction]
+#[pyo3(signature = (path, format = None, include_dirs = None))]
+fn read_structure<'py>(
+    py: Python<'py>,
+    path: std::path::PathBuf,
+    format: Option<&str>,
+    include_dirs: Option<Vec<std::path::PathBuf>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let fmt = io_format(format)?;
+    let opts = pbsolve_io::ReadOptions {
+        include_dirs: include_dirs.unwrap_or_default(),
+    };
+    let s = py.detach(|| pbsolve_io::read_file(&path, fmt, &opts)).map_err(io_err)?;
+    let d = PyDict::new(py);
+    let a = &s.atoms;
+    let strs = |f: fn(&pbsolve_io::AtomInfo) -> &String| a.iter().map(|x| f(x).clone()).collect::<Vec<String>>();
+    d.set_item("format", &s.format)?;
+    d.set_item("names", strs(|x| &x.name))?;
+    d.set_item("resnames", strs(|x| &x.resname))?;
+    d.set_item("icodes", strs(|x| &x.icode))?;
+    d.set_item("chains", strs(|x| &x.chain))?;
+    d.set_item("segids", strs(|x| &x.segid))?;
+    d.set_item("elements", strs(|x| &x.element))?;
+    d.set_item("atom_types", strs(|x| &x.atom_type))?;
+    d.set_item("resids", PyArray1::from_vec(py, a.iter().map(|x| x.resid).collect()))?;
+    d.set_item("hetero", PyArray1::from_vec(py, a.iter().map(|x| x.hetero).collect()))?;
+    d.set_item("charges", opt_array(py, a.iter().map(|x| x.charge)))?;
+    d.set_item("radii", opt_array(py, a.iter().map(|x| x.radius)))?;
+    d.set_item("masses", opt_array(py, a.iter().map(|x| x.mass)))?;
+    let nb = s.bonds.len();
+    let flat: Vec<i64> = s.bonds.iter().flat_map(|&(i, j)| [i as i64, j as i64]).collect();
+    d.set_item("bonds", PyArray1::from_vec(py, flat).reshape([nb, 2])?)?;
+    let n = a.len();
+    let nf = s.frames.len();
+    let xyz: Vec<f64> = s
+        .frames
+        .iter()
+        .flat_map(|f| f.coords.iter().flatten().copied())
+        .collect();
+    d.set_item("coords", PyArray1::from_vec(py, xyz).reshape([nf, n, 3])?)?;
+    let cells: Vec<f64> = s.frames.iter().flat_map(|f| f.cell.unwrap_or([f64::NAN; 6])).collect();
+    d.set_item("cells", PyArray1::from_vec(py, cells).reshape([nf, 6])?)?;
+    d.set_item("times", opt_array(py, s.frames.iter().map(|f| f.time)))?;
+    d.set_item("periodic", s.periodic)?;
+    d.set_item("notes", s.notes)?;
+    Ok(d)
+}
+
+/// Streams frames of a trajectory (DCD, XTC, TRR, Amber NetCDF/mdcrd, or a
+/// multi-model PDB/GRO/mmCIF). Iterating yields `(coords (N,3) Å, cell or
+/// None, time or None, step or None)`.
+#[pyclass(name = "TrajectoryReader", module = "pbsolve")]
+struct PyTrajectoryReader {
+    inner: std::sync::Mutex<Box<dyn pbsolve_io::FrameReader>>,
+}
+
+impl PyTrajectoryReader {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Box<dyn pbsolve_io::FrameReader>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[pymethods]
+impl PyTrajectoryReader {
+    #[new]
+    #[pyo3(signature = (path, format = None, n_atoms = None, mdcrd_box = None))]
+    fn new(
+        path: std::path::PathBuf,
+        format: Option<&str>,
+        n_atoms: Option<usize>,
+        mdcrd_box: Option<bool>,
+    ) -> PyResult<Self> {
+        let fmt = io_format(format)?;
+        let inner = pbsolve_io::open_trajectory(&path, fmt, n_atoms, mdcrd_box).map_err(io_err)?;
+        Ok(Self {
+            inner: std::sync::Mutex::new(inner),
+        })
+    }
+
+    #[getter]
+    fn n_atoms(&self) -> Option<usize> {
+        self.lock().n_atoms()
+    }
+
+    /// Number of frames if known without reading the file (DCD, NetCDF, multi-model files).
+    #[getter]
+    fn n_frames(&self) -> Option<usize> {
+        self.lock().n_frames()
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn __next__<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Option<[f64; 6]>, Option<f64>, Option<i64>)>> {
+        let inner = &self.inner;
+        let f = py
+            .detach(|| inner.lock().unwrap_or_else(|e| e.into_inner()).next_frame())
+            .map_err(io_err)?;
+        let Some(f) = f else { return Ok(None) };
+        let n = f.coords.len();
+        let xyz: Vec<f64> = f.coords.into_iter().flatten().collect();
+        Ok(Some((
+            PyArray1::from_vec(py, xyz).reshape([n, 3])?,
+            f.cell,
+            f.time,
+            f.step,
+        )))
+    }
+}
+
+/// Reads a PQR file. Returns (coords (N,3), charges (N,), radii (N,)).
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn read_pqr<'py>(
+    py: Python<'py>,
+    path: std::path::PathBuf,
+) -> PyResult<(
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
+    let atoms = core_read_pqr(&path).map_err(to_py)?;
+    let n = atoms.len();
+    let xyz: Vec<f64> = atoms.iter().flat_map(|a| a.position).collect();
+    let q: Vec<f64> = atoms.iter().map(|a| a.charge).collect();
+    let r: Vec<f64> = atoms.iter().map(|a| a.radius).collect();
+    let coords = PyArray1::from_vec(py, xyz).reshape([n, 3])?;
+    Ok((coords, PyArray1::from_vec(py, q), PyArray1::from_vec(py, r)))
+}
+
+#[pymodule]
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("ConvergenceError", m.py().get_type::<ConvergenceError>())?;
+    m.add_class::<PySolver>()?;
+    m.add_class::<PyGridSpec>()?;
+    m.add_class::<PyPolarResult>()?;
+    m.add_function(wrap_pyfunction!(available_platforms, m)?)?;
+    m.add_function(wrap_pyfunction!(cuda_info, m)?)?;
+    m.add_function(wrap_pyfunction!(sasa, m)?)?;
+    m.add_function(wrap_pyfunction!(read_pqr, m)?)?;
+    m.add_function(wrap_pyfunction!(kt_kj_per_mol, m)?)?;
+    m.add_function(wrap_pyfunction!(kt_kcal_per_mol, m)?)?;
+    m.add_function(wrap_pyfunction!(apbs_effective_dime, m)?)?;
+    m.add_function(wrap_pyfunction!(bjerrum_length, m)?)?;
+    m.add_function(wrap_pyfunction!(read_structure, m)?)?;
+    m.add_class::<PyTrajectoryReader>()?;
+    Ok(())
+}
