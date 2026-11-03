@@ -17,9 +17,10 @@
 //!
 //! * All physics (grids, surfaces, charges, boundary conditions, energies)
 //!   lives here and is shared by every backend.
-//! * A [`backend::Backend`] only has to provide a handful of vector kernels
-//!   (stencil apply, Jacobi preconditioner, dot, axpy, xpay). Adding a new
-//!   accelerator never touches the physics.
+//! * A [`backend::Backend`] only has to provide a handful of kernels
+//!   (stencil applications, grid transfers, dot, element-wise vector
+//!   updates). The CG solver and the multigrid preconditioner are written once
+//!   against it, so adding an accelerator never touches the physics.
 //! * Reductions are deterministic on every backend, so results are
 //!   bit-for-bit reproducible on a given platform, independent of the
 //!   number of CPU threads.
@@ -32,6 +33,7 @@ pub mod cpu;
 pub mod error;
 pub mod grid;
 pub mod molecule;
+pub mod multigrid;
 pub mod operator;
 pub mod params;
 pub mod pb;
@@ -47,7 +49,7 @@ pub use cpu::CpuBackend;
 pub use error::{PbError, Result};
 pub use grid::Grid;
 pub use molecule::Atom;
-pub use params::{BoundaryCondition, IonSpecies, PbParams, SurfaceMethod};
+pub use params::{BoundaryCondition, IonSpecies, PbParams, Preconditioner, SurfaceMethod};
 pub use pb::{
     coefficient_maps, polar_solvation, solve_focused, solve_with_maps, FieldSolution, Medium, PolarSolvation,
 };

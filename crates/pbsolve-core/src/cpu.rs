@@ -3,6 +3,7 @@
 
 use crate::backend::Backend;
 use crate::error::Result;
+use crate::multigrid::{self, Stencil27, Transfer};
 use crate::operator::StencilOperator;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ impl CpuBackend {
 impl Backend for CpuBackend {
     type Vector = Vec<f64>;
     type Operator = Arc<StencilOperator>;
+    type Coarse = Arc<Stencil27>;
 
     fn platform(&self) -> &'static str {
         "CPU"
@@ -32,6 +34,10 @@ impl Backend for CpuBackend {
     }
 
     fn prepare(&self, op: Arc<StencilOperator>) -> Result<Self::Operator> {
+        Ok(op)
+    }
+
+    fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse> {
         Ok(op)
     }
 
@@ -47,16 +53,23 @@ impl Backend for CpuBackend {
         Ok(v.clone())
     }
 
+    fn read(&self, v: &Self::Vector, host: &mut [f64]) -> Result<()> {
+        host.copy_from_slice(v);
+        Ok(())
+    }
+
+    fn write(&self, host: &[f64], v: &mut Self::Vector) -> Result<()> {
+        v.copy_from_slice(host);
+        Ok(())
+    }
+
     fn apply(&self, op: &Self::Operator, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
         op.apply(x, y);
         Ok(())
     }
 
-    fn precondition(&self, op: &Self::Operator, r: &Self::Vector, z: &mut Self::Vector) -> Result<()> {
-        z.par_iter_mut()
-            .zip(r.par_iter())
-            .zip(op.inv_diag.par_iter())
-            .for_each(|((z, r), d)| *z = r * d);
+    fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        op.apply(x, y);
         Ok(())
     }
 
@@ -76,6 +89,35 @@ impl Backend for CpuBackend {
 
     fn xpay(&self, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()> {
         y.par_iter_mut().zip(x.par_iter()).for_each(|(y, x)| *y = x + beta * *y);
+        Ok(())
+    }
+
+    fn axpby(&self, alpha: f64, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()> {
+        y.par_iter_mut()
+            .zip(x.par_iter())
+            .for_each(|(y, x)| *y = alpha * x + beta * *y);
+        Ok(())
+    }
+
+    fn scale(&self, alpha: f64, d: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        y.par_iter_mut()
+            .zip(x.par_iter().zip(d.par_iter()))
+            .for_each(|(y, (x, d))| *y = (alpha * d) * x);
+        Ok(())
+    }
+
+    fn copy(&self, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        y.par_iter_mut().zip(x.par_iter()).for_each(|(y, x)| *y = *x);
+        Ok(())
+    }
+
+    fn restrict(&self, t: &Transfer, fine: &Self::Vector, coarse: &mut Self::Vector) -> Result<()> {
+        multigrid::restrict(t, fine, coarse);
+        Ok(())
+    }
+
+    fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()> {
+        multigrid::prolong_add(t, coarse, fine);
         Ok(())
     }
 }

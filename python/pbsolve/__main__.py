@@ -54,6 +54,12 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
         choices=["pbsolve", "apbs"],
         help="grid node counts: 8k+1 (pbsolve) or values APBS accepts unchanged (apbs)",
     )
+    p.add_argument(
+        "--preconditioner",
+        default="multigrid",
+        choices=["multigrid", "jacobi"],
+        help="preconditioner of the CG solver (default: multigrid)",
+    )
 
 
 def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solver:
@@ -69,6 +75,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         surface=args.surface,
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
+        preconditioner=args.preconditioner,
     )
 
 
@@ -113,6 +120,8 @@ def _solvation(args: argparse.Namespace) -> int:
         "platform": res.platform,
         "device": solver.device_name,
         "cg_iterations": res.iterations,
+        "preconditioner": sorted(set(res.preconditioners)),
+        "multigrid_levels": res.levels,
         "dime": grid.dims,
         "fine_spacing": grid.fine_spacing,
     }

@@ -141,6 +141,7 @@ fn solve_level<B: Backend>(
     let opts = SolverOptions {
         tol: params.tol,
         max_iter: params.max_iter,
+        preconditioner: params.preconditioner,
     };
     solve_with_maps(be, grid, maps, &q, &g_ext, params.temperature, opts)
 }
@@ -207,7 +208,7 @@ pub fn polar_solvation<B: Backend>(
 mod tests {
     use super::*;
     use crate::cpu::CpuBackend;
-    use crate::params::SurfaceMethod;
+    use crate::params::{Preconditioner, SurfaceMethod};
 
     /// Born ion: ΔG = −(l_B0 z² / 2a)(1/ε_in − 1/ε_out) kT.
     fn born(params: &PbParams, a: f64) -> (f64, f64) {
@@ -238,5 +239,129 @@ mod tests {
                 100.0 * err
             );
         }
+    }
+
+    fn small_protein() -> Vec<Atom> {
+        // 40 atoms on a deterministic pseudo-random walk: crevices, mixed charges.
+        let mut atoms = Vec::new();
+        let mut p = [0.0f64; 3];
+        let mut s: u64 = 12345;
+        let mut next = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((s >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        };
+        for i in 0..40 {
+            for v in p.iter_mut() {
+                *v += 2.4 * next();
+            }
+            let radius = if i % 7 == 3 { 0.0 } else { 1.2 + 0.8 * (next() + 0.5) };
+            atoms.push(Atom {
+                position: p,
+                charge: 0.8 * next(),
+                radius,
+            });
+        }
+        atoms
+    }
+
+    fn solve(atoms: &[Atom], params: &PbParams, spacing: f64) -> PolarSolvation {
+        let spec = GridSpec::auto(atoms, spacing, 1.7, 12.0).unwrap();
+        polar_solvation(&CpuBackend::new(), atoms, params, &spec).unwrap()
+    }
+
+    #[test]
+    fn multigrid_and_jacobi_give_the_same_energies() {
+        let base = PbParams {
+            pdie: 2.0,
+            tol: 1e-10,
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
+        for (atoms, h) in [(small_protein(), 0.45), (small_protein(), 0.3)] {
+            let mg = solve(
+                &atoms,
+                &PbParams {
+                    preconditioner: Preconditioner::Multigrid,
+                    ..base.clone()
+                },
+                h,
+            );
+            let jac = solve(
+                &atoms,
+                &PbParams {
+                    preconditioner: Preconditioner::Jacobi,
+                    ..base.clone()
+                },
+                h,
+            );
+            for (a, b) in [
+                (mg.solvated_kt, jac.solvated_kt),
+                (mg.reference_kt, jac.reference_kt),
+                (mg.energy_kt, jac.energy_kt),
+            ] {
+                assert!((a - b).abs() < 1e-8 * b.abs(), "h={h}: multigrid {a} vs Jacobi {b}");
+            }
+            for s in mg.stats_solvated.iter().chain(&mg.stats_reference) {
+                assert_eq!(s.preconditioner, Preconditioner::Multigrid);
+                assert!(s.levels >= 2, "{s:?}");
+            }
+            for s in jac.stats_solvated.iter().chain(&jac.stats_reference) {
+                assert_eq!((s.preconditioner, s.levels), (Preconditioner::Jacobi, 1));
+            }
+        }
+    }
+
+    #[test]
+    fn multigrid_iterations_do_not_grow_with_refinement() {
+        let atoms = small_protein();
+        let mut mg_iters = Vec::new();
+        let mut jac_iters = Vec::new();
+        for h in [0.6, 0.4, 0.3, 0.2] {
+            for (pre, out) in [
+                (Preconditioner::Multigrid, &mut mg_iters),
+                (Preconditioner::Jacobi, &mut jac_iters),
+            ] {
+                let params = PbParams {
+                    preconditioner: pre,
+                    ..PbParams::default()
+                }
+                .with_salt(0.1, 2.0);
+                let r = solve(&atoms, &params, h);
+                out.push(r.stats_solvated.iter().map(|s| s.iterations).max().unwrap());
+            }
+        }
+        eprintln!("max CG iterations per level, h = 0.6/0.4/0.3/0.2 A: multigrid {mg_iters:?}, Jacobi {jac_iters:?}");
+        let (lo, hi) = (*mg_iters.iter().min().unwrap(), *mg_iters.iter().max().unwrap());
+        assert!(hi <= 20, "multigrid iterations {mg_iters:?}");
+        assert!(hi <= lo + 4, "multigrid iterations grow with refinement: {mg_iters:?}");
+        assert!(jac_iters[3] > 5 * hi, "Jacobi {jac_iters:?} vs multigrid {mg_iters:?}");
+    }
+
+    #[test]
+    fn multigrid_results_do_not_depend_on_the_thread_count() {
+        let atoms = small_protein();
+        let params = PbParams::default().with_salt(0.15, 2.0);
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| solve(&atoms, &params, 0.4))
+        };
+        let (a, b) = (run(1), run(4));
+        assert_eq!(a.energy_kt.to_bits(), b.energy_kt.to_bits());
+        assert_eq!(a.stats_solvated, b.stats_solvated);
+        assert_eq!(a.stats_reference, b.stats_reference);
+    }
+
+    #[test]
+    fn born_ion_with_jacobi_matches_multigrid() {
+        let mg = born(&PbParams::default(), 2.0).0;
+        let jac = born(
+            &PbParams {
+                preconditioner: Preconditioner::Jacobi,
+                ..PbParams::default()
+            },
+            2.0,
+        )
+        .0;
+        assert!((mg - jac).abs() < 1e-6 * jac.abs(), "{mg} vs {jac}");
     }
 }

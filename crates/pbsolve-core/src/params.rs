@@ -4,6 +4,36 @@
 
 use crate::error::{invalid, Result};
 
+/// Preconditioner of the conjugate-gradient solver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preconditioner {
+    /// Diagonal scaling. Iteration counts grow with grid refinement.
+    Jacobi,
+    /// Geometric multigrid V-cycle (Galerkin coarse operators, Chebyshev
+    /// smoothing, see [`crate::multigrid`]). Falls back to Jacobi for grids it
+    /// cannot coarsen far enough.
+    Multigrid,
+}
+
+impl Preconditioner {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "jacobi" => Ok(Self::Jacobi),
+            "multigrid" | "mg" => Ok(Self::Multigrid),
+            other => invalid(format!(
+                "unknown preconditioner '{other}' (expected 'multigrid' or 'jacobi')"
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Jacobi => "jacobi",
+            Self::Multigrid => "multigrid",
+        }
+    }
+}
+
 /// Dielectric boundary definition (APBS `srfm`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurfaceMethod {
@@ -103,6 +133,8 @@ pub struct PbParams {
     pub tol: f64,
     /// Maximum number of linear-solver iterations per grid level.
     pub max_iter: usize,
+    /// Preconditioner of the linear solver.
+    pub preconditioner: Preconditioner,
 }
 
 impl Default for PbParams {
@@ -118,6 +150,7 @@ impl Default for PbParams {
             bcfl: BoundaryCondition::Mdh,
             tol: 1.0e-8,
             max_iter: 20_000,
+            preconditioner: Preconditioner::Multigrid,
         }
     }
 }

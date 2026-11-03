@@ -11,6 +11,9 @@ solution methods and integrations can be added.
 
 * **One algorithm, many devices** — physics is written once in `pbsolve-core`;
   CPU (rayon) and CUDA backends implement a 7-kernel `Backend` trait.
+* **Multigrid solver** — CG preconditioned by a geometric multigrid V-cycle:
+  ~10–20 iterations independent of the grid spacing, 5–10× faster than
+  diagonal preconditioning on protein grids (`docs/VALIDATION.md`).
 * **Automatic GPU** — the CUDA build loads the driver and NVRTC at runtime;
   without a GPU it transparently runs on the CPU (`platform="auto"`).
 * **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for
@@ -137,8 +140,8 @@ tests of the readers and the structure preparation against reference tools.
 ## Status
 
 v0.0.1 is an early preview; the API may still change. Validation numbers and
-the GPU status are in `docs/VALIDATION.md`, design and roadmap in
-`docs/ARCHITECTURE.md`, packaging in `docs/PACKAGING.md`.
+the GPU status are in `docs/VALIDATION.md`, the design in `docs/ARCHITECTURE.md`,
+the development plan in `docs/ROADMAP.md`, packaging in `docs/PACKAGING.md`.
 
 ## Layout
 

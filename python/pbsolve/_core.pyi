@@ -49,6 +49,8 @@ class PolarResult:
     reference_kt: float
     iterations: list[int]
     residuals: list[float]
+    preconditioners: list[str]  # per linear solve: "multigrid" or "jacobi"
+    levels: list[int]  # multigrid levels per linear solve (1 for Jacobi)
     grid: GridSpec
     platform: str
 
@@ -73,6 +75,7 @@ class Solver:
         tol: float = 1e-8,
         max_iter: int = 20000,
         dime_policy: str = "pbsolve",
+        preconditioner: str = "multigrid",
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]: ...

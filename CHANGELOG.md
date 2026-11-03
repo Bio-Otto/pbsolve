@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Geometric multigrid preconditioner for CG (new module `multigrid` in
+  `pbsolve-core`; CPU and CUDA): per-axis vertex coarsening for any grid size,
+  trilinear transfers, Galerkin coarse operators, Chebyshev smoothing, banded
+  Cholesky on the coarsest level. It is the new default; CG iterations drop
+  from 300–700 to ~10–20 and stay constant under grid refinement.
+- `Solver(preconditioner="multigrid" | "jacobi")`, `--preconditioner` on the
+  CLI, `PolarResult.preconditioners` and `PolarResult.levels`; the JSON output
+  of `pbsolve solvation` reports both.
+- `cargo run --release -p pbsolve-core --example multigrid`: Jacobi versus
+  multigrid study (iterations, setup and solve time).
+
+### Changed
+
+- `Backend` trait: `precondition` replaced by `scale`; new `prepare_coarse`,
+  `apply_coarse`, `restrict`, `prolong_add`, `axpby`, `copy`, `read`, `write`.
+  `SolverOptions` and `PbParams` gain `preconditioner`; `SolveStats` gains
+  `preconditioner` and `levels`.
+- Energies change only within the solver tolerance (≤ 3e-8 relative on the
+  tested systems); `preconditioner="jacobi"` reproduces v0.0.1 bit for bit.
+
 ## 0.0.1 — 2026-11-03 (first preview)
 
 ### Solver

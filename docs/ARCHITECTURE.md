@@ -51,15 +51,28 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
 * **Energy:** ΔG_polar = ½ Σ q_i [u_solv(r_i) − u_ref(r_i)], with the reference
   state (ε = pdie everywhere, no ions) solved on the *same* grids so the grid
   self-energy cancels exactly.
-* **Linear solver:** Jacobi-preconditioned CG, written once against `Backend`.
+* **Linear solver:** preconditioned CG, written once against `Backend`.
+  Default preconditioner: one geometric multigrid V-cycle (`multigrid.rs`):
+  per-axis vertex coarsening `n → n/2 + 1` (any grid size; axes with < 5 nodes
+  are kept), trilinear prolongation `P` and restriction `Pᵀ`, Galerkin coarse
+  operators `PᵀAP` (27-point, exactly symmetric), Chebyshev smoothing of
+  degree 2 on `[λmax/10, λmax]` of `D⁻¹A` (Gershgorin bound), banded Cholesky
+  on the coarsest level (≤ 1000 unknowns). The V-cycle is a fixed SPD
+  operator, so plain CG theory applies; CG iterations stay at ~10–20
+  independent of the spacing. `preconditioner="jacobi"` keeps the v0.0.1
+  solver (bit-identical results).
 
 ## The Backend contract
 
-A backend provides: `prepare` (upload coefficients), `upload/zeros/download`,
-`apply` (stencil), `precondition` (Jacobi), `dot` (deterministic), `axpy`,
-`xpay`. That is the entire surface a new accelerator (HIP, Metal, SYCL) must
-implement. The CUDA stencil is written in the same operation order as the CPU
-one and compiled with `--fmad=false`, so only the reduction order differs.
+A backend provides: `prepare`/`prepare_coarse` (upload the 7-point and
+27-point operators), `upload/zeros/download/read/write`, `apply` and
+`apply_coarse` (stencils), `restrict` and `prolong_add` (grid transfers),
+`dot` (deterministic), and the element-wise updates `axpy`, `xpay`, `axpby`,
+`scale` (diagonal scaling), `copy`. That is the entire surface a new
+accelerator (HIP, Metal, SYCL) must implement; the multigrid setup (Galerkin
+products, smoother bounds, coarsest factorisation) runs once on the host and
+is shared. The CUDA kernels are written in the same operation order as the
+CPU ones and compiled with `--fmad=false`, so only the reduction order differs.
 
 ## CUDA runtime model
 
@@ -72,13 +85,11 @@ one and compiled with `--fmad=false`, so only the reduction order differs.
 * The Python package preloads `libnvrtc.so.*` from the environment so the
   conda-provided NVRTC is always found.
 
-## Roadmap (in priority order)
+## Roadmap
 
-1. Geometric multigrid preconditioner (grids are already 8k+1) — CG iteration
-   count currently grows with grid refinement.
-2. APBS parity report on a larger public protein/ligand benchmark set
-   (`docs/VALIDATION.md`; tooling in `pbsolve.apbs`, first complex done).
-3. Exact APBS `smol`/`spl2` surface definitions for drop-in comparisons.
-4. Nonlinear PBE (Newton–CG) and forces.
-5. Batched multi-frame GPU solves (several small grids per kernel launch).
-6. HIP backend for AMD GPUs.
+See `docs/ROADMAP.md` for the plan with literature and acceptance criteria.
+In short: multigrid-preconditioned CG and batched GPU solves (v0.1),
+second-order interface discretisation and error estimates (v0.2), nonlinear
+PB, forces and smooth dielectrics (v0.3), end-point free-energy features
+(v0.4), adjoint gradients for ML workflows (v0.5), then further solution
+methods (boundary elements, domain decomposition) behind the same API.

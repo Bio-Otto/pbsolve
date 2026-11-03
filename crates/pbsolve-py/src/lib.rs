@@ -11,7 +11,7 @@ use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_p
 use pbsolve_core::{
     apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_solvation, solve_focused, solve_with_maps,
     Atom, Backend, BoundaryCondition, CoefficientMaps, CpuBackend, DimePolicy, Grid, GridSpec, IonSpecies, Medium,
-    PbError, PbParams, PolarSolvation, SolveStats, SolverOptions, SurfaceMethod,
+    PbError, PbParams, PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -39,7 +39,7 @@ fn to_py(e: PbError) -> PyErr {
 enum Engine {
     Cpu(CpuBackend),
     #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
-    Cuda(pbsolve_cuda::CudaBackend),
+    Cuda(Box<pbsolve_cuda::CudaBackend>),
 }
 
 macro_rules! dispatch {
@@ -47,7 +47,10 @@ macro_rules! dispatch {
         match $engine {
             Engine::Cpu($be) => $body,
             #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
-            Engine::Cuda($be) => $body,
+            Engine::Cuda($be) => {
+                let $be: &pbsolve_cuda::CudaBackend = $be;
+                $body
+            }
         }
     };
 }
@@ -72,7 +75,9 @@ impl Engine {
 
     #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
     fn cuda(device: usize) -> PyResult<Self> {
-        pbsolve_cuda::CudaBackend::new(device).map(Engine::Cuda).map_err(to_py)
+        pbsolve_cuda::CudaBackend::new(device)
+            .map(|b| Engine::Cuda(Box::new(b)))
+            .map_err(to_py)
     }
 
     #[cfg(not(any(feature = "cuda-12", feature = "cuda-13")))]
@@ -305,6 +310,10 @@ struct PyPolarResult {
     reference_kt: f64,
     iterations: Vec<usize>,
     residuals: Vec<f64>,
+    /// Preconditioner used by each linear solve ("multigrid" or "jacobi").
+    preconditioners: Vec<&'static str>,
+    /// Multigrid levels of each linear solve (1 for Jacobi).
+    levels: Vec<usize>,
     grid: PyGridSpec,
     platform: String,
 }
@@ -328,7 +337,9 @@ impl PyPolarResult {
             solvated_kt: r.solvated_kt,
             reference_kt: r.reference_kt,
             iterations: stats.clone().map(|s| s.iterations).collect(),
-            residuals: stats.map(|s| s.relative_residual).collect(),
+            residuals: stats.clone().map(|s| s.relative_residual).collect(),
+            preconditioners: stats.clone().map(|s| s.preconditioner.as_str()).collect(),
+            levels: stats.map(|s| s.levels).collect(),
             grid: PyGridSpec { inner: r.grid },
             platform: platform.to_string(),
         }
@@ -372,7 +383,8 @@ impl PySolver {
         pdie = 1.0, sdie = 78.54, temperature = 298.15,
         ionic_strength = 0.0, ion_radius = 2.0, ions = None,
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
-        cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve"
+        cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
+        preconditioner = "multigrid"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -394,6 +406,7 @@ impl PySolver {
         tol: f64,
         max_iter: usize,
         dime_policy: &str,
+        preconditioner: &str,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -405,6 +418,7 @@ impl PySolver {
             bcfl: BoundaryCondition::parse(bcfl).map_err(to_py)?,
             tol,
             max_iter,
+            preconditioner: Preconditioner::parse(preconditioner).map_err(to_py)?,
             ..PbParams::default()
         };
         params = match ions {
@@ -452,6 +466,7 @@ impl PySolver {
         d.set_item("bcfl", p.bcfl.as_str())?;
         d.set_item("tol", p.tol)?;
         d.set_item("max_iter", p.max_iter)?;
+        d.set_item("preconditioner", p.preconditioner.as_str())?;
         d.set_item("grid_spacing", self.spacing)?;
         d.set_item("cfac", self.cfac)?;
         d.set_item("fadd", self.fadd)?;
@@ -663,6 +678,7 @@ impl PySolver {
         let opts = SolverOptions {
             tol: self.params.tol,
             max_iter: self.params.max_iter,
+            preconditioner: self.params.preconditioner,
         };
         let temperature = self.params.temperature;
         let (u, stats) = py

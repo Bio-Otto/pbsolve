@@ -23,3 +23,18 @@ def test_cuda_info_is_consistent():
     assert info["available"] == ("CUDA" in pbsolve.available_platforms())
     if not info["available"]:
         assert info["reason"]
+
+
+@needs_cuda
+@pytest.mark.parametrize("pre", ["multigrid", "jacobi"])
+def test_cuda_matches_cpu_on_a_peptide(pre):
+    """Multilevel hierarchy (Galerkin operators, transfers, coarsest solve) on the GPU."""
+    coords, charges, radii = pbsolve.read_pqr("tests/data/1ycr_amber_opt_pdb2pqr.pqr")
+    sel = slice(1500, None)
+    kw = dict(grid_spacing=0.45, ionic_strength=0.15, pdie=2.0, preconditioner=pre, fadd=12.0)
+    cpu = pbsolve.Solver(platform="CPU", **kw).polar_solvation(coords[sel], charges[sel], radii[sel])
+    gpu = pbsolve.Solver(platform="CUDA", **kw).polar_solvation(coords[sel], charges[sel], radii[sel])
+    assert gpu.platform == "CUDA"
+    assert gpu.energy == pytest.approx(cpu.energy, rel=1e-10)
+    assert gpu.levels == cpu.levels and gpu.preconditioners == cpu.preconditioners
+    assert all(abs(a - b) <= 1 for a, b in zip(gpu.iterations, cpu.iterations))

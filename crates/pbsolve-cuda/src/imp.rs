@@ -1,5 +1,6 @@
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+use pbsolve_core::multigrid::{Stencil27, Transfer};
 use pbsolve_core::operator::StencilOperator;
 use pbsolve_core::{Backend, PbError, Result};
 use std::sync::{Arc, Mutex};
@@ -48,10 +49,14 @@ pub struct CudaBackend {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     f_apply: CudaFunction,
-    f_jacobi: CudaFunction,
+    f_apply27: CudaFunction,
+    f_scale: CudaFunction,
     f_axpy: CudaFunction,
     f_xpay: CudaFunction,
+    f_axpby: CudaFunction,
     f_dot: CudaFunction,
+    f_restrict: CudaFunction,
+    f_prolong: CudaFunction,
     partials: Mutex<CudaSlice<f64>>,
     name: String,
 }
@@ -64,7 +69,13 @@ pub struct CudaOperator {
     eps_y: CudaSlice<f64>,
     eps_z: CudaSlice<f64>,
     kvol: CudaSlice<f64>,
-    inv_diag: CudaSlice<f64>,
+}
+
+/// Device copy of a multigrid coarse-level (27-point) operator.
+pub struct CudaCoarse {
+    dims: [i32; 3],
+    n: usize,
+    coef: CudaSlice<f64>,
 }
 
 impl CudaBackend {
@@ -91,10 +102,14 @@ impl CudaBackend {
             .map_err(cuda_err("allocation"))?;
         Ok(Self {
             f_apply: load("pb_apply")?,
-            f_jacobi: load("pb_jacobi")?,
+            f_apply27: load("pb_apply27")?,
+            f_scale: load("pb_scale")?,
             f_axpy: load("pb_axpy")?,
             f_xpay: load("pb_xpay")?,
+            f_axpby: load("pb_axpby")?,
             f_dot: load("pb_dot_partial")?,
+            f_restrict: load("pb_restrict")?,
+            f_prolong: load("pb_prolong_add")?,
             partials: Mutex::new(partials),
             name: format!("{dev} (cc {major}.{minor}, device {ordinal})"),
             _ctx: ctx,
@@ -110,11 +125,26 @@ impl CudaBackend {
             shared_mem_bytes: 0,
         }
     }
+
+    fn transfer_args(t: &Transfer) -> [i32; 9] {
+        [
+            t.fine[0] as i32,
+            t.fine[1] as i32,
+            t.fine[2] as i32,
+            t.coarse[0] as i32,
+            t.coarse[1] as i32,
+            t.coarse[2] as i32,
+            t.coarsen[0] as i32,
+            t.coarsen[1] as i32,
+            t.coarsen[2] as i32,
+        ]
+    }
 }
 
 impl Backend for CudaBackend {
     type Vector = CudaSlice<f64>;
     type Operator = CudaOperator;
+    type Coarse = CudaCoarse;
 
     fn platform(&self) -> &'static str {
         "CUDA"
@@ -134,7 +164,14 @@ impl Backend for CudaBackend {
             eps_y: up(&op.eps_y)?,
             eps_z: up(&op.eps_z)?,
             kvol: up(&op.kvol)?,
-            inv_diag: up(&op.inv_diag)?,
+        })
+    }
+
+    fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse> {
+        Ok(CudaCoarse {
+            dims: op.dims.map(|d| d as i32),
+            n: op.len(),
+            coef: self.stream.clone_htod(&op.coef).map_err(cuda_err("upload"))?,
         })
     }
 
@@ -150,6 +187,15 @@ impl Backend for CudaBackend {
         let out = self.stream.clone_dtoh(v).map_err(cuda_err("download"))?;
         self.stream.synchronize().map_err(cuda_err("synchronize"))?;
         Ok(out)
+    }
+
+    fn read(&self, v: &Self::Vector, host: &mut [f64]) -> Result<()> {
+        self.stream.memcpy_dtoh(v, host).map_err(cuda_err("download"))?;
+        self.stream.synchronize().map_err(cuda_err("synchronize"))
+    }
+
+    fn write(&self, host: &[f64], v: &mut Self::Vector) -> Result<()> {
+        self.stream.memcpy_htod(host, v).map_err(cuda_err("upload"))
     }
 
     fn apply(&self, op: &Self::Operator, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
@@ -168,11 +214,56 @@ impl Backend for CudaBackend {
         Ok(())
     }
 
-    fn precondition(&self, op: &Self::Operator, r: &Self::Vector, z: &mut Self::Vector) -> Result<()> {
-        let n = op.n as i64;
-        let mut b = self.stream.launch_builder(&self.f_jacobi);
-        b.arg(&n).arg(&op.inv_diag).arg(r).arg(z);
-        unsafe { b.launch(Self::grid_for(op.n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_jacobi"))?;
+    fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        let [nx, ny, nz] = op.dims;
+        let mut b = self.stream.launch_builder(&self.f_apply27);
+        b.arg(&nx).arg(&ny).arg(&nz).arg(&op.coef).arg(x).arg(y);
+        // SAFETY: argument list matches the kernel signature; coef has 27 n values.
+        unsafe { b.launch(Self::grid_for(op.n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_apply27"))?;
+        Ok(())
+    }
+
+    fn scale(&self, alpha: f64, d: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        let n = x.len() as i64;
+        let mut b = self.stream.launch_builder(&self.f_scale);
+        b.arg(&n).arg(&alpha).arg(d).arg(x).arg(y);
+        unsafe { b.launch(Self::grid_for(x.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_scale"))?;
+        Ok(())
+    }
+
+    fn axpby(&self, alpha: f64, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()> {
+        let n = x.len() as i64;
+        let mut b = self.stream.launch_builder(&self.f_axpby);
+        b.arg(&n).arg(&alpha).arg(x).arg(&beta).arg(y);
+        unsafe { b.launch(Self::grid_for(x.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_axpby"))?;
+        Ok(())
+    }
+
+    fn copy(&self, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        self.stream.memcpy_dtod(x, y).map_err(cuda_err("copy"))
+    }
+
+    fn restrict(&self, t: &Transfer, fine: &Self::Vector, coarse: &mut Self::Vector) -> Result<()> {
+        let a = Self::transfer_args(t);
+        let mut b = self.stream.launch_builder(&self.f_restrict);
+        for v in &a {
+            b.arg(v);
+        }
+        b.arg(fine).arg(coarse);
+        let n = t.coarse.iter().product();
+        unsafe { b.launch(Self::grid_for(n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_restrict"))?;
+        Ok(())
+    }
+
+    fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()> {
+        let a = Self::transfer_args(t);
+        let mut b = self.stream.launch_builder(&self.f_prolong);
+        for v in &a {
+            b.arg(v);
+        }
+        b.arg(coarse).arg(fine);
+        let n = t.fine.iter().product();
+        unsafe { b.launch(Self::grid_for(n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_prolong_add"))?;
         Ok(())
     }
 

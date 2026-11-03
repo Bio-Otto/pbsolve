@@ -13,7 +13,7 @@ compile_error!("enable only one of the `cuda-12` / `cuda-13` features");
 #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
 mod imp;
 #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
-pub use imp::{device_count, is_available, unavailable_reason, CudaBackend, CudaOperator};
+pub use imp::{device_count, is_available, unavailable_reason, CudaBackend, CudaCoarse, CudaOperator};
 
 /// True if this build contains the CUDA backend.
 pub const fn compiled_with_cuda() -> bool {

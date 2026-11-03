@@ -40,16 +40,17 @@ should update the status table below.
 5. **MM-PBSA benchmark.** Correlation of ΔG_bind with experiment on a public
    protein–ligand set, compared with the same protocol using APBS.
 
-## Status (v0.0.1)
+## Status (v0.0.1 + unreleased changes)
 
 | Check | Result |
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
 | Operator symmetry, charge conservation, SES crevice, SASA, APBS reference-sphere count, marking = brute force | pass (unit tests) |
+| Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
-| CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. **Open issue:** by default cudarc loaded the system NVRTC 13.3 (`/usr/local/cuda`) instead of the preloaded conda one, whose PTX the 13.2 driver rejects (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`); verified with `LD_LIBRARY_PATH` pointing `libnvrtc.so` at the conda library. CUDA 12 not run |
+| CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). **Open issue:** by default cudarc loaded the system NVRTC 13.3 (`/usr/local/cuda`) instead of the preloaded conda one, whose PTX the 13.2 driver rejects (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`); verified with `LD_LIBRARY_PATH` pointing `libnvrtc.so` at the conda library. CUDA 12 not run |
 | MM-PBSA benchmark | **not yet run** |
 
 ### APBS parity: 1YCR (h ≈ 0.46/0.46/0.38 Å, dime 129³, 2 focusing levels, `cfac 1.7`, `fadd 20`)
@@ -83,6 +84,67 @@ pdb2pqr --ff=AMBER --keep-chain --whitespace 1YCR.pdb 1ycr.pqr
 pbsolve apbs compare 1ycr.pqr --spacing 0.5 --ionic-strength 0.15 --bcfl mdh --ligand-chain B
 pbsolve apbs compare 1ycr.pqr --spacing 0.5 --pdie 2 --bcfl sdh --ligand-chain B
 ```
+
+## Linear solver: multigrid versus Jacobi
+
+The default preconditioner is a geometric multigrid V-cycle (see
+`docs/ARCHITECTURE.md`); `preconditioner="jacobi"` keeps the v0.0.1 solver and
+reproduces its energies bit for bit (checked on all benchmark cases below).
+Both solve the same discrete system to ‖r‖/‖b‖ < 1e-8, so energies differ
+only within that tolerance.
+
+Component tests (`crates/pbsolve-core/src/multigrid.rs`): restriction is the
+exact transpose of prolongation (odd, even and non-coarsened axes);
+prolongation reproduces linear functions; the Galerkin operator equals
+`Pᵀ(A(Px))` to 1e-12 on two levels of a sharp-boundary, salt-containing
+operator; it is bitwise symmetric and positive definite, and preserves
+constants of the Laplacian; the banded Cholesky solves 7- and 27-point
+operators to 1e-11; the V-cycle is a symmetric positive definite operator
+(1e-11) that reduces the residual by 0.23 per cycle as a stationary iteration.
+Solver tests (`pb.rs`, `tests/test_multigrid.py`): multigrid and Jacobi
+energies agree to ≤ 1e-8 relative (tol 1e-10), results are bitwise identical
+with 1 and 4 threads, and the same preconditioner is used for map injection.
+
+**Iterations and time, synthetic 800-atom globule** (`cargo run --release -p
+pbsolve-core --example multigrid`; ε 2/78.54, 0.15 M, one solve, 18 threads):
+
+| Grid | Levels | Jacobi CG iter. | Jacobi s | Multigrid CG iter. | Setup s | Multigrid s | ‖Δu‖/‖u‖ |
+|---|---|---|---|---|---|---|---|
+| 65³ (h 0.69 Å) | 4 | 286 | 0.25 | 18 | 0.01 | 0.16 | 6.9e-9 |
+| 97³ (h 0.46 Å) | 5 | 420 | 2.32 | 18 | 0.03 | 0.74 | 1.3e-8 |
+| 129³ (h 0.34 Å) | 5 | 553 | 10.26 | 18 | 0.07 | 1.97 | 2.0e-8 |
+| 161³ (h 0.28 Å) | 5 | 688 | 24.83 | 18 | 0.13 | 3.88 | 2.4e-8 |
+
+Smoother choice: Chebyshev degree 1–4 with interval ratio 3–15 was scanned on
+this case; degree 1 was ~10 % faster on the CPU but needed ~40 % more CG
+iterations (26–27), degree 3–4 saved iterations but not time. Default: degree
+2 on [λmax/10, λmax].
+
+**Full ΔG_polar calculation** (solvated + reference, 2 focusing levels,
+including surface maps; 1YCR complex, 1670 atoms, 0.15 M; Born ion a = 2 Å).
+GPU: RTX 2080 SUPER, shared with another job at ~95 % utilisation during the
+measurement, times include the per-solver NVRTC compilation:
+
+| System | h (Å) | Fine dims | CG iter. Jacobi | CG iter. multigrid | CPU Jacobi s | CPU MG s | CPU speed-up | GPU Jacobi s | GPU MG s | GPU speed-up | ΔE MG vs Jacobi | ΔE GPU vs CPU (MG) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Born | 0.5 | 33³ | 80, 80 | 8, 8 | 0.07 | 0.05 | 1.6× | 1.03 | 0.14 | 7.6× | 5.3e-9 | 1.5e-15 |
+| Born | 0.333 | 57³ | 163, 137 | 9, 8 | 0.24 | 0.12 | 2.0× | 2.38 | 0.24 | 9.9× | 1.4e-8 | 0 |
+| Born | 0.25 | 65³ | 170, 155 | 10, 8 | 0.33 | 0.20 | 1.6× | 2.47 | 0.28 | 8.8× | 5.6e-9 | 6.5e-15 |
+| Born | 0.2 | 81³ | 213, 187 | 9, 8 | 0.85 | 0.42 | 2.0× | 3.14 | 0.31 | 10.0× | 1.8e-8 | 6.5e-15 |
+| 1YCR | 0.5 | 121×121×105 | 324–426 | 8–12 | 19.13 | 3.53 | 5.4× | 13.43 | 1.33 | 10.1× | 2.2e-8 | 1.4e-14 |
+| 1YCR | 0.35 | 169×177×145 | 446–593 | 8–13 | 79.82 | 10.35 | 7.7× | 22.45 | 3.31 | 6.8× | 3.0e-8 | 2.8e-14 |
+
+Iterations are per linear solve (solvated coarse, solvated fine, reference
+coarse, reference fine). After surface construction, the remaining CPU time at
+0.35 Å is dominated by the multigrid cycles themselves (map construction:
+0.78 s); fused kernels are the next optimisation.
+
+**APBS parity with multigrid:** both `pbsolve apbs compare` runs on 1YCR
+(table above) were repeated with the multigrid default: all maps identical,
+ΔG_polar unchanged within 1e-4 kcal/mol (sdh receptor −598.4163 instead of
+−598.4162), ΔΔG_bind 422.8939 / 206.8766 kcal/mol as before; per-state
+energies agree with APBS to ≤ 1.1e-9 (solvated) and ≤ 2.2e-8 (reference) in
+APBS units.
 
 ## Input readers (`pbsolve-io`)
 
