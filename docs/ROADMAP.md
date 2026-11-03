@@ -104,6 +104,18 @@ issue in `docs/VALIDATION.md`). Run the CUDA 12 build.
 either as one batched kernel launch over small grids or concurrently in streams.
 *Evidence:* frames per second on a public complex for 1, 8 and 64 frames per
 batch; identical energies to single-frame solves.
+*Status: done (unreleased).*
+* Concurrent workers (`batch.rs`), each with its own backend, its own CUDA
+  stream and a private share of the CPU threads.
+* `polar_solvation_many`, `pbsa_solvation_frames` and `pbsolve mmpbsa
+  --workers`; per-stage timings in every result.
+* MM-PBSA on 1YCR: 0.27 → 0.60 frames/s on the GPU (2.2×) and 0.093 → 0.130 on
+  the CPU (1.4×). Results are bit-identical for every batch size and worker
+  count.
+* At 3 CUDA workers the GPU kernels are the limit, so the next gains come from
+  faster kernels (fused updates, 4.4).
+* One batched kernel launch over many small grids was not needed for this
+  workload. It remains an option for small ligand-only grids.
 
 **4.4 Mixed precision.** FP32 multigrid cycles inside an FP64 outer CG or
 iterative refinement, the arrangement analysed for multigrid by McCormick,

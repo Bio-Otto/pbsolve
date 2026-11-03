@@ -4,6 +4,7 @@
 
 use numpy::ndarray::ArrayView2;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
+use pbsolve_core::batch::{polar_solvation_batch as core_batch, Job};
 use pbsolve_core::charge::spread_charges;
 use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
 use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
@@ -324,6 +325,9 @@ struct PyPolarResult {
     preconditioners: Vec<&'static str>,
     /// Multigrid levels of each linear solve (1 for Jacobi).
     levels: Vec<usize>,
+    /// Wall time per stage in seconds: maps, boundary, assembly, setup,
+    /// solve, energy and total.
+    timings: std::collections::BTreeMap<&'static str, f64>,
     grid: PyGridSpec,
     platform: String,
 }
@@ -338,6 +342,20 @@ impl PyPolarResult {
     }
 }
 
+fn timings_map(t: &pbsolve_core::Timings) -> std::collections::BTreeMap<&'static str, f64> {
+    [
+        ("maps", t.maps),
+        ("boundary", t.boundary),
+        ("assembly", t.assembly),
+        ("setup", t.setup),
+        ("solve", t.solve),
+        ("energy", t.energy),
+        ("total", t.total()),
+    ]
+    .into_iter()
+    .collect()
+}
+
 impl PyPolarResult {
     fn from_core(r: PolarSolvation, platform: &str) -> Self {
         let stats = r.stats_solvated.iter().chain(&r.stats_reference);
@@ -350,6 +368,7 @@ impl PyPolarResult {
             residuals: stats.clone().map(|s| s.relative_residual).collect(),
             preconditioners: stats.clone().map(|s| s.preconditioner.as_str()).collect(),
             levels: stats.map(|s| s.levels).collect(),
+            timings: timings_map(&r.timings),
             grid: PyGridSpec { inner: r.grid },
             platform: platform.to_string(),
         }
@@ -365,6 +384,9 @@ impl PyPolarResult {
 #[pyclass(name = "Solver", module = "pbsolve")]
 struct PySolver {
     engine: Engine,
+    /// Extra backends for concurrent batch workers (created on demand).
+    pool: std::sync::Mutex<Vec<Engine>>,
+    device: usize,
     params: PbParams,
     spacing: f64,
     cfac: f64,
@@ -372,7 +394,107 @@ struct PySolver {
     dime_policy: DimePolicy,
 }
 
+/// Default number of concurrent batch workers: enough to overlap host work
+/// with solver work (measured in docs/VALIDATION.md, *Batched solves*).
+fn default_workers(platform: &str) -> usize {
+    match platform {
+        "CUDA" => 3,
+        _ => 2,
+    }
+}
+
+fn job_error(e: PbError, index: usize) -> PbError {
+    match e {
+        PbError::InvalidInput(m) => PbError::InvalidInput(format!("system {index}: {m}")),
+        PbError::Backend(m) => PbError::Backend(format!("system {index}: {m}")),
+        other => other,
+    }
+}
+
 impl PySolver {
+    /// Runs the calculations on up to `workers` concurrent backends; results
+    /// in input order. Fails with the first failing system's error.
+    fn run_batch(
+        &self,
+        systems: &[Vec<Atom>],
+        specs: &[GridSpec],
+        workers: usize,
+    ) -> Result<Vec<PolarSolvation>, PbError> {
+        let workers = workers.clamp(1, systems.len().max(1));
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        while pool.len() + 1 < workers {
+            let extra = Engine::create(self.engine.platform(), self.device)
+                .map_err(|e| PbError::Backend(format!("cannot create batch worker {}: {e}", pool.len() + 1)))?;
+            pool.push(extra);
+        }
+        let jobs: Vec<Job> = systems
+            .iter()
+            .zip(specs)
+            .map(|(atoms, spec)| Job { atoms, spec })
+            .collect();
+        let engines: Vec<&Engine> = std::iter::once(&self.engine).chain(pool.iter()).take(workers).collect();
+        let results = match &self.engine {
+            Engine::Cpu(_) => {
+                let bes: Vec<&CpuBackend> = engines
+                    .iter()
+                    .map(|e| match e {
+                        Engine::Cpu(b) => b,
+                        #[allow(unreachable_patterns)]
+                        _ => unreachable!("batch workers share the main platform"),
+                    })
+                    .collect();
+                core_batch(&bes, &self.params, &jobs)
+            }
+            #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
+            Engine::Cuda(_) => {
+                let bes: Vec<&pbsolve_cuda::CudaBackend> = engines
+                    .iter()
+                    .map(|e| match e {
+                        Engine::Cuda(b) => &**b,
+                        _ => unreachable!("batch workers share the main platform"),
+                    })
+                    .collect();
+                core_batch(&bes, &self.params, &jobs)
+            }
+        };
+        results
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| r.map_err(|e| job_error(e, i)))
+            .collect()
+    }
+
+    /// Grid of every system: one shared `GridSpec`, one per system, or automatic.
+    fn specs_for(&self, systems: &[Vec<Atom>], grid: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<GridSpec>> {
+        match grid {
+            None => systems.iter().map(|a| self.auto_grid(a).map_err(to_py)).collect(),
+            Some(g) => {
+                if let Ok(one) = g.extract::<PyGridSpec>() {
+                    return Ok(vec![one.inner; systems.len()]);
+                }
+                let many: Vec<PyGridSpec> = g.extract().map_err(|_| {
+                    PyValueError::new_err("grid must be a GridSpec, a sequence of GridSpec (one per system) or None")
+                })?;
+                if many.len() != systems.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "{} grids given for {} systems",
+                        many.len(),
+                        systems.len()
+                    )));
+                }
+                Ok(many.into_iter().map(|g| g.inner).collect())
+            }
+        }
+    }
+
+    fn workers_for(&self, workers: Option<usize>) -> PyResult<usize> {
+        match workers {
+            Some(0) => Err(PyValueError::new_err("workers must be at least 1")),
+            Some(w) => Ok(w),
+            None => Ok(default_workers(self.engine.platform())),
+        }
+    }
+
     fn auto_grid(&self, atoms: &[Atom]) -> Result<GridSpec, PbError> {
         GridSpec::auto_with(atoms, self.spacing, self.cfac, self.fadd, self.dime_policy)
     }
@@ -451,6 +573,8 @@ impl PySolver {
         }
         Ok(Self {
             engine: Engine::create(platform, device)?,
+            pool: std::sync::Mutex::new(Vec::new()),
+            device,
             params,
             spacing: grid_spacing,
             cfac,
@@ -529,15 +653,18 @@ impl PySolver {
     }
 
     /// ΔG_polar (kcal/mol) for every frame of an (F, N, 3) trajectory.
-    /// With `grid=None` a grid is built per frame.
-    #[pyo3(signature = (frames, charges, radii, grid = None))]
+    /// With `grid=None` a grid is built per frame. `workers` frames are solved
+    /// concurrently (default: 2 on the CPU, 3 on CUDA); the energies do not
+    /// depend on it.
+    #[pyo3(signature = (frames, charges, radii, grid = None, workers = None))]
     fn polar_solvation_batch<'py>(
         &self,
         py: Python<'py>,
         frames: PyReadonlyArray3<'py, f64>,
         charges: PyReadonlyArray1<'py, f64>,
         radii: PyReadonlyArray1<'py, f64>,
-        grid: Option<PyGridSpec>,
+        grid: Option<Bound<'py, PyAny>>,
+        workers: Option<usize>,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let f = frames.as_array();
         if f.shape()[2] != 3 {
@@ -550,22 +677,41 @@ impl PySolver {
             let xyz = coords_from(frame)?;
             systems.push(atoms_from_arrays(&xyz, &q, &r).map_err(to_py)?);
         }
-        let fixed = grid.map(|g| g.inner);
-        let out = py
-            .detach(|| -> Result<Vec<f64>, PbError> {
-                systems
-                    .iter()
-                    .map(|atoms| {
-                        let spec = match &fixed {
-                            Some(g) => g.clone(),
-                            None => self.auto_grid(atoms)?,
-                        };
-                        Ok(self.engine.polar(atoms, &self.params, &spec)?.energy_kcal)
-                    })
-                    .collect()
-            })
-            .map_err(to_py)?;
-        Ok(PyArray1::from_vec(py, out))
+        let specs = self.specs_for(&systems, grid.as_ref())?;
+        let workers = self.workers_for(workers)?;
+        let out = py.detach(|| self.run_batch(&systems, &specs, workers)).map_err(to_py)?;
+        Ok(PyArray1::from_vec(py, out.iter().map(|r| r.energy_kcal).collect()))
+    }
+
+    /// ΔG_polar for several systems, `workers` of them solved concurrently.
+    ///
+    /// `systems` is a sequence of `(coords, charges, radii)`; `grid` is None
+    /// (automatic grid per system), one GridSpec for all, or one per system.
+    /// Results are in input order and identical, bit for bit, to calling
+    /// `polar_solvation` on each system in turn.
+    #[pyo3(signature = (systems, grid = None, workers = None))]
+    #[allow(clippy::type_complexity)]
+    fn polar_solvation_many<'py>(
+        &self,
+        py: Python<'py>,
+        systems: Vec<(
+            PyReadonlyArray2<'py, f64>,
+            PyReadonlyArray1<'py, f64>,
+            PyReadonlyArray1<'py, f64>,
+        )>,
+        grid: Option<Bound<'py, PyAny>>,
+        workers: Option<usize>,
+    ) -> PyResult<Vec<PyPolarResult>> {
+        let atoms: Vec<Vec<Atom>> = systems
+            .iter()
+            .enumerate()
+            .map(|(i, (c, q, r))| atoms_from(c, q, r).map_err(|e| PyValueError::new_err(format!("system {i}: {e}"))))
+            .collect::<PyResult<_>>()?;
+        let specs = self.specs_for(&atoms, grid.as_ref())?;
+        let workers = self.workers_for(workers)?;
+        let out = py.detach(|| self.run_batch(&atoms, &specs, workers)).map_err(to_py)?;
+        let platform = self.engine.platform();
+        Ok(out.into_iter().map(|r| PyPolarResult::from_core(r, platform)).collect())
     }
 
     /// Electrostatic potential (kT/e) on the finest grid as an (nx, ny, nz)

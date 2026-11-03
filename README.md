@@ -10,14 +10,15 @@ design keeps the physics separate from the compute backends so that further
 solution methods and integrations can be added.
 
 * **One algorithm, many devices** — physics is written once in `pbsolve-core`;
-  CPU (rayon) and CUDA backends implement a 7-kernel `Backend` trait.
+  CPU (rayon) and CUDA backends implement a small `Backend` trait.
 * **Multigrid solver** — CG preconditioned by a geometric multigrid V-cycle:
   ~10–20 iterations independent of the grid spacing, 5–10× faster than
   diagonal preconditioning on protein grids (`docs/VALIDATION.md`).
 * **Automatic GPU** — the CUDA build loads the driver and NVRTC at runtime;
   without a GPU it transparently runs on the CPU (`platform="auto"`).
 * **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for
-  complex/receptor/ligand, batch trajectories, OpenMM bridge, OpenDX maps.
+  complex/receptor/ligand, OpenMM bridge, OpenDX maps. Trajectory frames are
+  solved several at a time; results do not depend on the number of workers.
 * **Reads simulation output directly** — PDB, mmCIF, Amber, CHARMM/NAMD, GROMACS
   and common trajectory formats, plus built-in preparation of PDB files.
 * **Validated and reproducible** — checked against analytic results and
@@ -109,6 +110,11 @@ print(res.energy, "kcal/mol on", res.platform, res.iterations)
 # MM-PBSA solvation terms for one frame (shared grid for all three species)
 frame = pbsolve.pbsa_solvation_frame(solver, coords, charges, radii, ligand_atoms=lig_idx)
 print(frame.delta_polar, frame.delta_nonpolar)
+
+# ... or for many frames, solved concurrently (default: 2 workers on the CPU, 3 on CUDA)
+frames = pbsolve.pbsa_solvation_frames(solver, frame_coords, charges, radii, ligand_atoms=lig_idx)
+results = solver.polar_solvation_many([(x, charges, radii) for x in frame_coords], workers=3)
+print(results[0].timings)   # seconds per stage: maps, boundary, assembly, setup, solve, energy
 
 # Electrostatic potential map for visualisation
 pot, origin, spacing, _ = solver.potential(coords, charges, radii)

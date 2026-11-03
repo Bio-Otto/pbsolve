@@ -52,6 +52,8 @@ class PolarResult:
     residuals: list[float]
     preconditioners: list[str]  # per linear solve: "multigrid" or "jacobi"
     levels: list[int]  # multigrid levels per linear solve (1 for Jacobi)
+    # seconds per stage: maps, boundary, assembly, setup, solve, energy, total
+    timings: dict[str, float]
     grid: GridSpec
     platform: str
 
@@ -99,8 +101,15 @@ class Solver:
         frames: npt.ArrayLike,
         charges: npt.ArrayLike,
         radii: npt.ArrayLike,
-        grid: Optional[GridSpec] = None,
+        grid: Optional[GridSpec | Sequence[GridSpec]] = None,
+        workers: Optional[int] = None,
     ) -> npt.NDArray[np.float64]: ...
+    def polar_solvation_many(
+        self,
+        systems: Sequence[tuple[npt.ArrayLike, npt.ArrayLike, npt.ArrayLike]],
+        grid: Optional[GridSpec | Sequence[GridSpec]] = None,
+        workers: Optional[int] = None,
+    ) -> list[PolarResult]: ...
     def potential(
         self,
         coords: npt.ArrayLike,

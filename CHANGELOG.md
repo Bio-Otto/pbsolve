@@ -20,6 +20,19 @@
   `CudaBackend::with_code`, `nvrtc_info()` and `driver_version()` in
   `pbsolve-cuda`.
 
+- Concurrent calculations (module `batch` in `pbsolve-core`):
+  - `Solver.polar_solvation_many(systems, grid=None, workers=None)` returns
+    results in input order;
+  - `workers` on `Solver.polar_solvation_batch`;
+  - `pbsolve.pbsa_solvation_frames(...)` for several frames at once;
+  - `pbsolve mmpbsa --workers`.
+
+  On 1YCR, MM-PBSA frames/s rise by up to 1.4× on the CPU and 2.2× on the GPU,
+  and results are identical, bit for bit, to sequential calls.
+- `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
+  assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
+  `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
+
 ### Fixed
 
 - The CUDA platform failed with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` when the
@@ -38,6 +51,10 @@
   `preconditioner` and `levels`.
 - Energies change only within the solver tolerance (≤ 3e-8 relative on the
   tested systems); `preconditioner="jacobi"` reproduces v0.0.1 bit for bit.
+- Each CUDA backend runs on a stream of its own instead of the legacy default
+  stream, so several backends can work concurrently. Results are unchanged.
+- `pbsa_solvation_frame` is now `pbsa_solvation_frames` with one frame and
+  gives the same results as before.
 
 ## 0.0.1 — 2026-11-03 (first preview)
 

@@ -12,7 +12,7 @@ import numpy as np
 
 from . import Solver, __version__, available_platforms, cuda_info, write_dx
 from .io import Molecule, frames, load
-from .mmpbsa import nonpolar_energy, pbsa_solvation_frame
+from .mmpbsa import nonpolar_energy, pbsa_solvation_frames
 
 
 # ----------------------------------------------------------------- shared options
@@ -166,17 +166,34 @@ def _mmpbsa(args: argparse.Namespace) -> int:
     rec = None if args.receptor is None else np.nonzero(mol.select(args.receptor))[0]
     if lig.size == 0:
         raise ValueError(f"ligand selection '{args.ligand}' is empty")
+    if args.workers is not None and args.workers < 1:
+        raise ValueError("--workers must be at least 1")
     solver = _solver(args)
     rows = []
-    for k, xyz in enumerate(frames(full, args.trajectory, start=args.start, stop=args.stop, step=args.step, atoms=keep)):
-        f = pbsa_solvation_frame(solver, xyz, mol.charges, mol.radii, lig, rec)
-        row = {"frame": args.start + k * args.step, **f.as_dict()}
-        rows.append(row)
-        print(
-            f"frame {row['frame']:>6}: ΔG_polar {row['delta_polar']:10.4f}  ΔG_nonpolar {row['delta_nonpolar']:8.4f}"
-            f"  ΔG_solv {row['delta_solvation']:10.4f} kcal/mol",
-            flush=True,
-        )
+    # Frames are solved in chunks so that `workers` calculations overlap
+    # while memory stays bounded; output order is the frame order.
+    chunk_size = 4 * (args.workers or 3)
+    trajectory = frames(full, args.trajectory, start=args.start, stop=args.stop, step=args.step, atoms=keep)
+    chunk: list = []
+
+    def flush() -> None:
+        results = pbsa_solvation_frames(solver, chunk, mol.charges, mol.radii, lig, rec, workers=args.workers)
+        for f in results:
+            row = {"frame": args.start + len(rows) * args.step, **f.as_dict()}
+            rows.append(row)
+            print(
+                f"frame {row['frame']:>6}: ΔG_polar {row['delta_polar']:10.4f}  ΔG_nonpolar {row['delta_nonpolar']:8.4f}"
+                f"  ΔG_solv {row['delta_solvation']:10.4f} kcal/mol",
+                flush=True,
+            )
+        chunk.clear()
+
+    for xyz in trajectory:
+        chunk.append(np.array(xyz, dtype=np.float64))
+        if len(chunk) == chunk_size:
+            flush()
+    if chunk:
+        flush()
     if not rows:
         raise ValueError("no frames selected")
     keys = [k for k in rows[0] if k != "frame"]
@@ -237,6 +254,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m.add_argument("--stop", type=int)
     m.add_argument("--step", type=int, default=1)
     m.add_argument("--csv", help="write per-frame terms to this CSV file")
+    m.add_argument(
+        "--workers",
+        type=int,
+        help="PB calculations solved concurrently (default: 2 on the CPU, 3 on CUDA); results do not depend on it",
+    )
     _add_solver(m)
 
     sub.add_parser("prep", help="PDB/mmCIF -> PQR: hydrogens, protonation, force field (see 'pbsolve prep -h')", add_help=False)

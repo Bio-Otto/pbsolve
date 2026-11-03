@@ -50,6 +50,7 @@ should update the status table below.
 | Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
+| Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
 
@@ -146,6 +147,91 @@ coarse, reference fine). After surface construction, the remaining CPU time at
 −598.4162), ΔΔG_bind 422.8939 / 206.8766 kcal/mol as before; per-state
 energies agree with APBS to ≤ 1.1e-9 (solvated) and ≤ 2.2e-8 (reference) in
 APBS units.
+
+## Batched solves: concurrent MM-PBSA frames
+
+**Setup.** Single-trajectory MM-PBSA on 1YCR (public PDB entry; pdb2pqr AMBER,
+1670 atoms; ligand = p53 peptide).
+* Every frame needs three ΔG_polar calculations on one fixed grid:
+  complex, receptor and ligand.
+* The grid is 121×121×105 at h = 0.5 Å, with 0.15 M salt and default
+  settings.
+* Frames are the crystal structure with Gaussian noise (σ = 0.3 Å, seed 1).
+* Machine: 18 CPU threads, and an RTX 2080 SUPER shared with another job
+  (74–99 % utilisation).
+
+**Where the time goes** (one calculation, sequential, `PolarResult.timings`,
+seconds):
+
+| Platform | Species | Maps | Boundary | Assembly | MG setup | CG solve | Total |
+|---|---|---|---|---|---|---|---|
+| CPU | complex | 0.139 | 0.090 | 0.098 | 0.250 | 3.083 | 3.66 |
+| CPU | ligand | 0.053 | 0.021 | 0.098 | 0.249 | 3.058 | 3.48 |
+| CUDA | complex | 0.141 | 0.081 | 0.099 | 0.365 | 0.591 | 1.28 |
+| CUDA | ligand | 0.059 | 0.021 | 0.101 | 0.366 | 0.579 | 1.13 |
+
+On the GPU, host-side work (maps, boundary, assembly, multigrid setup) takes
+0.55–0.69 s per calculation, longer than the 0.58 s of GPU solving. Running
+several calculations at once overlaps the two.
+
+**Design choices, measured** (4 frames = 12 calculations, frames/s):
+
+| Workers | CPU, one shared rayon pool | CPU, private pool per worker | CUDA, private pools |
+|---|---|---|---|
+| 1 | 0.093 | 0.093 | 0.275 |
+| 2 | 0.094 | 0.128 | 0.462 |
+| 3 | 0.094 | 0.134 | 0.600 |
+| 4 | 0.094 | — | 0.592 |
+| 6 | — | — | 0.681 |
+
+* **One shared rayon pool gives nothing.** Every operation is still split as
+  finely as for one calculation. Private pools with an equal share of the
+  threads match what separate processes achieved:
+  * 2 processes × 9 threads: 0.124 frames/s;
+  * 3 processes × 6 threads: 0.131 frames/s.
+* **Each CUDA backend needs its own stream.** The legacy default stream would
+  serialise the workers.
+* **Default worker counts.** 2 on the CPU, where a third worker adds 4 %. 3 on
+  CUDA, where more workers add little and multiply the device memory in use.
+  At 3 CUDA workers the time per calculation (≈ 0.55 s) is about the GPU solve
+  time, so the GPU is now the limit.
+
+**Evidence (ROADMAP 4.3):** `pbsa_solvation_frames` with 1, 8 and 64 frames
+per call, frames/s:
+
+| Frames per call | CPU, 1 worker | CPU, 2 workers | Speed-up | CUDA, 1 worker | CUDA, 3 workers | Speed-up |
+|---|---|---|---|---|---|---|
+| 1 | 0.093 | 0.121 | 1.30× | 0.266 | 0.510 | 1.92× |
+| 8 | 0.093 | 0.128 | 1.39× | 0.272 | 0.599 | 2.21× |
+| 64 | 0.092 | 0.130 | 1.41× | 0.269 | 0.603 | 2.24× |
+
+Every frame's complex, receptor and ligand energies (polar and non-polar) are
+identical, bit for bit:
+* with 1 worker and with the default workers;
+* between the 1-, 8- and 64-frame calls;
+* for the first 4 frames, with the sequential `polar_solvation` calls of the
+  profile above (CPU and CUDA).
+
+The CUDA results also equal those from before the stream change. With one
+worker, throughput does not depend on the batch size: there is no per-call
+overhead to amortise. The gain comes from overlapping calculations. A single
+frame already has three calculations to overlap.
+
+**Tests.**
+* `batch.rs`, 3 unit tests:
+  * batch = sequential, bit for bit, for 1–3 workers;
+  * a failing job leaves the others intact;
+  * more workers than jobs, and empty batches.
+* `tests/test_batch.py`, 10 tests (CPU and CUDA):
+  * `polar_solvation_many` = sequential calls bit for bit, for 1, 2, 3 and 7
+    workers;
+  * `polar_solvation_batch` with workers = single frames;
+  * shared, per-system and automatic grids;
+  * argument errors;
+  * the index of a failing system is reported, and the solver stays usable;
+  * the timings add up;
+  * `pbsa_solvation_frames` = `pbsa_solvation_frame`;
+  * `pbsolve mmpbsa --workers 1` and `--workers 3` write identical CSV files.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

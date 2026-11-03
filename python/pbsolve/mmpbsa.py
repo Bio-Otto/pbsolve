@@ -9,7 +9,7 @@ energies come from your MM engine (e.g. OpenMM)::
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -89,6 +89,72 @@ class PBSAFrame:
         return out
 
 
+def _selections(
+    n: int, ligand_atoms: Sequence[int], receptor_atoms: Optional[Sequence[int]]
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    lig = np.asarray(ligand_atoms, dtype=np.int64)
+    if receptor_atoms is None:
+        mask = np.ones(n, dtype=bool)
+        mask[lig] = False
+        rec = np.nonzero(mask)[0]
+    else:
+        rec = np.asarray(receptor_atoms, dtype=np.int64)
+    if lig.size == 0 or rec.size == 0:
+        raise ValueError("ligand and receptor selections must both be non-empty")
+    if np.intersect1d(lig, rec).size:
+        raise ValueError("ligand and receptor selections overlap")
+    return lig, rec
+
+
+def pbsa_solvation_frames(
+    solver: Solver,
+    frames: Iterable[npt.ArrayLike],
+    charges: npt.ArrayLike,
+    radii: npt.ArrayLike,
+    ligand_atoms: Sequence[int],
+    receptor_atoms: Optional[Sequence[int]] = None,
+    *,
+    grid: Optional[GridSpec] = None,
+    workers: Optional[int] = None,
+    gamma: float = SITKOFF_GAMMA,
+    beta: float = SITKOFF_BETA,
+    probe: float = 1.4,
+) -> list[PBSAFrame]:
+    """Single-trajectory MM-PBSA solvation terms for several frames.
+
+    Each frame contributes three PB calculations (complex, receptor, ligand)
+    on one grid: ``grid`` if given, otherwise the automatic grid of that
+    frame's complex. All calculations of the given frames are solved
+    ``workers`` at a time (default: 2 on the CPU, 3 on CUDA), so pass frames
+    in chunks rather than one by one. The results do not depend on
+    ``workers`` and equal those of :func:`pbsa_solvation_frame` bit for bit.
+    """
+    q, r = _vec(charges), _vec(radii)
+    coords = [_xyz(x) for x in frames]
+    if not coords:
+        return []
+    lig, rec = _selections(coords[0].shape[0], ligand_atoms, receptor_atoms)
+    species = (None, rec, lig)
+    systems, grids = [], []
+    for xyz in coords:
+        if xyz.shape[0] != q.shape[0]:
+            raise ValueError(f"frame has {xyz.shape[0]} atoms, charges have {q.shape[0]}")
+        g = grid if grid is not None else solver.make_grid(xyz, r)
+        for idx in species:
+            systems.append((xyz, q, r) if idx is None else (xyz[idx], q[idx], r[idx]))
+            grids.append(g)
+    polar = solver.polar_solvation_many(systems, grid=grids, workers=workers)
+
+    out = []
+    for k in range(len(coords)):
+        terms = []
+        for j in range(3):
+            x, _, rr = systems[3 * k + j]
+            terms.append(SolvationTerms(polar=polar[3 * k + j].energy, nonpolar=nonpolar_energy(x, rr, gamma, beta, probe)))
+        out.append(PBSAFrame(complex=terms[0], receptor=terms[1], ligand=terms[2]))
+    return out
+
+
 def pbsa_solvation_frame(
     solver: Solver,
     coords: npt.ArrayLike,
@@ -108,26 +174,7 @@ def pbsa_solvation_frame(
     ``grid`` is given), so discretisation errors cancel in the binding
     difference. ``receptor_atoms`` defaults to every atom not in the ligand.
     """
-    xyz, q, r = _xyz(coords), _vec(charges), _vec(radii)
-    n = xyz.shape[0]
-    lig = np.asarray(ligand_atoms, dtype=np.int64)
-    if receptor_atoms is None:
-        mask = np.ones(n, dtype=bool)
-        mask[lig] = False
-        rec = np.nonzero(mask)[0]
-    else:
-        rec = np.asarray(receptor_atoms, dtype=np.int64)
-    if lig.size == 0 or rec.size == 0:
-        raise ValueError("ligand and receptor selections must both be non-empty")
-    if np.intersect1d(lig, rec).size:
-        raise ValueError("ligand and receptor selections overlap")
-
-    if grid is None:
-        grid = solver.make_grid(xyz, r)
-
-    def terms(idx: Optional[npt.NDArray[np.int64]]) -> SolvationTerms:
-        x, c, rr = (xyz, q, r) if idx is None else (xyz[idx], q[idx], r[idx])
-        polar = solver.polar_solvation(x, c, rr, grid=grid).energy
-        return SolvationTerms(polar=polar, nonpolar=nonpolar_energy(x, rr, gamma, beta, probe))
-
-    return PBSAFrame(complex=terms(None), receptor=terms(rec), ligand=terms(lig))
+    return pbsa_solvation_frames(
+        solver, [coords], charges, radii, ligand_atoms, receptor_atoms,
+        grid=grid, workers=1, gamma=gamma, beta=beta, probe=probe,
+    )[0]

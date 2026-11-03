@@ -126,7 +126,12 @@ impl CudaBackend {
             return Err(PbError::Backend(format!("CUDA unavailable: {reason}")));
         }
         let ctx = CudaContext::new(ordinal).map_err(cuda_err("context creation"))?;
-        let stream = ctx.default_stream();
+        // SAFETY: every buffer of this backend is allocated, used and freed on
+        // its own stream only, so cudarc's cross-stream events are not needed.
+        unsafe { ctx.disable_event_tracking() };
+        // A stream of its own (not the legacy default stream, which serialises
+        // with every other stream), so several backends run concurrently.
+        let stream = ctx.new_stream().map_err(cuda_err("stream creation"))?;
         let (major, minor) = ctx.compute_capability().map_err(cuda_err("device query"))?;
         let dev = ctx.name().map_err(cuda_err("device query"))?;
         let compiler = nvrtc::get().map_err(PbError::Backend)?;

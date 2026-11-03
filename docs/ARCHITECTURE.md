@@ -74,6 +74,26 @@ products, smoother bounds, coarsest factorisation) runs once on the host and
 is shared. The CUDA kernels are written in the same operation order as the
 CPU ones and compiled with `--fmad=false`, so only the reduction order differs.
 
+## Concurrent calculations (trajectories, MM-PBSA)
+
+`batch.rs` runs independent polar-solvation calculations on several workers.
+Each worker has its own backend and a private rayon pool holding an equal
+share of the threads. A CUDA backend owns a non-blocking stream; buffers never
+cross streams, so cudarc's event tracking is switched off. While one worker
+builds surfaces, boundary values and the multigrid hierarchy on the host,
+another one's kernels run. Jobs are handed out dynamically; results are
+returned in job order, so they are identical to sequential calls bit for bit.
+The Python `Solver` keeps the extra backends in a pool, created on first use:
+
+* `polar_solvation_many(systems, grid, workers)` runs any list of systems;
+* `polar_solvation_batch(frames, …, workers)` runs the frames of a trajectory;
+* `pbsa_solvation_frames` runs three jobs per frame;
+* `pbsolve mmpbsa --workers` feeds chunks of frames to the latter.
+
+Every result reports per-stage wall times (`PolarResult.timings`).
+`docs/VALIDATION.md` records how the default worker counts (CPU 2, CUDA 3)
+were chosen.
+
 ## CUDA runtime model
 
 * The driver (`libcuda`, through cudarc) and NVRTC (`pbsolve-cuda/src/nvrtc.rs`)

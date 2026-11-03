@@ -10,6 +10,7 @@ use crate::multigrid::{Chebyshev, Hierarchy, MultigridPreconditioner};
 use crate::operator::StencilOperator;
 use crate::params::Preconditioner;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SolverOptions {
@@ -39,6 +40,10 @@ pub struct SolveStats {
     pub preconditioner: Preconditioner,
     /// Number of multigrid levels including the fine grid (1 for Jacobi).
     pub levels: usize,
+    /// Wall time of the preconditioner setup and operator upload (s).
+    pub setup_seconds: f64,
+    /// Wall time of the CG iterations including the final download (s).
+    pub solve_seconds: f64,
 }
 
 enum Precond<B: Backend> {
@@ -78,6 +83,7 @@ pub fn pcg<B: Backend>(
     b: &[f64],
     opts: SolverOptions,
 ) -> Result<(Vec<f64>, SolveStats)> {
+    let start = Instant::now();
     let n = b.len();
     let bv = be.upload(b)?;
     let bnorm = be.dot(&bv, &bv)?.sqrt();
@@ -89,12 +95,16 @@ pub fn pcg<B: Backend>(
                 relative_residual: 0.0,
                 preconditioner: opts.preconditioner,
                 levels: 1,
+                setup_seconds: start.elapsed().as_secs_f64(),
+                solve_seconds: 0.0,
             },
         ));
     }
     let mut pre = Precond::build(be, &op, opts.preconditioner)?;
     let (preconditioner, levels) = pre.kind();
     let dop = be.prepare(op)?;
+    let setup_seconds = start.elapsed().as_secs_f64();
+    let iterating = Instant::now();
 
     let mut x = be.zeros(n)?;
     let mut r = bv;
@@ -119,13 +129,16 @@ pub fn pcg<B: Backend>(
         be.axpy(-alpha, &q, &mut r)?;
         rel = be.dot(&r, &r)?.sqrt() / bnorm;
         if rel < opts.tol {
+            let x = be.download(&x)?;
             return Ok((
-                be.download(&x)?,
+                x,
                 SolveStats {
                     iterations: it,
                     relative_residual: rel,
                     preconditioner,
                     levels,
+                    setup_seconds,
+                    solve_seconds: iterating.elapsed().as_secs_f64(),
                 },
             ));
         }

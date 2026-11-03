@@ -15,6 +15,7 @@ use crate::solver::{pcg, SolveStats, SolverOptions};
 use crate::surface::CoefficientMaps;
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Which dielectric/ionic environment to solve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,40 @@ pub enum Medium {
     Reference,
 }
 
+/// Wall time (seconds) spent in each stage of a calculation.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Timings {
+    /// Dielectric and ion-accessibility maps (molecular surface).
+    pub maps: f64,
+    /// Boundary values (analytic on the coarsest level, then focusing).
+    pub boundary: f64,
+    /// Charge spreading, operator and right-hand side assembly.
+    pub assembly: f64,
+    /// Preconditioner setup (multigrid hierarchy) and uploads.
+    pub setup: f64,
+    /// CG iterations.
+    pub solve: f64,
+    /// Energy evaluation.
+    pub energy: f64,
+}
+
+impl Timings {
+    pub fn total(&self) -> f64 {
+        self.maps + self.boundary + self.assembly + self.setup + self.solve + self.energy
+    }
+}
+
+impl std::ops::AddAssign for Timings {
+    fn add_assign(&mut self, o: Self) {
+        self.maps += o.maps;
+        self.boundary += o.boundary;
+        self.assembly += o.assembly;
+        self.setup += o.setup;
+        self.solve += o.solve;
+        self.energy += o.energy;
+    }
+}
+
 /// Potential (kT/e) on the finest grid.
 #[derive(Clone, Debug)]
 pub struct FieldSolution {
@@ -33,6 +68,8 @@ pub struct FieldSolution {
     pub potential: Vec<f64>,
     /// One entry per grid level (coarse first).
     pub stats: Vec<SolveStats>,
+    /// Summed over all levels.
+    pub timings: Timings,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +85,8 @@ pub struct PolarSolvation {
     pub stats_solvated: Vec<SolveStats>,
     pub stats_reference: Vec<SolveStats>,
     pub grid: GridSpec,
+    /// Both states and the energy evaluation.
+    pub timings: Timings,
 }
 
 /// Dielectric and ion maps of one grid level for the given medium.
@@ -135,15 +174,24 @@ fn solve_level<B: Backend>(
     params: &PbParams,
     medium: Medium,
     g_ext: Vec<f64>,
+    timings: &mut Timings,
 ) -> Result<(Vec<f64>, SolveStats)> {
+    let t = Instant::now();
     let maps = coefficient_maps(grid, atoms, params, medium);
+    timings.maps += t.elapsed().as_secs_f64();
+    let t = Instant::now();
     let q = spread_charges(grid, atoms)?;
     let opts = SolverOptions {
         tol: params.tol,
         max_iter: params.max_iter,
         preconditioner: params.preconditioner,
     };
-    solve_with_maps(be, grid, maps, &q, &g_ext, params.temperature, opts)
+    let (u, stats) = solve_with_maps(be, grid, maps, &q, &g_ext, params.temperature, opts)?;
+    let total = t.elapsed().as_secs_f64();
+    timings.setup += stats.setup_seconds;
+    timings.solve += stats.solve_seconds;
+    timings.assembly += (total - stats.setup_seconds - stats.solve_seconds).max(0.0);
+    Ok((u, stats))
 }
 
 /// Focusing solve over all levels of `spec` (APBS mg-auto sequence, see
@@ -160,18 +208,26 @@ pub fn solve_focused<B: Backend>(
     let levels = spec.levels()?;
     let bm = boundary_medium(params, medium);
     let mut stats = Vec::with_capacity(levels.len());
+    let mut timings = Timings::default();
     let mut prev: Option<(Grid, Vec<f64>)> = None;
     for grid in levels {
+        let t = Instant::now();
         let g = match &prev {
             None => analytic_boundary(&grid, atoms, params.bcfl, &bm),
             Some((pg, pu)) => focus_boundary(&grid, pg, pu)?,
         };
-        let (u, s) = solve_level(be, &grid, atoms, params, medium, g)?;
+        timings.boundary += t.elapsed().as_secs_f64();
+        let (u, s) = solve_level(be, &grid, atoms, params, medium, g, &mut timings)?;
         stats.push(s);
         prev = Some((grid, u));
     }
     let (grid, potential) = prev.expect("at least one level");
-    Ok(FieldSolution { grid, potential, stats })
+    Ok(FieldSolution {
+        grid,
+        potential,
+        stats,
+        timings,
+    })
 }
 
 /// ½ Σ q_i u(r_i) in kT (trilinear interpolation, identical to APBS
@@ -190,9 +246,13 @@ pub fn polar_solvation<B: Backend>(
 ) -> Result<PolarSolvation> {
     let solv = solve_focused(be, spec, atoms, params, Medium::Solvated)?;
     let refr = solve_focused(be, spec, atoms, params, Medium::Reference)?;
+    let t = Instant::now();
     let solvated_kt = electrostatic_energy_kt(&solv, atoms)?;
     let reference_kt = electrostatic_energy_kt(&refr, atoms)?;
     let energy_kt = solvated_kt - reference_kt;
+    let mut timings = solv.timings;
+    timings += refr.timings;
+    timings.energy = t.elapsed().as_secs_f64();
     Ok(PolarSolvation {
         energy_kcal: energy_kt * kt_in_kcal_per_mol(params.temperature),
         energy_kt,
@@ -201,6 +261,7 @@ pub fn polar_solvation<B: Backend>(
         stats_solvated: solv.stats,
         stats_reference: refr.stats,
         grid: spec.clone(),
+        timings,
     })
 }
 
@@ -347,8 +408,15 @@ mod tests {
         };
         let (a, b) = (run(1), run(4));
         assert_eq!(a.energy_kt.to_bits(), b.energy_kt.to_bits());
-        assert_eq!(a.stats_solvated, b.stats_solvated);
-        assert_eq!(a.stats_reference, b.stats_reference);
+        // Everything but the wall times must match exactly.
+        let numerics = |r: &PolarSolvation| {
+            r.stats_solvated
+                .iter()
+                .chain(&r.stats_reference)
+                .map(|s| (s.iterations, s.relative_residual.to_bits(), s.preconditioner, s.levels))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(numerics(&a), numerics(&b));
     }
 
     #[test]

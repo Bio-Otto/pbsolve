@@ -112,6 +112,7 @@ from .mmpbsa import (  # noqa: E402
     SolvationTerms,
     nonpolar_energy,
     pbsa_solvation_frame,
+    pbsa_solvation_frames,
 )
 
 __all__ = [
@@ -134,6 +135,7 @@ __all__ = [
     "kt_kj_per_mol",
     "nonpolar_energy",
     "pbsa_solvation_frame",
+    "pbsa_solvation_frames",
     "prep",
     "radii",
     "read_dx",
