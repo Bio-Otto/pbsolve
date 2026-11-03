@@ -163,6 +163,7 @@ name = "pbsolve-cuda"
 version = "0.0.1"
 dependencies = [
  "cudarc",
+ "libloading",
  "pbsolve-core",
 ]
 

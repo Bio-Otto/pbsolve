@@ -7,6 +7,7 @@ import numpy as np
 import numpy.typing as npt
 
 __version__: str
+_CUDA_MAJOR: int
 
 class ConvergenceError(RuntimeError): ...
 

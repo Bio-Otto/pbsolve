@@ -19,6 +19,9 @@ jobs:
       - run: cargo clippy -p pbsolve-py -p pbsolve-cuda --features pbsolve-py/cuda-12 -- -D warnings
       - run: cargo clippy -p pbsolve-py -p pbsolve-cuda --features pbsolve-py/cuda-13 -- -D warnings
       - run: cargo test -p pbsolve-core
+      # NVRTC selection logic; the GPU tests in crates/pbsolve-cuda/tests skip without a device.
+      - run: cargo test -p pbsolve-cuda --features cuda-12
+      - run: cargo test -p pbsolve-cuda --features cuda-13
 
   python:
     strategy:
@@ -52,4 +55,8 @@ jobs:
       - run: pip install "maturin>=1.9,<2" pytest numpy nvidia-cuda-nvrtc-cu12
       - run: maturin build --release --features cuda-12 -o dist && pip install --find-links dist pbsolve
       - run: python -m pbsolve test
-      - run: pytest -q tests/test_platforms.py
+      - run: pytest -q tests/test_platforms.py tests/test_multigrid.py
+      # The pip NVRTC is not on the loader path of a plain Rust binary: name it.
+      - run: >-
+          PBSOLVE_NVRTC="$(python -c 'import pbsolve; print(pbsolve._nvrtc_candidates(12)[0])')"
+          cargo test -p pbsolve-cuda --features cuda-12 --test gpu

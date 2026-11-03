@@ -89,6 +89,16 @@ CUDA ≤ 3e-14, thread-count independent, APBS parity unchanged
 than whichever `libnvrtc.so` the loader finds first, and compile to CUBIN for
 the detected architecture, so a newer NVRTC works with an older driver (open
 issue in `docs/VALIDATION.md`). Run the CUDA 12 build.
+*Status: done (unreleased).*
+* NVRTC is loaded by pbsolve itself: `$PBSOLVE_NVRTC`, then the versioned
+  name of the build's major, then `libnvrtc.so`. The Python preload also finds
+  pip's `nvidia-cuda-nvrtc*`.
+* Kernels are compiled to a CUBIN for the device; PTX is used only for GPUs
+  newer than the NVRTC.
+* Verified with NVRTC 12.9 / 13.2 / 13.3 / 13.4 on a 13.2 driver: energies are
+  bit-identical across all of them. The `cuda-12` build has been run on the
+  GPU. Three setups that failed before now work (`docs/VALIDATION.md`, *GPU
+  runtime*).
 
 **4.3 Batched multi-frame solves.** Solve several frames or species at once,
 either as one batched kernel launch over small grids or concurrently in streams.

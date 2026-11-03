@@ -1,5 +1,6 @@
+use crate::nvrtc::{self, CodeType, Target};
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+use cudarc::nvrtc::Ptx;
 use pbsolve_core::multigrid::{Stencil27, Transfer};
 use pbsolve_core::operator::StencilOperator;
 use pbsolve_core::{Backend, PbError, Result};
@@ -21,9 +22,7 @@ fn probe() -> std::result::Result<usize, String> {
         if !unsafe { cudarc::driver::sys::is_culib_present() } {
             return Err("NVIDIA driver library (libcuda) not found".to_string());
         }
-        if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
-            return Err("NVRTC library not found (conda: install cuda-nvrtc)".to_string());
-        }
+        nvrtc::get()?;
         match CudaContext::device_count() {
             Ok(n) if n > 0 => Ok(n as usize),
             Ok(_) => Err("no CUDA device present".to_string()),
@@ -45,6 +44,40 @@ pub fn unavailable_reason() -> Option<String> {
     probe().err()
 }
 
+/// The NVRTC library in use (loaded on first call).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NvrtcInfo {
+    /// Name or path it was opened with.
+    pub name: String,
+    /// Resolved file (Linux only).
+    pub path: Option<String>,
+    /// NVRTC (CUDA) version, major and minor.
+    pub version: (i32, i32),
+    /// GPU architectures it can target (10·major + minor).
+    pub archs: Vec<i32>,
+}
+
+/// Loads NVRTC if needed and describes it; `Err` explains why it is unusable.
+pub fn nvrtc_info() -> std::result::Result<NvrtcInfo, String> {
+    nvrtc::get().map(|n| NvrtcInfo {
+        name: n.name.clone(),
+        path: n.path.clone(),
+        version: n.version,
+        archs: n.archs.clone(),
+    })
+}
+
+/// CUDA version supported by the driver (e.g. (13, 2)).
+pub fn driver_version() -> Option<(i32, i32)> {
+    if probe().is_err() {
+        return None;
+    }
+    let mut v = 0;
+    // SAFETY: the driver library is present (probe succeeded).
+    let status = unsafe { cudarc::driver::sys::cuDriverGetVersion(&mut v) };
+    (status == cudarc::driver::sys::CUresult::CUDA_SUCCESS).then_some((v / 1000, (v % 1000) / 10))
+}
+
 pub struct CudaBackend {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
@@ -59,6 +92,7 @@ pub struct CudaBackend {
     f_prolong: CudaFunction,
     partials: Mutex<CudaSlice<f64>>,
     name: String,
+    target: Target,
 }
 
 pub struct CudaOperator {
@@ -79,24 +113,36 @@ pub struct CudaCoarse {
 }
 
 impl CudaBackend {
-    /// Creates a context on device `ordinal` and JIT-compiles the kernels.
+    /// Creates a context on device `ordinal` and compiles the kernels
+    /// ([`CodeType::Auto`] unless `PBSOLVE_CUDA_CODE` says otherwise).
     pub fn new(ordinal: usize) -> Result<Self> {
+        let code = CodeType::parse(std::env::var(nvrtc::ENV_CODE).ok().as_deref()).map_err(PbError::Backend)?;
+        Self::with_code(ordinal, code)
+    }
+
+    /// Like [`new`](Self::new) with an explicit code type.
+    pub fn with_code(ordinal: usize, code: CodeType) -> Result<Self> {
         if let Err(reason) = probe() {
             return Err(PbError::Backend(format!("CUDA unavailable: {reason}")));
         }
         let ctx = CudaContext::new(ordinal).map_err(cuda_err("context creation"))?;
         let stream = ctx.default_stream();
-        let opts = CompileOptions {
-            // Keep a*b+c unfused so the stencil matches the CPU bit-for-bit.
-            fmad: Some(false),
-            name: Some("pb_kernels.cu".into()),
-            ..Default::default()
-        };
-        let ptx = compile_ptx_with_opts(KERNELS, opts).map_err(cuda_err("NVRTC compilation"))?;
-        let module = ctx.load_module(ptx).map_err(cuda_err("module load"))?;
-        let load = |name: &str| module.load_function(name).map_err(cuda_err("function lookup"));
         let (major, minor) = ctx.compute_capability().map_err(cuda_err("device query"))?;
         let dev = ctx.name().map_err(cuda_err("device query"))?;
+        let compiler = nvrtc::get().map_err(PbError::Backend)?;
+        let target = nvrtc::select_target(10 * major + minor, &compiler.archs, code).map_err(PbError::Backend)?;
+        // Keep a*b+c unfused so the stencil matches the CPU bit-for-bit.
+        let image = compiler
+            .compile(KERNELS, "pb_kernels.cu", &["--fmad=false"], target)
+            .map_err(|e| PbError::Backend(format!("CUDA NVRTC compilation: {e}")))?;
+        let module = ctx.load_module(Ptx::from_binary(image)).map_err(|e| {
+            let (nv, nm) = compiler.version;
+            let driver = driver_version().map_or("unknown".into(), |(a, b)| format!("{a}.{b}"));
+            PbError::Backend(format!(
+                "CUDA module load ({target} from NVRTC {nv}.{nm}, driver CUDA {driver}): {e:?}"
+            ))
+        })?;
+        let load = |name: &str| module.load_function(name).map_err(cuda_err("function lookup"));
         let partials = stream
             .alloc_zeros::<f64>(MAX_REDUCTION_BLOCKS as usize)
             .map_err(cuda_err("allocation"))?;
@@ -112,9 +158,15 @@ impl CudaBackend {
             f_prolong: load("pb_prolong_add")?,
             partials: Mutex::new(partials),
             name: format!("{dev} (cc {major}.{minor}, device {ordinal})"),
+            target,
             _ctx: ctx,
             stream,
         })
+    }
+
+    /// The code the kernels were built as, e.g. "CUBIN sm_75".
+    pub fn code_target(&self) -> String {
+        self.target.to_string()
     }
 
     fn grid_for(n: usize, cap: u32) -> LaunchConfig {

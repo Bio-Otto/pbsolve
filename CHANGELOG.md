@@ -14,6 +14,21 @@
   of `pbsolve solvation` reports both.
 - `cargo run --release -p pbsolve-core --example multigrid`: Jacobi versus
   multigrid study (iterations, setup and solve time).
+- `cuda_info()` reports `driver`, `nvrtc` and `nvrtc_library`, and
+  `pbsolve test` prints them. New environment variables `PBSOLVE_NVRTC` (choose
+  the NVRTC library) and `PBSOLVE_CUDA_CODE=ptx|cubin` (diagnostics).
+  `CudaBackend::with_code`, `nvrtc_info()` and `driver_version()` in
+  `pbsolve-cuda`.
+
+### Fixed
+
+- The CUDA platform failed with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` when the
+  NVRTC in use was newer than the driver. It also picked a system toolkit's
+  NVRTC over the environment's, because cudarc tried the unversioned
+  `libnvrtc.so` first. pbsolve now loads NVRTC itself by the versioned name of
+  its CUDA major and compiles the kernels to a CUBIN for the device.
+- A pip-installed NVRTC (`nvidia-cuda-nvrtc-cu12`, `nvidia-cuda-nvrtc` 13)
+  was never found; the preload now searches `site-packages/nvidia/`.
 
 ### Changed
 

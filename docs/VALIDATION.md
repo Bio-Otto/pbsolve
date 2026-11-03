@@ -50,7 +50,7 @@ should update the status table below.
 | Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
-| CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). **Open issue:** by default cudarc loaded the system NVRTC 13.3 (`/usr/local/cuda`) instead of the preloaded conda one, whose PTX the 13.2 driver rejects (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`); verified with `LD_LIBRARY_PATH` pointing `libnvrtc.so` at the conda library. CUDA 12 not run |
+| CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
 
 ### APBS parity: 1YCR (h ≈ 0.46/0.46/0.38 Å, dime 129³, 2 focusing levels, `cfac 1.7`, `fadd 20`)
@@ -123,7 +123,8 @@ iterations (26–27), degree 3–4 saved iterations but not time. Default: degre
 **Full ΔG_polar calculation** (solvated + reference, 2 focusing levels,
 including surface maps; 1YCR complex, 1670 atoms, 0.15 M; Born ion a = 2 Å).
 GPU: RTX 2080 SUPER, shared with another job at ~95 % utilisation during the
-measurement, times include the per-solver NVRTC compilation:
+measurement. Times cover `polar_solvation` only; creating the `Solver` (CUDA
+context and kernel compilation, ≈ 0.3 s once per process) is not included:
 
 | System | h (Å) | Fine dims | CG iter. Jacobi | CG iter. multigrid | CPU Jacobi s | CPU MG s | CPU speed-up | GPU Jacobi s | GPU MG s | GPU speed-up | ΔE MG vs Jacobi | ΔE GPU vs CPU (MG) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -145,6 +146,88 @@ coarse, reference fine). After surface construction, the remaining CPU time at
 −598.4162), ΔΔG_bind 422.8939 / 206.8766 kcal/mol as before; per-state
 energies agree with APBS to ≤ 1.1e-9 (solvated) and ≤ 2.2e-8 (reference) in
 APBS units.
+
+## GPU runtime: NVRTC selection and CUBIN kernels
+
+**Problem.** cudarc opened the unversioned `libnvrtc.so` first. Only full
+toolkits ship that name, so on a machine with `/usr/local/cuda` the system
+NVRTC replaced the one in the Python environment. Kernels were compiled to PTX,
+and PTX from an NVRTC newer than the driver is rejected
+(`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`). A pip-installed NVRTC
+(`nvidia-cuda-nvrtc-cu12`) was never found, because `site-packages/nvidia/…` is
+on no loader path.
+
+**Fix.**
+* `pbsolve-cuda` loads NVRTC itself, in this order:
+  1. `$PBSOLVE_NVRTC`, if set;
+  2. the versioned name of the build's CUDA major (`libnvrtc.so.13`);
+  3. the unversioned `libnvrtc.so`, as a last resort.
+* The kernels are compiled to a CUBIN for the device. A CUBIN loads on any
+  driver of the same major, unlike PTX (CUDA minor-version compatibility).
+  PTX is used only for GPUs newer than the NVRTC.
+* The Python package preloads the NVRTC of the build's major. It looks in the
+  environment's own library directory first (conda), then in pip's
+  `nvidia/cuda_nvrtc` and `nvidia/cu13` directories.
+* `cuda_info()` reports the `driver`, `nvrtc` and `nvrtc_library` in use.
+* `PBSOLVE_CUDA_CODE=ptx|cubin` forces the code type, for diagnostics.
+
+**Before and after.** Same machine (RTX 2080 SUPER, driver CUDA 13.2, system
+toolkit 13.3 in `/usr/local/cuda`). "Before" is the wheel of commit `e876bfe`.
+All rows use the `cuda-13` build unless stated.
+
+| Setup | Before | After |
+|---|---|---|
+| conda env with `cuda-nvrtc` 13.2 | fails: system 13.3 loaded, `UNSUPPORTED_PTX_VERSION` | works: NVRTC 13.2, CUBIN sm_75 |
+| OpenMM env (`pbsolve-mdtools`), conda NVRTC 13.4, newer than the driver | fails: `UNSUPPORTED_PTX_VERSION` | works: NVRTC 13.4, CUBIN sm_75 |
+| conda env, `PBSOLVE_NO_PRELOAD=1` | fails: `UNSUPPORTED_PTX_VERSION` | works: NVRTC 13.2 (the versioned name resolves through Python's RPATH) |
+| pip `nvidia-cuda-nvrtc` 13.4, preload from `nvidia/cu13` | not measured | works: NVRTC 13.4, CUBIN |
+| plain Rust binary, system NVRTC 13.3 | — | works: CUBIN; forced PTX is rejected by the driver, as expected |
+| `cuda-12` build, pip `nvidia-cuda-nvrtc-cu12` 12.9 | not run before | works: `pbsolve test`, `test_platforms.py` and `test_multigrid.py` all pass |
+| `cuda-12` build, no NVRTC 12 installed | — | falls back to `libnvrtc.so` (13.3), CUBIN, works |
+| `PBSOLVE_NVRTC=/nonexistent` | — | CUDA unavailable with the reason; `platform="auto"` uses the CPU |
+
+**Bit-for-bit checks.** The multigrid benchmark (Born ion at 4 spacings and
+1YCR at 0.5/0.35 Å, on CUDA) was run with each of these:
+* conda NVRTC 13.2;
+* pip NVRTC 13.4;
+* system NVRTC 13.3;
+* the `cuda-12` build with NVRTC 12.9.
+
+Every energy and every iteration count is bit-identical to the run made before
+the change (PTX through the `LD_LIBRARY_PATH` workaround). Solve times are
+unchanged. With NVRTC 13.2 and 12.9 the forced-PTX kernels also give
+bit-identical solutions to the CUBIN ones. The APBS parity results above
+therefore carry over unchanged.
+
+**Cost.** CUBIN compilation adds ≈ 30 ms over PTX: the first
+`Solver(platform="CUDA")` takes 0.34 s instead of 0.32 s. Most of that is CUDA
+context creation, which repeats whenever the last CUDA solver of a process is
+dropped. The compiled image is cached per process: a further solver created
+while one is alive takes 1–3 ms.
+
+**Tests.**
+* `crates/pbsolve-cuda/src/nvrtc.rs`, 8 unit tests that need no GPU:
+  * target selection: a CUBIN for supported devices, PTX for newer ones, an
+    error for older ones, forced code types;
+  * parsing of `PBSOLVE_CUDA_CODE`;
+  * the order of library names.
+* `crates/pbsolve-cuda/tests/gpu.rs`, 5 GPU tests (they skip without a
+  device):
+  * the build's NVRTC major is preferred;
+  * the kernels are a CUBIN for the device;
+  * CUDA = CPU for both preconditioners (|Δu|/|u| ≤ 4.3e-16, equal iteration
+    counts);
+  * CUBIN = PTX bit for bit;
+  * the image cache is reused.
+* `tests/test_platforms.py`, 7 new or extended tests:
+  * `cuda_info` consistency;
+  * an unusable NVRTC disables CUDA with a reason;
+  * an invalid code type is reported;
+  * CUBIN and PTX give identical energies;
+  * conda and pip directory layouts are searched;
+  * the preload opt-outs work.
+* CI runs the unit tests for both CUDA majors. The GPU job also runs the Rust
+  GPU tests against the pip NVRTC.
 
 ## Input readers (`pbsolve-io`)
 

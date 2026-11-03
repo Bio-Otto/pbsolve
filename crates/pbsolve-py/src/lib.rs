@@ -142,6 +142,16 @@ fn cuda_info(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
     d.set_item("available", pbsolve_cuda::is_available())?;
     d.set_item("device_count", pbsolve_cuda::device_count())?;
     d.set_item("reason", pbsolve_cuda::unavailable_reason())?;
+    let version = |(major, minor): (i32, i32)| format!("{major}.{minor}");
+    d.set_item("driver", pbsolve_cuda::driver_version().map(version))?;
+    let nvrtc = pbsolve_cuda::compiled_with_cuda()
+        .then(pbsolve_cuda::nvrtc_info)
+        .and_then(|r| r.ok());
+    d.set_item("nvrtc", nvrtc.as_ref().map(|n| version(n.version)))?;
+    d.set_item(
+        "nvrtc_library",
+        nvrtc.as_ref().map(|n| n.path.clone().unwrap_or_else(|| n.name.clone())),
+    )?;
     Ok(d)
 }
 
@@ -911,6 +921,8 @@ fn read_pqr<'py>(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // CUDA major version of this build (0 = CPU-only); read by the NVRTC preload.
+    m.add("_CUDA_MAJOR", pbsolve_cuda::cuda_major())?;
     m.add("ConvergenceError", m.py().get_type::<ConvergenceError>())?;
     m.add_class::<PySolver>()?;
     m.add_class::<PyGridSpec>()?;

@@ -76,14 +76,26 @@ CPU ones and compiled with `--fmad=false`, so only the reduction order differs.
 
 ## CUDA runtime model
 
-* The driver (`libcuda`) and NVRTC are **dlopen'ed at runtime** (cudarc
-  `dynamic-loading`). Building needs no CUDA toolkit; a machine without a
-  driver gets `available_platforms() == ["CPU"]` and a readable reason in
-  `cuda_info()`.
-* Kernels are compiled by NVRTC when a `Solver(platform="CUDA")` is created,
-  for whatever GPU is present.
-* The Python package preloads `libnvrtc.so.*` from the environment so the
-  conda-provided NVRTC is always found.
+* The driver (`libcuda`, through cudarc) and NVRTC (`pbsolve-cuda/src/nvrtc.rs`)
+  are **dlopen'ed at runtime**. Building needs no CUDA toolkit; a machine
+  without a driver gets `available_platforms() == ["CPU"]` and a readable
+  reason in `cuda_info()`.
+* NVRTC is opened as `$PBSOLVE_NVRTC`, else by the versioned name of the
+  build's CUDA major (`libnvrtc.so.13`, `nvrtc64_130_0.dll`), else as
+  `libnvrtc.so`. The dynamic loader returns an already-loaded library of the
+  versioned name, so the copy the Python package preloads wins over a system
+  toolkit.
+* The Python package preloads that library from the environment (conda
+  `lib/`, then pip's `nvidia/cuda_nvrtc` or `nvidia/cu13`) right after
+  importing the extension; NVRTC is only opened at the first CUDA query.
+* Kernels are compiled when a `Solver(platform="CUDA")` is created, to a
+  **CUBIN for the device's architecture**: it loads on any driver of the same
+  major version, whereas PTX from an NVRTC newer than the driver is rejected.
+  PTX (`compute_XY`) is used only for GPUs newer than the NVRTC.
+  `PBSOLVE_CUDA_CODE=ptx|cubin` forces either. The image is cached per
+  process.
+* `cuda_info()` reports the driver and NVRTC versions and the NVRTC file in
+  use.
 
 ## Roadmap
 

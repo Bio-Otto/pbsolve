@@ -13,9 +13,13 @@ default = []
 # Pick exactly one: the CUDA major version the runtime-loaded bindings target.
 # The conda recipe enables the one matching `cuda_compiler_version`.
 # Bindings use the x.0 API level so any driver of that major works.
-cuda-12 = ["dep:cudarc", "cudarc/cuda-12000"]
-cuda-13 = ["dep:cudarc", "cudarc/cuda-13000"]
+cuda-12 = ["dep:cudarc", "dep:libloading", "cudarc/cuda-12000"]
+cuda-13 = ["dep:cudarc", "dep:libloading", "cudarc/cuda-13000"]
 
 [dependencies]
 pbsolve-core.workspace = true
 cudarc = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
+
+[dev-dependencies]
+libloading.workspace = true

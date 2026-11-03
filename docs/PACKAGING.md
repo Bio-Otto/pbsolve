@@ -44,9 +44,23 @@ conda build recipe -m "$CONDA_PREFIX/conda_build_config.yaml" \
 
 `pip install .` (or `maturin build --release [--features cuda-12]`) works too.
 A wheel built with `cuda-12` needs the NVIDIA driver plus NVRTC at runtime
-(e.g. `pip install nvidia-cuda-nvrtc-cu12`); without them it runs on the CPU.
+(`pip install nvidia-cuda-nvrtc-cu12`; for `cuda-13`, `pip install
+"nvidia-cuda-nvrtc>=13,<14"`); without them it runs on the CPU. The package
+finds the pip NVRTC in `site-packages/nvidia/` by itself. The NVRTC may be
+newer than the driver as long as the major version matches: kernels are
+compiled to CUBIN, not PTX.
 
 ## Troubleshooting
 
 `pbsolve info` (or `pbsolve.cuda_info()`) prints whether CUDA was compiled in,
 whether it is usable, and why not (missing driver, missing NVRTC, no device).
+It also gives the driver's CUDA version (`driver`), the NVRTC version
+(`nvrtc`) and the NVRTC file in use (`nvrtc_library`).
+
+These environment variables control the GPU runtime:
+
+| Variable | Effect |
+|---|---|
+| `PBSOLVE_NVRTC=/path/to/libnvrtc.so.13` | use exactly this NVRTC (also disables the preload) |
+| `PBSOLVE_NO_PRELOAD=1` | do not preload the environment's NVRTC |
+| `PBSOLVE_CUDA_CODE=ptx` or `cubin` | force the kernel code type; the default `auto` uses CUBIN whenever NVRTC knows the GPU |

@@ -38,6 +38,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"pbsolve version: {__version__}")
     print(f"CUDA support compiled: {info['compiled']} (CUDA {info['cuda_major'] or '-'})")
     print(f"CUDA available: {info['available']}" + ("" if info["available"] else f"  [{info['reason']}]"))
+    if info["available"]:
+        print(f"CUDA driver {info['driver']}, NVRTC {info['nvrtc']} ({info['nvrtc_library']})")
     platforms = args.platform or available_platforms()
     print(f"Testing platforms: {', '.join(platforms)}\n")
 
