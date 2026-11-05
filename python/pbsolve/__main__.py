@@ -57,8 +57,8 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--preconditioner",
         default="multigrid",
-        choices=["multigrid", "jacobi"],
-        help="preconditioner of the CG solver (default: multigrid)",
+        choices=["multigrid", "multigrid-f32", "jacobi"],
+        help="preconditioner of the CG solver (default: multigrid; multigrid-f32 runs the V-cycle in single precision)",
     )
 
 

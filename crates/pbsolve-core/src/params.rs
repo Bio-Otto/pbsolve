@@ -13,6 +13,12 @@ pub enum Preconditioner {
     /// smoothing, see [`crate::multigrid`]). Falls back to Jacobi for grids it
     /// cannot coarsen far enough.
     Multigrid,
+    /// The same V-cycle evaluated in single precision (f32 operators and
+    /// vectors) inside the f64 conjugate-gradient iteration, which then uses
+    /// the flexible (Polak–Ribière) update [Notay 2000]. The converged
+    /// solution satisfies the f64 system to the same tolerance; the cycle
+    /// moves half the data.
+    MultigridF32,
 }
 
 impl Preconditioner {
@@ -20,8 +26,9 @@ impl Preconditioner {
         match s.to_ascii_lowercase().as_str() {
             "jacobi" => Ok(Self::Jacobi),
             "multigrid" | "mg" => Ok(Self::Multigrid),
+            "multigrid-f32" | "mg-f32" => Ok(Self::MultigridF32),
             other => invalid(format!(
-                "unknown preconditioner '{other}' (expected 'multigrid' or 'jacobi')"
+                "unknown preconditioner '{other}' (expected 'multigrid', 'multigrid-f32' or 'jacobi')"
             )),
         }
     }
@@ -30,6 +37,7 @@ impl Preconditioner {
         match self {
             Self::Jacobi => "jacobi",
             Self::Multigrid => "multigrid",
+            Self::MultigridF32 => "multigrid-f32",
         }
     }
 }

@@ -27,6 +27,7 @@
 use crate::backend::Backend;
 use crate::error::{PbError, Result};
 use crate::operator::StencilOperator;
+use crate::real::{convert, Real};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -118,7 +119,7 @@ pub fn restrict_axis(c: usize, coarsen: bool, n: usize) -> ([usize; 3], [f64; 3]
 
 /// `coarse = Pᵀ fine` on interior coarse nodes, 0 on coarse boundary nodes.
 /// Reads only interior fine nodes. CUDA: `pb_restrict` (same summation order).
-pub fn restrict(t: &Transfer, fine: &[f64], coarse: &mut [f64]) {
+pub fn restrict<T: Real>(t: &Transfer, fine: &[T], coarse: &mut [T]) {
     let [nx, ny, nz] = t.fine;
     let [mx, my, _] = t.coarse;
     coarse.par_chunks_mut(mx * my).enumerate().for_each(|(kc, plane)| {
@@ -126,13 +127,14 @@ pub fn restrict(t: &Transfer, fine: &[f64], coarse: &mut [f64]) {
             for ic in 0..mx {
                 let out = &mut plane[ic + mx * jc];
                 if !is_interior(ic, jc, kc, t.coarse) {
-                    *out = 0.0;
+                    *out = T::ZERO;
                     continue;
                 }
                 let (fx, wx, mx_) = restrict_axis(ic, t.coarsen[0], nx);
                 let (fy, wy, my_) = restrict_axis(jc, t.coarsen[1], ny);
                 let (fz, wz, mz_) = restrict_axis(kc, t.coarsen[2], nz);
-                let mut acc = 0.0;
+                let (wx, wy, wz) = (wx.map(T::from_f64), wy.map(T::from_f64), wz.map(T::from_f64));
+                let mut acc = T::ZERO;
                 for c in 0..mz_ {
                     for b in 0..my_ {
                         for a in 0..mx_ {
@@ -149,7 +151,7 @@ pub fn restrict(t: &Transfer, fine: &[f64], coarse: &mut [f64]) {
 
 /// `fine += P coarse` on interior fine nodes (boundary nodes untouched).
 /// Coarse boundary values must be zero. CUDA: `pb_prolong_add`.
-pub fn prolong_add(t: &Transfer, coarse: &[f64], fine: &mut [f64]) {
+pub fn prolong_add<T: Real>(t: &Transfer, coarse: &[T], fine: &mut [T]) {
     let [nx, ny, _] = t.fine;
     let [mx, my, _] = t.coarse;
     fine.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
@@ -161,7 +163,8 @@ pub fn prolong_add(t: &Transfer, coarse: &[f64], fine: &mut [f64]) {
                 let (cx, wx, mx_) = prolong_axis(i, t.coarsen[0]);
                 let (cy, wy, my_) = prolong_axis(j, t.coarsen[1]);
                 let (cz, wz, mz_) = prolong_axis(k, t.coarsen[2]);
-                let mut acc = 0.0;
+                let (wx, wy, wz) = (wx.map(T::from_f64), wy.map(T::from_f64), wz.map(T::from_f64));
+                let mut acc = T::ZERO;
                 for c in 0..mz_ {
                     for b in 0..my_ {
                         for a in 0..mx_ {
@@ -204,27 +207,53 @@ impl Stencil27 {
 
     /// y = A x (CUDA: `pb_apply27`, same summation order).
     pub fn apply(&self, x: &[f64], y: &mut [f64]) {
-        let [nx, ny, _] = self.dims;
-        let n = self.len();
-        let off = stencil_offsets(self.dims);
-        y.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let out = &mut plane[i + nx * j];
-                    if !is_interior(i, j, k, self.dims) {
-                        *out = 0.0;
-                        continue;
-                    }
-                    let c = i + nx * (j + ny * k);
-                    let mut acc = 0.0;
-                    for (o, d) in off.iter().enumerate() {
-                        acc += self.coef[o * n + c] * x[(c as isize + d) as usize];
-                    }
-                    *out = acc;
-                }
-            }
-        });
+        apply27(self.dims, &self.coef, x, y);
     }
+}
+
+/// A 27-point operator in another precision (multigrid in f32).
+#[derive(Clone, Debug)]
+pub struct Coarse27<T: Real> {
+    pub dims: [usize; 3],
+    pub coef: Vec<T>,
+}
+
+impl<T: Real> Coarse27<T> {
+    /// Rounds every coefficient of `op` to `T`.
+    pub fn from_stencil(op: &Stencil27) -> Self {
+        Self {
+            dims: op.dims,
+            coef: convert(&op.coef),
+        }
+    }
+
+    pub fn apply(&self, x: &[T], y: &mut [T]) {
+        apply27(self.dims, &self.coef, x, y);
+    }
+}
+
+/// y = A x for a 27-point operator in any precision (CUDA: `pb_apply27`).
+pub fn apply27<T: Real>(dims: [usize; 3], coef: &[T], x: &[T], y: &mut [T]) {
+    let [nx, ny, _] = dims;
+    let n = dims.iter().product::<usize>();
+    let off = stencil_offsets(dims);
+    y.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+        for j in 0..ny {
+            for i in 0..nx {
+                let out = &mut plane[i + nx * j];
+                if !is_interior(i, j, k, dims) {
+                    *out = T::ZERO;
+                    continue;
+                }
+                let c = i + nx * (j + ny * k);
+                let mut acc = T::ZERO;
+                for (o, d) in off.iter().enumerate() {
+                    acc += coef[o * n + c] * x[(c as isize + d) as usize];
+                }
+                *out = acc;
+            }
+        }
+    });
 }
 
 /// Linear index offsets of the 27 stencil entries.
@@ -1119,5 +1148,79 @@ mod tests {
         let factor = (norm(&res) / r0).powf(1.0 / 6.0);
         eprintln!("V-cycle residual reduction factor: {factor:.4}");
         assert!(factor < 0.35, "average residual reduction per V-cycle {factor:.3}");
+    }
+
+    // ---------------------------------------------------------- single precision
+
+    fn rel(a: &[f64], b: &[f64]) -> f64 {
+        let d: f64 = a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum();
+        (d / dot(b, b)).sqrt()
+    }
+
+    #[test]
+    fn single_precision_kernels_match_f64_to_rounding() {
+        use crate::cpu::CpuSingle;
+        let dims = [25, 23, 21];
+        let op = Arc::new(molecule_operator(dims, 0.5));
+        let x = pseudo_random(op.len(), 3);
+        let (be, sp) = (CpuBackend::new(), CpuSingle::new());
+        let x32 = sp.upload(&x).unwrap();
+        // 7-point operator.
+        let mut y = vec![0.0; x.len()];
+        op.apply(&x, &mut y);
+        let op32 = sp.prepare(op.clone()).unwrap();
+        let mut y32 = sp.zeros(x.len()).unwrap();
+        sp.apply(&op32, &x32, &mut y32).unwrap();
+        assert!(rel(&sp.download(&y32).unwrap(), &y) < 2e-6);
+        // Galerkin operator and transfers.
+        let t = Transfer::new(dims).unwrap();
+        let g = Arc::new(galerkin(&t, LevelMatrix::Seven(&op)).unwrap());
+        let mut c = vec![0.0; g.len()];
+        be.restrict(&t, &x, &mut c).unwrap();
+        let mut c32 = sp.zeros(g.len()).unwrap();
+        sp.restrict(&t, &x32, &mut c32).unwrap();
+        assert!(rel(&sp.download(&c32).unwrap(), &c) < 2e-7);
+        let mut gc = vec![0.0; g.len()];
+        g.apply(&c, &mut gc);
+        let g32 = sp.prepare_coarse(g.clone()).unwrap();
+        let mut gc32 = sp.zeros(g.len()).unwrap();
+        sp.apply_coarse(&g32, &sp.upload(&c).unwrap(), &mut gc32).unwrap();
+        assert!(rel(&sp.download(&gc32).unwrap(), &gc) < 2e-6);
+        // Conversions: demote rounds, promote widens exactly.
+        let mut d32 = sp.zeros(x.len()).unwrap();
+        be.demote(&x, &mut d32).unwrap();
+        assert_eq!(d32, x.iter().map(|&v| v as f32).collect::<Vec<_>>());
+        let mut back = vec![0.0; x.len()];
+        be.promote(&d32, &mut back).unwrap();
+        assert!(back.iter().zip(&d32).all(|(a, b)| *a == *b as f64));
+    }
+
+    #[test]
+    fn single_precision_vcycle_approximates_the_f64_vcycle() {
+        use crate::cpu::CpuSingle;
+        let dims = [41, 41, 41];
+        let op = Arc::new(molecule_operator(dims, 0.35));
+        let r = interior_random(dims, 11);
+        let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+        let mut m64 = MultigridPreconditioner::new(&CpuBackend::new(), &op, h).unwrap();
+        let z64 = vcycle_once(&mut m64, &op, &r);
+        let sp = CpuSingle::new();
+        let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+        let mut m32 = MultigridPreconditioner::new(&sp, &op, h).unwrap();
+        let op32 = sp.prepare(op.clone()).unwrap();
+        let mut z32 = sp.zeros(r.len()).unwrap();
+        m32.apply(&sp, &op32, &sp.upload(&r).unwrap(), &mut z32).unwrap();
+        let err = rel(&sp.download(&z32).unwrap(), &z64);
+        eprintln!("f32 V-cycle vs f64 V-cycle: {err:.2e}");
+        assert!(err < 1e-5, "{err}");
+        // Not exactly symmetric any more, but only at the rounding level.
+        let s = interior_random(dims, 12);
+        let mut w32 = sp.zeros(r.len()).unwrap();
+        m32.apply(&sp, &op32, &sp.upload(&s).unwrap(), &mut w32).unwrap();
+        let (a, b) = (
+            dot(&s, &sp.download(&z32).unwrap()),
+            dot(&r, &sp.download(&w32).unwrap()),
+        );
+        assert!(((a - b) / a).abs() < 1e-5, "sᵀMr = {a}, rᵀMs = {b}");
     }
 }

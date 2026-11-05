@@ -1,29 +1,105 @@
 //! Multithreaded CPU backend (rayon). Always available; it is also the
 //! reference implementation every accelerator is validated against.
+//!
+//! [`CpuBackend`] works in f64. [`CpuSingle`] is its f32 twin used by the
+//! mixed-precision multigrid preconditioner. Both are one generic
+//! implementation; for f64 it performs exactly the operations of the
+//! original f64-only code.
 
 use crate::backend::Backend;
 use crate::error::Result;
-use crate::multigrid::{self, Stencil27, Transfer};
-use crate::operator::StencilOperator;
+use crate::multigrid::{self, Coarse27, Stencil27, Transfer};
+use crate::operator::{Stencil7, StencilOperator};
+use crate::real::Real;
 use rayon::prelude::*;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// Fixed chunk size => reduction order independent of the thread count.
 const CHUNK: usize = 1 << 14;
 
-#[derive(Clone, Debug, Default)]
-pub struct CpuBackend;
+/// How operators are held for a given precision: f64 shares the host
+/// operators, f32 keeps rounded copies.
+pub trait CpuReal: Real {
+    type Op: Send + Sync;
+    type Coarse: Send + Sync;
+    fn prepare(op: Arc<StencilOperator>) -> Self::Op;
+    fn prepare_coarse(op: Arc<Stencil27>) -> Self::Coarse;
+    fn apply(op: &Self::Op, x: &[Self], y: &mut [Self]);
+    fn apply_coarse(op: &Self::Coarse, x: &[Self], y: &mut [Self]);
+}
 
-impl CpuBackend {
-    pub fn new() -> Self {
-        Self
+impl CpuReal for f64 {
+    type Op = Arc<StencilOperator>;
+    type Coarse = Arc<Stencil27>;
+    fn prepare(op: Arc<StencilOperator>) -> Self::Op {
+        op
+    }
+    fn prepare_coarse(op: Arc<Stencil27>) -> Self::Coarse {
+        op
+    }
+    fn apply(op: &Self::Op, x: &[f64], y: &mut [f64]) {
+        op.apply(x, y)
+    }
+    fn apply_coarse(op: &Self::Coarse, x: &[f64], y: &mut [f64]) {
+        op.apply(x, y)
     }
 }
 
-impl Backend for CpuBackend {
-    type Vector = Vec<f64>;
-    type Operator = Arc<StencilOperator>;
-    type Coarse = Arc<Stencil27>;
+impl CpuReal for f32 {
+    type Op = Arc<Stencil7<f32>>;
+    type Coarse = Arc<Coarse27<f32>>;
+    fn prepare(op: Arc<StencilOperator>) -> Self::Op {
+        Arc::new(Stencil7::from_operator(&op))
+    }
+    fn prepare_coarse(op: Arc<Stencil27>) -> Self::Coarse {
+        Arc::new(Coarse27::from_stencil(&op))
+    }
+    fn apply(op: &Self::Op, x: &[f32], y: &mut [f32]) {
+        op.apply(x, y)
+    }
+    fn apply_coarse(op: &Self::Coarse, x: &[f32], y: &mut [f32]) {
+        op.apply(x, y)
+    }
+}
+
+/// CPU backend computing in `T`.
+pub struct Cpu<T>(PhantomData<fn() -> T>);
+
+/// The f64 CPU backend.
+pub type CpuBackend = Cpu<f64>;
+/// The f32 CPU backend (mixed-precision multigrid).
+pub type CpuSingle = Cpu<f32>;
+
+impl<T> Cpu<T> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T> Default for Cpu<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Clone for Cpu<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<T> std::fmt::Debug for Cpu<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cpu<{}>", std::any::type_name::<T>())
+    }
+}
+
+impl<T: CpuReal> Backend for Cpu<T> {
+    type Vector = Vec<T>;
+    type Operator = T::Op;
+    type Coarse = T::Coarse;
+    type Single = CpuSingle;
 
     fn platform(&self) -> &'static str {
         "CPU"
@@ -33,43 +109,61 @@ impl Backend for CpuBackend {
         format!("CPU ({} threads)", rayon::current_num_threads())
     }
 
+    fn single(&self) -> Result<Self::Single> {
+        Ok(CpuSingle::new())
+    }
+
     fn prepare(&self, op: Arc<StencilOperator>) -> Result<Self::Operator> {
-        Ok(op)
+        Ok(T::prepare(op))
     }
 
     fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse> {
-        Ok(op)
+        Ok(T::prepare_coarse(op))
     }
 
     fn upload(&self, host: &[f64]) -> Result<Self::Vector> {
-        Ok(host.to_vec())
+        Ok(host.iter().map(|&v| T::from_f64(v)).collect())
     }
 
     fn zeros(&self, n: usize) -> Result<Self::Vector> {
-        Ok(vec![0.0; n])
+        Ok(vec![T::ZERO; n])
     }
 
     fn download(&self, v: &Self::Vector) -> Result<Vec<f64>> {
-        Ok(v.clone())
+        Ok(v.iter().map(|x| x.to_f64()).collect())
     }
 
     fn read(&self, v: &Self::Vector, host: &mut [f64]) -> Result<()> {
-        host.copy_from_slice(v);
+        host.iter_mut().zip(v).for_each(|(h, x)| *h = x.to_f64());
         Ok(())
     }
 
     fn write(&self, host: &[f64], v: &mut Self::Vector) -> Result<()> {
-        v.copy_from_slice(host);
+        v.iter_mut().zip(host).for_each(|(x, &h)| *x = T::from_f64(h));
+        Ok(())
+    }
+
+    fn demote(&self, x: &Self::Vector, y: &mut Vec<f32>) -> Result<()> {
+        y.par_iter_mut()
+            .zip(x.par_iter())
+            .for_each(|(y, x)| *y = f32::from_f64(x.to_f64()));
+        Ok(())
+    }
+
+    fn promote(&self, x: &Vec<f32>, y: &mut Self::Vector) -> Result<()> {
+        y.par_iter_mut()
+            .zip(x.par_iter())
+            .for_each(|(y, x)| *y = T::from_f64(x.to_f64()));
         Ok(())
     }
 
     fn apply(&self, op: &Self::Operator, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
-        op.apply(x, y);
+        T::apply(op, x, y);
         Ok(())
     }
 
     fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
-        op.apply(x, y);
+        T::apply_coarse(op, x, y);
         Ok(())
     }
 
@@ -77,32 +171,38 @@ impl Backend for CpuBackend {
         let partial: Vec<f64> = a
             .par_chunks(CHUNK)
             .zip(b.par_chunks(CHUNK))
-            .map(|(x, y)| x.iter().zip(y).map(|(p, q)| p * q).sum::<f64>())
+            .map(|(x, y)| x.iter().zip(y).map(|(p, q)| p.to_f64() * q.to_f64()).sum::<f64>())
             .collect();
         Ok(partial.iter().sum())
     }
 
     fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
-        y.par_iter_mut().zip(x.par_iter()).for_each(|(y, x)| *y += alpha * x);
+        let alpha = T::from_f64(alpha);
+        y.par_iter_mut().zip(x.par_iter()).for_each(|(y, x)| *y += alpha * *x);
         Ok(())
     }
 
     fn xpay(&self, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()> {
-        y.par_iter_mut().zip(x.par_iter()).for_each(|(y, x)| *y = x + beta * *y);
+        let beta = T::from_f64(beta);
+        y.par_iter_mut()
+            .zip(x.par_iter())
+            .for_each(|(y, x)| *y = *x + beta * *y);
         Ok(())
     }
 
     fn axpby(&self, alpha: f64, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()> {
+        let (alpha, beta) = (T::from_f64(alpha), T::from_f64(beta));
         y.par_iter_mut()
             .zip(x.par_iter())
-            .for_each(|(y, x)| *y = alpha * x + beta * *y);
+            .for_each(|(y, x)| *y = alpha * *x + beta * *y);
         Ok(())
     }
 
     fn scale(&self, alpha: f64, d: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        let alpha = T::from_f64(alpha);
         y.par_iter_mut()
             .zip(x.par_iter().zip(d.par_iter()))
-            .for_each(|(y, (x, d))| *y = (alpha * d) * x);
+            .for_each(|(y, (x, d))| *y = (alpha * *d) * *x);
         Ok(())
     }
 

@@ -139,7 +139,11 @@ fn cuda_matches_cpu_for_both_preconditioners() {
     let (op, b) = system();
     let gpu = CudaBackend::new(0).unwrap();
     let cpu = CpuBackend::new();
-    for pc in [Preconditioner::Multigrid, Preconditioner::Jacobi] {
+    for pc in [
+        Preconditioner::Multigrid,
+        Preconditioner::MultigridF32,
+        Preconditioner::Jacobi,
+    ] {
         let (uc, sc) = solve(&cpu, &op, &b, pc);
         let (ug, sg) = solve(&gpu, &op, &b, pc);
         let rel = relative_difference(&uc, &ug);
@@ -176,7 +180,11 @@ fn cubin_and_ptx_kernels_give_identical_results() {
     assert!(cubin.code_target().starts_with("CUBIN"));
     assert!(ptx.code_target().starts_with("PTX"));
     let (op, b) = system();
-    for pc in [Preconditioner::Multigrid, Preconditioner::Jacobi] {
+    for pc in [
+        Preconditioner::Multigrid,
+        Preconditioner::MultigridF32,
+        Preconditioner::Jacobi,
+    ] {
         let (u1, s1) = solve(&cubin, &op, &b, pc);
         let (u2, s2) = solve(&ptx, &op, &b, pc);
         assert_eq!(s1.iterations, s2.iterations);
@@ -202,4 +210,56 @@ fn repeated_backends_reuse_the_compiled_image() {
     // Compiling the kernels takes hundreds of milliseconds; a cache hit only
     // creates a context and loads the module.
     assert!(per_backend < 0.5, "{per_backend} s");
+}
+
+#[test]
+fn fused_dot2_equals_two_dots_in_both_precisions() {
+    if !gpu_present("fused_dot2_equals_two_dots_in_both_precisions") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let a: Vec<f64> = (0..300_001).map(|i| (i as f64 * 0.37).sin()).collect();
+    let b: Vec<f64> = (0..300_001).map(|i| (i as f64 * 0.11).cos()).collect();
+    let c: Vec<f64> = (0..300_001).map(|i| 1.0 / (1.0 + i as f64)).collect();
+    fn check<B: Backend>(be: &B, a: &[f64], b: &[f64], c: &[f64]) {
+        let (a, b, c) = (be.upload(a).unwrap(), be.upload(b).unwrap(), be.upload(c).unwrap());
+        let (ab, ac) = be.dot2(&a, &b, &c).unwrap();
+        assert_eq!(ab.to_bits(), be.dot(&a, &b).unwrap().to_bits());
+        assert_eq!(ac.to_bits(), be.dot(&a, &c).unwrap().to_bits());
+    }
+    check(&gpu, &a, &b, &c);
+    check(&gpu.single().unwrap(), &a, &b, &c);
+}
+
+#[test]
+fn single_precision_kernels_match_the_cpu_bit_for_bit() {
+    if !gpu_present("single_precision_kernels_match_the_cpu_bit_for_bit") {
+        return;
+    }
+    // f32 kernels round identically on both platforms (same expression order,
+    // no FMA contraction); only reductions may differ.
+    let (op, b) = system();
+    let gpu = CudaBackend::new(0).unwrap().single().unwrap();
+    let cpu = pbsolve_core::CpuSingle::new();
+    let (og, oc) = (gpu.prepare(op.clone()).unwrap(), cpu.prepare(op.clone()).unwrap());
+    let (xg, xc) = (gpu.upload(&b).unwrap(), cpu.upload(&b).unwrap());
+    let (mut yg, mut yc) = (gpu.zeros(b.len()).unwrap(), cpu.zeros(b.len()).unwrap());
+    gpu.apply(&og, &xg, &mut yg).unwrap();
+    cpu.apply(&oc, &xc, &mut yc).unwrap();
+    assert_eq!(gpu.download(&yg).unwrap(), cpu.download(&yc).unwrap());
+    let (mut sg, mut sc) = (gpu.zeros(b.len()).unwrap(), cpu.zeros(b.len()).unwrap());
+    gpu.scale(0.3, &xg, &yg, &mut sg).unwrap();
+    cpu.scale(0.3, &xc, &yc, &mut sc).unwrap();
+    assert_eq!(gpu.download(&sg).unwrap(), cpu.download(&sc).unwrap());
+    let t = pbsolve_core::multigrid::Transfer::new(op.dims).unwrap();
+    let nc: usize = t.coarse.iter().product();
+    let (mut cg, mut cc) = (gpu.zeros(nc).unwrap(), cpu.zeros(nc).unwrap());
+    gpu.restrict(&t, &yg, &mut cg).unwrap();
+    cpu.restrict(&t, &yc, &mut cc).unwrap();
+    assert_eq!(gpu.download(&cg).unwrap(), cpu.download(&cc).unwrap());
+    gpu.prolong_add(&t, &cg, &mut yg).unwrap();
+    cpu.prolong_add(&t, &cc, &mut yc).unwrap();
+    gpu.axpby(0.7, &xg, -1.3, &mut yg).unwrap();
+    cpu.axpby(0.7, &xc, -1.3, &mut yc).unwrap();
+    assert_eq!(gpu.download(&yg).unwrap(), cpu.download(&yc).unwrap());
 }

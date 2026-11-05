@@ -10,6 +10,7 @@
 //! Dirichlet values enter through the right-hand side.
 
 use crate::grid::Grid;
+use crate::real::{convert, Real};
 use crate::surface::CoefficientMaps;
 use rayon::prelude::*;
 use std::f64::consts::PI;
@@ -72,33 +73,96 @@ impl StencilOperator {
     /// y = A x on interior nodes, y = 0 on boundary nodes. Boundary values of
     /// `x` ARE read (needed for right-hand-side assembly).
     pub fn apply(&self, x: &[f64], y: &mut [f64]) {
-        let [nx, ny, nz] = self.dims;
-        let (sx, sy, sz) = (1usize, nx, nx * ny);
-        let [cx, cy, cz] = self.coef;
-        y.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
-            if k == 0 || k == nz - 1 {
-                plane.fill(0.0);
-                return;
-            }
-            for j in 0..ny {
-                let row = &mut plane[j * nx..(j + 1) * nx];
-                if j == 0 || j == ny - 1 {
-                    row.fill(0.0);
-                    continue;
-                }
-                row[0] = 0.0;
-                row[nx - 1] = 0.0;
-                for (i, out) in row.iter_mut().enumerate().take(nx - 1).skip(1) {
-                    let c = i + nx * (j + ny * k);
-                    let xc = x[c];
-                    *out = cx * (self.eps_x[c - sx] * (xc - x[c - sx]) + self.eps_x[c] * (xc - x[c + sx]))
-                        + cy * (self.eps_y[c - sy] * (xc - x[c - sy]) + self.eps_y[c] * (xc - x[c + sy]))
-                        + cz * (self.eps_z[c - sz] * (xc - x[c - sz]) + self.eps_z[c] * (xc - x[c + sz]))
-                        + self.kvol[c] * xc;
-                }
-            }
-        });
+        apply7(
+            self.dims,
+            self.coef,
+            &self.eps_x,
+            &self.eps_y,
+            &self.eps_z,
+            &self.kvol,
+            x,
+            y,
+        );
     }
+}
+
+/// The 7-point operator in another precision (multigrid in f32).
+#[derive(Clone, Debug)]
+pub struct Stencil7<T: Real> {
+    pub dims: [usize; 3],
+    pub coef: [T; 3],
+    pub eps_x: Vec<T>,
+    pub eps_y: Vec<T>,
+    pub eps_z: Vec<T>,
+    pub kvol: Vec<T>,
+}
+
+impl<T: Real> Stencil7<T> {
+    /// Rounds every coefficient of `op` to `T`.
+    pub fn from_operator(op: &StencilOperator) -> Self {
+        Self {
+            dims: op.dims,
+            coef: op.coef.map(T::from_f64),
+            eps_x: convert(&op.eps_x),
+            eps_y: convert(&op.eps_y),
+            eps_z: convert(&op.eps_z),
+            kvol: convert(&op.kvol),
+        }
+    }
+
+    pub fn apply(&self, x: &[T], y: &mut [T]) {
+        apply7(
+            self.dims,
+            self.coef,
+            &self.eps_x,
+            &self.eps_y,
+            &self.eps_z,
+            &self.kvol,
+            x,
+            y,
+        );
+    }
+}
+
+/// y = A x for the 7-point operator in any precision (CUDA: `pb_apply`, same
+/// expression order).
+#[allow(clippy::too_many_arguments)]
+pub fn apply7<T: Real>(
+    dims: [usize; 3],
+    coef: [T; 3],
+    eps_x: &[T],
+    eps_y: &[T],
+    eps_z: &[T],
+    kvol: &[T],
+    x: &[T],
+    y: &mut [T],
+) {
+    let [nx, ny, nz] = dims;
+    let (sx, sy, sz) = (1usize, nx, nx * ny);
+    let [cx, cy, cz] = coef;
+    y.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+        if k == 0 || k == nz - 1 {
+            plane.fill(T::ZERO);
+            return;
+        }
+        for j in 0..ny {
+            let row = &mut plane[j * nx..(j + 1) * nx];
+            if j == 0 || j == ny - 1 {
+                row.fill(T::ZERO);
+                continue;
+            }
+            row[0] = T::ZERO;
+            row[nx - 1] = T::ZERO;
+            for (i, out) in row.iter_mut().enumerate().take(nx - 1).skip(1) {
+                let c = i + nx * (j + ny * k);
+                let xc = x[c];
+                *out = cx * (eps_x[c - sx] * (xc - x[c - sx]) + eps_x[c] * (xc - x[c + sx]))
+                    + cy * (eps_y[c - sy] * (xc - x[c - sy]) + eps_y[c] * (xc - x[c + sy]))
+                    + cz * (eps_z[c - sz] * (xc - x[c - sz]) + eps_z[c] * (xc - x[c + sz]))
+                    + kvol[c] * xc;
+            }
+        }
+    });
 }
 
 /// b = 4π l_B0 q − A g_ext on interior nodes (0 on the boundary), so that the

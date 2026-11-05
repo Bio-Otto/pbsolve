@@ -21,7 +21,7 @@ mod nvrtc;
 #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
 pub use imp::{
     device_count, driver_version, is_available, nvrtc_info, unavailable_reason, CudaBackend, CudaCoarse, CudaOperator,
-    NvrtcInfo,
+    CudaReal, CudaSingle, Dev, NvrtcInfo,
 };
 #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
 pub use nvrtc::CodeType;

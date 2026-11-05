@@ -50,6 +50,7 @@ should update the status table below.
 | Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
+| Mixed precision (unreleased) | `multigrid-f32`: ΔG_polar within 7.9e-13 of f64 (Born, 1YCR), equal iteration counts; 1YCR 1.42–1.55× faster on the CPU, 1.03–1.12× on the shared GPU (V-cycle 2× on the device); see *Mixed precision* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -232,6 +233,114 @@ frame already has three calculations to overlap.
   * the timings add up;
   * `pbsa_solvation_frames` = `pbsa_solvation_frame`;
   * `pbsolve mmpbsa --workers 1` and `--workers 3` write identical CSV files.
+
+## Mixed precision: f32 multigrid inside f64 CG
+
+**Method.** `preconditioner="multigrid-f32"` runs the multigrid V-cycle
+(hierarchy, smoother, transfers) on f32 copies of the operators and vectors.
+* The Galerkin products and the coarsest Cholesky factorisation stay in f64.
+* The CG iteration, the operator it applies and every energy stay in f64.
+* Rounding makes the preconditioner slightly non-symmetric, so CG uses the
+  flexible Polak–Ribière update [Golub & Ye 1999; Notay 2000]. Its extra
+  inner product is fused with ‖r‖² (`dot2`), so it adds no synchronisation.
+* This is the arrangement whose error McCormick, Benzaken & Tamstorf (2021)
+  analyse: the low precision only limits how much one cycle reduces the
+  error, never the accuracy the outer f64 iteration reaches.
+
+**Correctness.**
+* The f32 kernels round identically on the CPU and the GPU (same expression
+  order, no FMA contraction): bit-identical outputs in
+  `single_precision_kernels_match_the_cpu_bit_for_bit`.
+* One f32 V-cycle differs from the f64 V-cycle by 8.8e-8 relative.
+* Rewriting the kernels generically left the f64 path bit-identical: 1YCR
+  energies of every MM-PBSA species on CPU and CUDA were compared before and
+  after.
+
+**Energies and iterations** (CPU unless noted; 0.15 M; Born ion with
+`fadd 12`):
+
+| System | h (Å) | Iterations f64 / f32 | Relative difference in ΔG_polar |
+|---|---|---|---|
+| Born | 0.5 / 0.333 / 0.25 / 0.2 | equal | 2.4e-14 / 7.1e-14 / 1.0e-13 / 7.9e-13 |
+| 1YCR | 0.5 | 12, 12, 8, 8 both | 4.9e-14 (CUDA 6.3e-14) |
+| 1YCR | 0.35 | 12, 13, 8, 8 both | 2.9e-14 (CUDA 5.7e-14) |
+
+**Tolerance study.** 1YCR at h = 0.5 Å, tolerances 1e-8, 1e-10 and 1e-12.
+* Both precisions need the same iteration counts at every tolerance.
+* Both reach true residuals of 4–5e-13, so there is no stagnation at f32
+  precision.
+* At tolerances of 1e-10 and below, the f32 and f64 energies are identical to
+  the last bit. The energy error of CG is quadratic in the solution error,
+  since bᵀ(u − x_k) = ‖u − x_k‖²_A.
+* Plain PCG with the f32 cycle converged identically too. The flexible update
+  costs 1–2 % of solve time on the CPU and is kept because it remains correct
+  for a non-symmetric preconditioner.
+
+**Speed: full ΔG_polar calculation** (seconds, `PolarResult.timings`).
+CUDA ran on the RTX 2080 SUPER shared with three GROMACS jobs (60–99 %
+utilisation):
+
+| Platform | System | h (Å) | CG solve f64 → f32 | Setup f64 → f32 | Total f64 → f32 | Speed-up |
+|---|---|---|---|---|---|---|
+| CPU | 1YCR | 0.5 | 3.02 → 1.73 | 0.24 → 0.28 | 3.58 → 2.32 | 1.55× |
+| CPU | 1YCR | 0.35 | 8.88 → 5.65 | 0.76 → 0.88 | 10.66 → 7.50 | 1.42× |
+| CPU | Born | 0.35 | 0.072 → 0.082 | 0.011 → 0.011 | 0.093 → 0.102 | 0.91× |
+| CUDA | 1YCR | 0.5 | 0.62 → 0.55 | 0.36 → 0.40 | 1.31 → 1.27 | 1.03× |
+| CUDA | 1YCR | 0.35 | 1.44 → 0.99 | 0.98 → 1.04 | 3.29 → 2.93 | 1.12× |
+
+Setup grows by 10–15 % for the f32 copies of the operators. Small grids gain
+nothing.
+
+**GPU device throughput** (`cargo run --release -p pbsolve-cuda --features
+cuda-13 --example precision`; 800-atom globule; operations queued back to
+back; milliseconds):
+
+| Grid | Fine operator f64 / f32 | V-cycle f64 / f32 | Full CG solve f64-MG / f32-MG |
+|---|---|---|---|
+| 97³ | 0.35 / 0.22 (1.6×) | 7.8 / 3.9 (2.0×) | 237 / 226 (1.05×) |
+| 129³ | 0.71 / 0.38 (1.9×) | 13.4 / 8.1 (1.65×) | 404 / 267 (1.52×) |
+| 161³ | 1.52 / 0.53 (2.9×) | 23.6 / 11.2 (2.1×) | 601 / 437 (1.37×) |
+| 193³ | 2.35 / 0.86 (2.7×) | 38.4 / 18.8 (2.0×) | 873 / 540 (1.62×) |
+
+The V-cycle is twice as fast in f32 on the device. A full solve gains less,
+because each CG iteration also waits 9–10 ms on synchronisations (inner
+products and the host-side coarsest solve) on this shared GPU. Removing those
+round trips is the next GPU optimisation; it helps f64 as well.
+
+**MM-PBSA throughput** (1YCR, 8 frames per call, frames/s; Δ polar terms
+identical to 6 decimals):
+
+| Platform | Workers | multigrid | multigrid-f32 | Gain |
+|---|---|---|---|---|
+| CPU | 1 | 0.096 | 0.145 | 1.51× |
+| CPU | 2 | 0.135 | 0.209 | 1.55× |
+| CUDA | 1 | 0.265 | 0.272 | 1.03× |
+| CUDA | 3 | 0.566 | 0.647 | 1.14× |
+
+Concurrent workers (4.3) and the f32 cycle combine: on the CPU, 0.096 →
+0.209 frames/s (2.2×) against the sequential f64 run of the same frames.
+
+**Tests.**
+* `real.rs`: conversions.
+* `multigrid.rs`, 2 tests:
+  * the f32 kernels equal the f64 ones to rounding;
+  * the f32 V-cycle approximates the f64 one and is symmetric to 1e-5.
+* `solver.rs`, 4 tests:
+  * f64 accuracy (true residual ≤ 2·tol) down to tol 1e-13, with no extra
+    iterations;
+  * thread-count independence;
+  * `dot2` = two dots bit for bit;
+  * preconditioner names.
+* `pb.rs`: f32 energies = f64 energies to 1e-10.
+* `crates/pbsolve-cuda/tests/gpu.rs`:
+  * CUDA = CPU with f32 (|Δu|/|u| = 2.2e-16);
+  * CUBIN = PTX bit for bit, including f32;
+  * the fused `dot2` in both precisions;
+  * the f32 kernels match the CPU bit for bit.
+* `tests/test_multigrid.py`: agreement at 0.5 and 0.35 Å, tol 1e-12, the
+  option and the CLI.
+* `tests/test_platforms.py`: CUDA = CPU on the peptide with
+  `multigrid-f32`.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

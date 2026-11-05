@@ -39,6 +39,28 @@ def test_multigrid_and_jacobi_agree(peptide, kw):
     assert max(mg.iterations) * 8 < max(jac.iterations)
 
 
+@pytest.mark.parametrize("kw", [dict(grid_spacing=0.5), dict(grid_spacing=0.35, ionic_strength=0.15, pdie=4.0)])
+def test_single_precision_multigrid_agrees_with_double(peptide, kw):
+    """The f32 V-cycle is only a preconditioner: the f64 CG converges to the same answer."""
+    mg = solve(peptide, "multigrid", **kw)
+    mixed = solve(peptide, "multigrid-f32", **kw)
+    assert mixed.energy == pytest.approx(mg.energy, rel=1e-9)
+    assert mixed.solvated_kt == pytest.approx(mg.solvated_kt, rel=1e-10)
+    assert mixed.reference_kt == pytest.approx(mg.reference_kt, rel=1e-10)
+    assert set(mixed.preconditioners) == {"multigrid-f32"}
+    assert mixed.levels == mg.levels
+    assert all(a <= b + 1 for a, b in zip(mixed.iterations, mg.iterations)), (mixed.iterations, mg.iterations)
+    assert max(mixed.residuals) < 1e-8
+
+
+def test_single_precision_multigrid_at_tight_tolerance(peptide):
+    """Flexible CG keeps converging far below f32 precision."""
+    mixed = solve(peptide, "multigrid-f32", grid_spacing=0.5, tol=1e-12)
+    mg = solve(peptide, "multigrid", grid_spacing=0.5, tol=1e-12)
+    assert max(mixed.residuals) < 1e-12
+    assert mixed.energy == pytest.approx(mg.energy, rel=1e-13)
+
+
 def test_multigrid_iterations_are_spacing_independent(peptide):
     iters = [max(solve(peptide, "multigrid", grid_spacing=h).iterations) for h in (0.6, 0.45, 0.3)]
     assert max(iters) <= 20, iters
@@ -51,6 +73,8 @@ def test_preconditioner_option_is_validated_and_reported():
     assert pbsolve.Solver().params["preconditioner"] == "multigrid"
     assert pbsolve.Solver(preconditioner="MG").params["preconditioner"] == "multigrid"
     assert pbsolve.Solver(preconditioner="jacobi").params["preconditioner"] == "jacobi"
+    assert pbsolve.Solver(preconditioner="multigrid-f32").params["preconditioner"] == "multigrid-f32"
+    assert pbsolve.Solver(preconditioner="MG-F32").params["preconditioner"] == "multigrid-f32"
 
 
 def test_multigrid_solves_injected_maps(peptide):
@@ -81,9 +105,10 @@ def test_cli_preconditioner_option(tmp_path, capsys):
     sub = mol.subset(mol.select("chain B"))
     sub.write_pqr(str(pqr), sub.coords)
     out = {}
-    for pre in ("multigrid", "jacobi"):
+    for pre in ("multigrid", "multigrid-f32", "jacobi"):
         assert main(["solvation", str(pqr), "--platform", "CPU", "--spacing", "0.6", "--preconditioner", pre, "--json"]) == 0
         out[pre] = json.loads(capsys.readouterr().out)
         assert out[pre]["preconditioner"] == [pre]
     assert out["multigrid"]["polar_kcal_mol"] == pytest.approx(out["jacobi"]["polar_kcal_mol"], rel=1e-7)
+    assert out["multigrid-f32"]["polar_kcal_mol"] == pytest.approx(out["multigrid"]["polar_kcal_mol"], rel=1e-9)
     assert min(out["multigrid"]["multigrid_levels"]) >= 3

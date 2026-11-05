@@ -13,7 +13,9 @@ solution methods and integrations can be added.
   CPU (rayon) and CUDA backends implement a small `Backend` trait.
 * **Multigrid solver** — CG preconditioned by a geometric multigrid V-cycle:
   ~10–20 iterations independent of the grid spacing, 5–10× faster than
-  diagonal preconditioning on protein grids (`docs/VALIDATION.md`).
+  diagonal preconditioning on protein grids (`docs/VALIDATION.md`). Optional
+  single-precision V-cycle (`preconditioner="multigrid-f32"`): same energies,
+  ~1.5× faster on the CPU.
 * **Automatic GPU** — the CUDA build loads the driver and NVRTC at runtime;
   without a GPU it transparently runs on the CPU (`platform="auto"`).
 * **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for

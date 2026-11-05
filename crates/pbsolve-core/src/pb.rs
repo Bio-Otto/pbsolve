@@ -369,6 +369,29 @@ mod tests {
             for s in jac.stats_solvated.iter().chain(&jac.stats_reference) {
                 assert_eq!((s.preconditioner, s.levels), (Preconditioner::Jacobi, 1));
             }
+            // The f32 V-cycle changes neither the problem nor the accuracy.
+            let mixed = solve(
+                &atoms,
+                &PbParams {
+                    preconditioner: Preconditioner::MultigridF32,
+                    ..base.clone()
+                },
+                h,
+            );
+            for (a, b) in [
+                (mixed.solvated_kt, mg.solvated_kt),
+                (mixed.reference_kt, mg.reference_kt),
+                (mixed.energy_kt, mg.energy_kt),
+            ] {
+                assert!(
+                    (a - b).abs() < 1e-10 * b.abs(),
+                    "h={h}: multigrid-f32 {a} vs multigrid {b}"
+                );
+            }
+            for (s, t) in mixed.stats_solvated.iter().zip(&mg.stats_solvated) {
+                assert_eq!((s.preconditioner, s.levels), (Preconditioner::MultigridF32, t.levels));
+                assert!(s.iterations <= t.iterations + 1, "{s:?} vs {t:?}");
+            }
         }
     }
 

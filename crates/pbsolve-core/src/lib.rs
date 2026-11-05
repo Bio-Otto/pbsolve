@@ -38,6 +38,7 @@ pub mod multigrid;
 pub mod operator;
 pub mod params;
 pub mod pb;
+pub mod real;
 pub mod sasa;
 pub mod solver;
 pub mod spatial;
@@ -46,7 +47,7 @@ pub mod units;
 
 pub use autogrid::{apbs_effective_dime, DimePolicy, GridSpec};
 pub use backend::Backend;
-pub use cpu::CpuBackend;
+pub use cpu::{CpuBackend, CpuSingle};
 pub use error::{PbError, Result};
 pub use grid::Grid;
 pub use molecule::Atom;

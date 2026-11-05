@@ -19,11 +19,24 @@ pub trait Backend {
     type Operator;
     /// Device-resident copy of a coarse-grid 27-point (Galerkin) operator.
     type Coarse;
+    /// Single-precision twin on the same device (and CUDA stream) whose
+    /// vectors hold f32. It runs the multigrid V-cycle of
+    /// [`crate::params::Preconditioner::MultigridF32`]; its own `Single` is
+    /// itself. Scalars and host data stay f64 in the interface and are
+    /// rounded to f32 by the twin.
+    type Single: Backend;
 
     /// Human-readable platform name, e.g. "CPU" or "CUDA".
     fn platform(&self) -> &'static str;
     /// Device description for logging, e.g. "NVIDIA A100 (cc 8.0)".
     fn device_name(&self) -> String;
+
+    /// A handle to the single-precision twin.
+    fn single(&self) -> Result<Self::Single>;
+    /// y_i ← round_f32(x_i)
+    fn demote(&self, x: &Self::Vector, y: &mut <Self::Single as Backend>::Vector) -> Result<()>;
+    /// y_i ← x_i (exact widening)
+    fn promote(&self, x: &<Self::Single as Backend>::Vector, y: &mut Self::Vector) -> Result<()>;
 
     fn prepare(&self, op: Arc<StencilOperator>) -> Result<Self::Operator>;
     fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse>;
@@ -41,6 +54,11 @@ pub trait Backend {
     fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
     /// Σ a_i b_i, deterministic.
     fn dot(&self, a: &Self::Vector, b: &Self::Vector) -> Result<f64>;
+    /// (a·b, a·c) in one pass where the backend can fuse it (one device
+    /// synchronisation instead of two). Each value must equal `dot` bit for bit.
+    fn dot2(&self, a: &Self::Vector, b: &Self::Vector, c: &Self::Vector) -> Result<(f64, f64)> {
+        Ok((self.dot(a, b)?, self.dot(a, c)?))
+    }
     /// y_i ← y_i + α x_i
     fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
     /// y_i ← x_i + β y_i

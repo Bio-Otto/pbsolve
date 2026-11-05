@@ -50,7 +50,7 @@ class PolarResult:
     reference_kt: float
     iterations: list[int]
     residuals: list[float]
-    preconditioners: list[str]  # per linear solve: "multigrid" or "jacobi"
+    preconditioners: list[str]  # per linear solve: "multigrid", "multigrid-f32" or "jacobi"
     levels: list[int]  # multigrid levels per linear solve (1 for Jacobi)
     # seconds per stage: maps, boundary, assembly, setup, solve, energy, total
     timings: dict[str, float]
@@ -78,7 +78,7 @@ class Solver:
         tol: float = 1e-8,
         max_iter: int = 20000,
         dime_policy: str = "pbsolve",
-        preconditioner: str = "multigrid",
+        preconditioner: str = "multigrid",  # or "multigrid-f32" (f32 V-cycle), "jacobi"
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]: ...

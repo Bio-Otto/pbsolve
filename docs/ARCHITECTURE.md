@@ -60,15 +60,28 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   on the coarsest level (≤ 1000 unknowns). The V-cycle is a fixed SPD
   operator, so plain CG theory applies; CG iterations stay at ~10–20
   independent of the spacing. `preconditioner="jacobi"` keeps the v0.0.1
-  solver (bit-identical results).
+  solver (bit-identical results). `preconditioner="multigrid-f32"` evaluates
+  the same V-cycle in single precision. The outer CG stays in f64 and uses
+  the flexible (Polak–Ribière) update, because the rounded V-cycle is no
+  longer exactly symmetric. The converged f64 solution is unchanged and the
+  cycle moves half the data.
 
 ## The Backend contract
 
-A backend provides: `prepare`/`prepare_coarse` (upload the 7-point and
-27-point operators), `upload/zeros/download/read/write`, `apply` and
-`apply_coarse` (stencils), `restrict` and `prolong_add` (grid transfers),
-`dot` (deterministic), and the element-wise updates `axpy`, `xpay`, `axpby`,
-`scale` (diagonal scaling), `copy`. That is the entire surface a new
+A backend provides:
+* `prepare`/`prepare_coarse`, which upload the 7-point and 27-point
+  operators;
+* `upload/zeros/download/read/write`;
+* `apply` and `apply_coarse` (stencils);
+* `restrict` and `prolong_add` (grid transfers);
+* `dot` and the fused `dot2`, both deterministic;
+* the element-wise updates `axpy`, `xpay`, `axpby`, `scale` (diagonal
+  scaling) and `copy`;
+* a single-precision twin (`type Single`, `single()`) on the same device and
+  stream, with `demote`/`promote` to convert vectors.
+
+The kernels are written once, generic over `Real` (`f64`, `f32`; `real.rs`).
+CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`. That is the entire surface a new
 accelerator (HIP, Metal, SYCL) must implement; the multigrid setup (Galerkin
 products, smoother bounds, coarsest factorisation) runs once on the host and
 is shared. The CUDA kernels are written in the same operation order as the

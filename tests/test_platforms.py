@@ -148,7 +148,7 @@ def test_preload_can_be_disabled(monkeypatch, tmp_path):
 
 
 @needs_cuda
-@pytest.mark.parametrize("pre", ["multigrid", "jacobi"])
+@pytest.mark.parametrize("pre", ["multigrid", "multigrid-f32", "jacobi"])
 def test_cuda_matches_cpu_on_a_peptide(pre):
     """Multilevel hierarchy (Galerkin operators, transfers, coarsest solve) on the GPU."""
     coords, charges, radii = pbsolve.read_pqr("tests/data/1ycr_amber_opt_pdb2pqr.pqr")

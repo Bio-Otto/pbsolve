@@ -29,6 +29,15 @@
 
   On 1YCR, MM-PBSA frames/s rise by up to 1.4× on the CPU and 2.2× on the GPU,
   and results are identical, bit for bit, to sequential calls.
+- `preconditioner="multigrid-f32"` (CLI `--preconditioner multigrid-f32`)
+  runs the multigrid V-cycle in single precision inside the f64 CG, which
+  then uses the flexible Polak–Ribière update. Energies agree with
+  `multigrid` to ≤ 1e-13 relative, and iteration counts are equal. It is
+  opt-in.
+- Single-precision twin in the `Backend` trait (`type Single`, `single()`,
+  `demote`, `promote`) and a fused `dot2`; CPU and CUDA kernels are generic
+  over `Real` (f64/f32). `CpuSingle`, `CudaSingle`.
+  `cargo run -p pbsolve-cuda --example precision` measures device throughput.
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
@@ -51,6 +60,9 @@
   `preconditioner` and `levels`.
 - Energies change only within the solver tolerance (≤ 3e-8 relative on the
   tested systems); `preconditioner="jacobi"` reproduces v0.0.1 bit for bit.
+- The CPU and CUDA kernels were rewritten generically. The f64 results are
+  bit-identical to before (checked on 1YCR on both platforms). CUDA kernel
+  names gained an `_f64`/`_f32` suffix.
 - Each CUDA backend runs on a stream of its own instead of the legacy default
   stream, so several backends can work concurrently. Results are unchanged.
 - `pbsa_solvation_frame` is now `pbsa_solvation_frames` with one frame and

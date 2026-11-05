@@ -121,6 +121,18 @@ batch; identical energies to single-frame solves.
 iterative refinement, the arrangement analysed for multigrid by McCormick,
 Benzaken and Tamstorf [2021a, b]. Optional, off by default until the
 benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
+*Status: done (unreleased), opt-in.*
+* `preconditioner="multigrid-f32"`: an f32 V-cycle inside f64 flexible CG.
+  The kernels are generic over f64/f32, and the f64 results are unchanged bit
+  for bit.
+* ΔG_polar agrees with f64 to ≤ 7.9e-13 relative, with equal iteration
+  counts.
+* 1YCR is 1.42–1.55× faster on the CPU, and 2.2× faster together with 4.3.
+* On the shared GPU the V-cycle is 2× faster on the device, but a full
+  calculation gains only 1.03–1.12×. CG synchronisations (inner products and
+  the host coarsest solve) now dominate there.
+* Whether it becomes the default is the maintainer's decision
+  (`docs/VALIDATION.md`, *Mixed precision*).
 
 ### v0.2 — Accuracy
 
@@ -352,6 +364,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Dzubiella J, Swanson JMJ, McCammon JA. Coupling hydrophobicity, dispersion, and electrostatics in continuum solvent models. Phys. Rev. Lett. 96, 087802 (2006).
 * Geng W, Yu S, Wei GW. Treatment of charge singularities in implicit solvent models. J. Chem. Phys. 127, 114106 (2007).
 * Genheden S, Ryde U. The MM/PBSA and MM/GBSA methods to estimate ligand-binding affinities. Expert Opin. Drug Discov. 10, 449 (2015).
+* Golub GH, Ye Q. Inexact preconditioned conjugate gradient method with inner-outer iteration. SIAM J. Sci. Comput. 21, 1305 (1999).
 * Grant JA, Pickup BT, Nicholls A. A smooth permittivity function for Poisson–Boltzmann solvation methods. J. Comput. Chem. 22, 608 (2001).
 * Greene D, Qi R, Nguyen R, Qiu T, Luo R. Heterogeneous dielectric implicit membrane model for the calculation of MMPBSA binding free energies. J. Chem. Inf. Model. 59, 3041 (2019).
 * Hahn DF, et al. Best practices for constructing, preparing, and evaluating protein–ligand binding affinity benchmarks. Living J. Comp. Mol. Sci. 4, 1497 (2022).
@@ -366,6 +379,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * McCormick SF, Benzaken J, Tamstorf R. Algebraic error analysis for mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S392 (2021a).
 * Miller BR, McGee TD, Swails JM, Homeyer N, Gohlke H, Roitberg AE. MMPBSA.py: an efficient program for end-state free energy calculations. J. Chem. Theory Comput. 8, 3314 (2012).
 * Mobley DL, Guthrie JP. FreeSolv: a database of experimental and calculated hydration free energies, with input files. J. Comput. Aided Mol. Des. 28, 711 (2014).
+* Notay Y. Flexible conjugate gradients. SIAM J. Sci. Comput. 22, 1444 (2000).
 * Qi R, Botello-Smith WM, Luo R. Acceleration of linear finite-difference Poisson–Boltzmann methods on graphics processing units. J. Chem. Theory Comput. 13, 3378 (2017).
 * Qi R, Luo R. Robustness and efficiency of Poisson–Boltzmann modeling on graphics processing units. J. Chem. Inf. Model. 59, 409 (2019).
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
