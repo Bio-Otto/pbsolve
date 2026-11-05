@@ -50,7 +50,7 @@ should update the status table below.
 | Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
-| Mixed precision (unreleased) | `multigrid-f32`: ΔG_polar within 7.9e-13 of f64 (Born, 1YCR), equal iteration counts; 1YCR 1.42–1.55× faster on the CPU, 1.03–1.12× on the shared GPU (V-cycle 2× on the device); see *Mixed precision* |
+| Mixed precision (unreleased, the default) | `multigrid-f32`: ΔG_polar within 7.9e-13 of f64 (Born, 1YCR), equal iteration counts; 1YCR 1.42–1.55× faster on the CPU, 1.03–1.12× on the shared GPU (V-cycle 2× on the device). Default after a sweep of 28 cases (5 systems up to 20 179 atoms, 14 parameter variants, CPU and CUDA): ≤ 4.2e-13, identical iterations, CPU 1.4–1.7× on proteins; Born table and 1YCR APBS comparison unchanged; see *Mixed precision* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -304,8 +304,9 @@ back; milliseconds):
 
 The V-cycle is twice as fast in f32 on the device. A full solve gains less,
 because each CG iteration also waits 9–10 ms on synchronisations (inner
-products and the host-side coarsest solve) on this shared GPU. Removing those
-round trips is the next GPU optimisation; it helps f64 as well.
+products and the host-side coarsest solve) on this shared GPU. On an idle GPU
+these waits are small, and the host stages dominate instead (see *Where the
+time goes on the GPU* below).
 
 **MM-PBSA throughput** (1YCR, 8 frames per call, frames/s; Δ polar terms
 identical to 6 decimals):
@@ -319,6 +320,53 @@ identical to 6 decimals):
 
 Concurrent workers (4.3) and the f32 cycle combine: on the CPU, 0.096 →
 0.209 frames/s (2.2×) against the sequential f64 run of the same frames.
+
+**Making it the default.** Before `multigrid-f32` replaced `multigrid` as
+the default, both were run on a wider set. Each row is one ΔG_polar
+calculation with both preconditioners (0.15 M, h = 0.5 Å, `mdh`, `mol`,
+tol 1e-8, `fadd 20` unless noted):
+* Systems: Born ion (`fadd 12`), 1YCR (1 670 atoms), and pdb2pqr pH 4 models
+  of 1HPV (3 137), 1TII (10 862) and 5DK3 (20 179 atoms, 193×313×321 grid).
+* 1YCR variants: h = 0.35 Å; I = 0 and 1 M; pdie 2, 4, 20; sdie 2;
+  `vdw` and `harmonic` surfaces; `sdh` and `zero` boundaries; APBS grid
+  sizes; tol 1e-6 and 1e-12.
+
+| Platform | Cases | Iterations f64 = f32 | Max relative ΔG difference | Total time f64 → f32 |
+|---|---|---|---|---|
+| CPU | Born, 2 spacings | all | 6.1e-14 | 1.00–1.14× |
+| CPU | 1YCR, default + 14 variants | all | 4.2e-13 (tol 1e-6); ≤ 1.0e-13 otherwise | 1.41–1.67× |
+| CPU | 1HPV / 1TII / 5DK3 | all | 7.7e-14 | 5.64 → 3.77 s, 22.4 → 15.0 s, 56.7 → 40.4 s (1.40–1.50×) |
+| CUDA | Born, 1YCR (4 variants), 1HPV, 1TII, 5DK3 | all | 6.7e-14 | 1.04–1.24× |
+
+CUDA ran on the RTX 2080 SUPER with no other jobs. Also unchanged by the
+switch:
+* the Born-ion table (`examples/born.rs`): every energy, error and
+  iteration count; only the times change;
+* the 1YCR APBS comparison (`pbsolve apbs compare … --ligand-chain B`): every
+  printed energy and potential difference is identical for `multigrid` and
+  `multigrid-f32`, and all three species and ΔΔG pass.
+
+`preconditioner="multigrid"` still reproduces the previous default bit for
+bit. `pbsolve apbs compare/run` accept `--preconditioner`.
+
+**Where the time goes on the GPU.** On an otherwise idle GPU, the CG solve is
+a small part of a calculation. Seconds per ΔG_polar (`PolarResult.timings`,
+f64 multigrid, 18 CPU threads for the host stages):
+
+| System | Platform | Maps | Boundary | Assembly | Setup | Solve | Total |
+|---|---|---|---|---|---|---|---|
+| 1YCR | CUDA | 0.14 | 0.07 | 0.09 | 0.26 | 0.19 | 0.76 |
+| 1TII | CUDA | 0.69 | 1.05 | 0.49 | 1.21 | 1.25 | 4.72 |
+| 5DK3 | CUDA | 1.58 | 4.02 | 1.30 | 3.39 | 3.01 | 13.47 |
+| 5DK3 | CPU | 1.58 | 4.06 | 1.53 | 2.80 | 45.19 | 55.31 |
+
+* The host stages are 75–78 % of a CUDA calculation: the dielectric and ion
+  maps, the Debye–Hückel boundary (a sum over all atoms for every boundary
+  node), the right-hand side, and the multigrid setup (Galerkin products,
+  factorisation, uploads).
+* The 9–10 ms per CG iteration measured earlier came from sharing the GPU
+  with three GROMACS jobs. On the idle GPU, a 1YCR solve takes 0.19 s for
+  12 iterations on two levels.
 
 **Tests.**
 * `real.rs`: conversions.
@@ -338,7 +386,11 @@ Concurrent workers (4.3) and the f32 cycle combine: on the CPU, 0.096 →
   * the fused `dot2` in both precisions;
   * the f32 kernels match the CPU bit for bit.
 * `tests/test_multigrid.py`: agreement at 0.5 and 0.35 Å, tol 1e-12, the
-  option and the CLI.
+  option, the CLI, and the default (`multigrid-f32`, bit-identical to the
+  explicit option).
+* `pb.rs`: the default parameters use the f32 cycle; thread-count
+  independence for both multigrid variants.
+* `tests/test_apbs_tools.py`: `--preconditioner` of `pbsolve apbs run`.
 * `tests/test_platforms.py`: CUDA = CPU on the peptide with
   `multigrid-f32`.
 

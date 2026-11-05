@@ -78,7 +78,7 @@ class Solver:
         tol: float = 1e-8,
         max_iter: int = 20000,
         dime_policy: str = "pbsolve",
-        preconditioner: str = "multigrid",  # or "multigrid-f32" (f32 V-cycle), "jacobi"
+        preconditioner: str = "multigrid-f32",  # f32 V-cycle in f64 CG; or "multigrid" (f64), "jacobi"
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]: ...

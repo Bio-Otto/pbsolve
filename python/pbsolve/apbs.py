@@ -132,8 +132,15 @@ class ElecCalc:
     writes: list[tuple[str, str]] = field(default_factory=list)  # (APBS type, file stem), DX format
     requested_dims: Optional[tuple[int, int, int]] = None  # dims in the file, before APBS' reset
 
-    def solver(self, platform: str = "auto", tol: Optional[float] = None, max_iter: int = 20000) -> Solver:
-        """A pbsolve Solver with exactly these physical settings."""
+    def solver(
+        self,
+        platform: str = "auto",
+        tol: Optional[float] = None,
+        max_iter: int = 20000,
+        preconditioner: Optional[str] = None,
+    ) -> Solver:
+        """A pbsolve Solver with exactly these physical settings
+        (``preconditioner=None``: the Solver default)."""
         return Solver(
             platform=platform,
             pdie=self.pdie,
@@ -146,6 +153,7 @@ class ElecCalc:
             bcfl=self.bcfl,
             tol=tol if tol is not None else min(self.etol or 1e-8, 1e-8),
             max_iter=max_iter,
+            **_preconditioner(preconditioner),
         )
 
     @property
@@ -154,6 +162,11 @@ class ElecCalc:
         if self.method == "mg-manual":
             return 1
         return max(2, len(self.grid.levels))
+
+
+def _preconditioner(name: Optional[str]) -> dict[str, str]:
+    """Solver keyword for an optional preconditioner (None keeps the default)."""
+    return {} if name is None else {"preconditioner": name}
 
 
 def elec_from_solver(
@@ -989,6 +1002,7 @@ def run_input(
     with_apbs: bool = True,
     exe: Optional[str] = None,
     workdir: Optional[PathLike] = None,
+    preconditioner: Optional[str] = None,
 ) -> RunReport:
     """Evaluate an APBS input file with pbsolve; with ``with_apbs`` also run
     APBS on the same file and compare energies and grids."""
@@ -1015,7 +1029,7 @@ def run_input(
     apbs_e: dict[str, Optional[float]] = {}
     for n, (e, grp) in enumerate(zip(inp.elecs, groups), start=1):
         coords, charges, radii = mols[e.mol - 1]
-        s = e.solver(platform=platform)
+        s = e.solver(platform=platform, preconditioner=preconditioner)
         _, _, _, ekt = s.potential(coords, charges, radii, grid=e.grid)
         ours = ekt * kt_kj_per_mol(e.temperature)
         theirs = grp[-1].energy_kj if grp else None
@@ -1079,6 +1093,15 @@ def _add_solver_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--cfac", type=float, default=1.7)
     ap.add_argument("--fadd", type=float, default=20.0)
     ap.add_argument("--tol", type=float, default=1e-8, help="pbsolve tolerance; also written as APBS etol")
+    _add_preconditioner_arg(ap)
+
+
+def _add_preconditioner_arg(ap: argparse.ArgumentParser) -> None:
+    ap.add_argument(
+        "--preconditioner",
+        choices=["multigrid-f32", "multigrid", "jacobi"],
+        help="CG preconditioner of pbsolve (default: the Solver default, multigrid-f32)",
+    )
 
 
 def _as_pqr(a: argparse.Namespace) -> str:
@@ -1136,6 +1159,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     r.add_argument("--no-apbs", action="store_true", help="only run pbsolve")
     r.add_argument("--apbs", help="APBS executable")
     r.add_argument("--workdir", help="where to run APBS (default: the input's directory)")
+    _add_preconditioner_arg(r)
     r.add_argument("--json")
     r.add_argument("--energy-rtol", type=float, default=1e-3)
 
@@ -1143,7 +1167,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if a.action == "run":
             rep: Any = run_input(
-                a.input, platform=a.platform, with_apbs=not a.no_apbs, exe=a.apbs, workdir=a.workdir
+                a.input,
+                platform=a.platform,
+                with_apbs=not a.no_apbs,
+                exe=a.apbs,
+                workdir=a.workdir,
+                preconditioner=a.preconditioner,
             )
             ok = a.no_apbs or rep.passed(a.energy_rtol)
         else:
@@ -1163,6 +1192,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 fadd=a.fadd,
                 tol=a.tol,
                 dime_policy="apbs",
+                **_preconditioner(a.preconditioner),
             )
             maps = not a.no_maps
             a.pqr = _as_pqr(a)

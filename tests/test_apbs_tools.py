@@ -69,6 +69,27 @@ def test_input_round_trip(tmp_path, molecule, molecule_pqr):
     assert back.prints == [[(1, "solv"), (-1, "ref")]]
 
 
+def test_run_input_preconditioner_option(tmp_path, molecule, molecule_pqr, capsys):
+    """`pbsolve apbs run --no-apbs` honours --preconditioner; all choices give the same energies."""
+    coords, _, radii = molecule
+    s = pbsolve.Solver(grid_spacing=0.6, fadd=10.0, ionic_strength=0.15, dime_policy="apbs")
+    grid = s.make_grid(coords, radii)
+    elecs = [apbs.elec_from_solver(s, grid, "solv"), apbs.elec_from_solver(s, grid, "ref", reference=True)]
+    path = tmp_path / "user.in"
+    path.write_text(apbs.write_input([molecule_pqr.name], elecs, ["solv - ref"]))
+    kj = {}
+    for pre in (None, "multigrid-f32", "multigrid", "jacobi"):
+        rep = apbs.run_input(path, platform="CPU", with_apbs=False, preconditioner=pre)
+        kj[pre] = [e["pbsolve_kj"] for e in rep.elecs]
+    assert kj[None] == kj["multigrid-f32"]  # the default, bit for bit
+    for pre in ("multigrid", "jacobi"):
+        assert kj[pre] == pytest.approx(kj[None], rel=1e-7)
+    assert apbs.main(["run", str(path), "--platform", "CPU", "--no-apbs", "--preconditioner", "multigrid"]) == 0
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        apbs.main(["run", str(path), "--no-apbs", "--preconditioner", "ilu"])
+
+
 def test_parse_input_mol_centering_and_reset(tmp_path, molecule, molecule_pqr):
     coords = molecule[0]
     path = tmp_path / "x.in"

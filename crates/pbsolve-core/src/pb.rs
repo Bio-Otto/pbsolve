@@ -424,22 +424,56 @@ mod tests {
     #[test]
     fn multigrid_results_do_not_depend_on_the_thread_count() {
         let atoms = small_protein();
+        for preconditioner in [Preconditioner::MultigridF32, Preconditioner::Multigrid] {
+            let params = PbParams {
+                preconditioner,
+                ..PbParams::default()
+            }
+            .with_salt(0.15, 2.0);
+            let run = |threads: usize| {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+                pool.install(|| solve(&atoms, &params, 0.4))
+            };
+            let (a, b) = (run(1), run(4));
+            assert_eq!(a.energy_kt.to_bits(), b.energy_kt.to_bits(), "{preconditioner:?}");
+            // Everything but the wall times must match exactly.
+            let numerics = |r: &PolarSolvation| {
+                r.stats_solvated
+                    .iter()
+                    .chain(&r.stats_reference)
+                    .map(|s| (s.iterations, s.relative_residual.to_bits(), s.preconditioner, s.levels))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(numerics(&a), numerics(&b));
+            assert!(numerics(&a).iter().all(|n| n.2 == preconditioner));
+        }
+    }
+
+    #[test]
+    fn default_parameters_use_the_single_precision_multigrid() {
+        assert_eq!(PbParams::default().preconditioner, Preconditioner::MultigridF32);
+        let atoms = small_protein();
         let params = PbParams::default().with_salt(0.15, 2.0);
-        let run = |threads: usize| {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-            pool.install(|| solve(&atoms, &params, 0.4))
-        };
-        let (a, b) = (run(1), run(4));
-        assert_eq!(a.energy_kt.to_bits(), b.energy_kt.to_bits());
-        // Everything but the wall times must match exactly.
-        let numerics = |r: &PolarSolvation| {
-            r.stats_solvated
-                .iter()
-                .chain(&r.stats_reference)
-                .map(|s| (s.iterations, s.relative_residual.to_bits(), s.preconditioner, s.levels))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(numerics(&a), numerics(&b));
+        let default = solve(&atoms, &params, 0.4);
+        let f64_cycle = solve(
+            &atoms,
+            &PbParams {
+                preconditioner: Preconditioner::Multigrid,
+                ..params.clone()
+            },
+            0.4,
+        );
+        for s in default.stats_solvated.iter().chain(&default.stats_reference) {
+            assert_eq!(s.preconditioner, Preconditioner::MultigridF32);
+            assert!(s.levels >= 2 && s.relative_residual < params.tol, "{s:?}");
+        }
+        let rel = (default.energy_kt - f64_cycle.energy_kt).abs() / f64_cycle.energy_kt.abs();
+        assert!(
+            rel < 1e-9,
+            "default {} vs f64 multigrid {}",
+            default.energy_kt,
+            f64_cycle.energy_kt
+        );
     }
 
     #[test]

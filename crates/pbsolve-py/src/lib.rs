@@ -321,7 +321,7 @@ struct PyPolarResult {
     reference_kt: f64,
     iterations: Vec<usize>,
     residuals: Vec<f64>,
-    /// Preconditioner used by each linear solve ("multigrid" or "jacobi").
+    /// Preconditioner used by each linear solve ("multigrid-f32", "multigrid" or "jacobi").
     preconditioners: Vec<&'static str>,
     /// Multigrid levels of each linear solve (1 for Jacobi).
     levels: Vec<usize>,
@@ -516,7 +516,7 @@ impl PySolver {
         ionic_strength = 0.0, ion_radius = 2.0, ions = None,
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
-        preconditioner = "multigrid"
+        preconditioner = "multigrid-f32"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(

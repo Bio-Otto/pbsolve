@@ -61,6 +61,17 @@ def test_single_precision_multigrid_at_tight_tolerance(peptide):
     assert mixed.energy == pytest.approx(mg.energy, rel=1e-13)
 
 
+def test_default_solver_uses_the_single_precision_multigrid(peptide):
+    """The default is multigrid-f32; "multigrid" keeps the f64 cycle of earlier versions."""
+    default = pbsolve.Solver(platform="CPU", fadd=12.0, ionic_strength=0.15).polar_solvation(*peptide)
+    explicit = solve(peptide, "multigrid-f32", ionic_strength=0.15)
+    double = solve(peptide, "multigrid", ionic_strength=0.15)
+    assert set(default.preconditioners) == {"multigrid-f32"}
+    assert default.energy == explicit.energy  # bit-identical: same code path
+    assert default.energy == pytest.approx(double.energy, rel=1e-9)
+    assert all(a <= b + 1 for a, b in zip(default.iterations, double.iterations))
+
+
 def test_multigrid_iterations_are_spacing_independent(peptide):
     iters = [max(solve(peptide, "multigrid", grid_spacing=h).iterations) for h in (0.6, 0.45, 0.3)]
     assert max(iters) <= 20, iters
@@ -70,7 +81,7 @@ def test_multigrid_iterations_are_spacing_independent(peptide):
 def test_preconditioner_option_is_validated_and_reported():
     with pytest.raises(ValueError, match="preconditioner"):
         pbsolve.Solver(preconditioner="ilu")
-    assert pbsolve.Solver().params["preconditioner"] == "multigrid"
+    assert pbsolve.Solver().params["preconditioner"] == "multigrid-f32"
     assert pbsolve.Solver(preconditioner="MG").params["preconditioner"] == "multigrid"
     assert pbsolve.Solver(preconditioner="jacobi").params["preconditioner"] == "jacobi"
     assert pbsolve.Solver(preconditioner="multigrid-f32").params["preconditioner"] == "multigrid-f32"
@@ -112,3 +123,8 @@ def test_cli_preconditioner_option(tmp_path, capsys):
     assert out["multigrid"]["polar_kcal_mol"] == pytest.approx(out["jacobi"]["polar_kcal_mol"], rel=1e-7)
     assert out["multigrid-f32"]["polar_kcal_mol"] == pytest.approx(out["multigrid"]["polar_kcal_mol"], rel=1e-9)
     assert min(out["multigrid"]["multigrid_levels"]) >= 3
+    # Without the option the CLI uses the default, multigrid-f32.
+    assert main(["solvation", str(pqr), "--platform", "CPU", "--spacing", "0.6", "--json"]) == 0
+    default = json.loads(capsys.readouterr().out)
+    assert default["preconditioner"] == ["multigrid-f32"]
+    assert default["polar_kcal_mol"] == out["multigrid-f32"]["polar_kcal_mol"]

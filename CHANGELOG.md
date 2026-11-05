@@ -32,8 +32,7 @@
 - `preconditioner="multigrid-f32"` (CLI `--preconditioner multigrid-f32`)
   runs the multigrid V-cycle in single precision inside the f64 CG, which
   then uses the flexible Polak–Ribière update. Energies agree with
-  `multigrid` to ≤ 1e-13 relative, and iteration counts are equal. It is
-  opt-in.
+  `multigrid` to ≤ 1e-12 relative, and iteration counts are equal.
 - Single-precision twin in the `Backend` trait (`type Single`, `single()`,
   `demote`, `promote`) and a fused `dot2`; CPU and CUDA kernels are generic
   over `Real` (f64/f32). `CpuSingle`, `CudaSingle`.
@@ -41,6 +40,18 @@
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
+
+### Changed
+
+- The default preconditioner is now `multigrid-f32` (Rust
+  `Preconditioner::DEFAULT`, `PbParams`, `SolverOptions`, the Python `Solver`
+  and the CLI). Default energies change by ≤ 4.2e-13 relative with identical
+  iteration counts (Born ion and four proteins up to 20 179 atoms, 14
+  parameter variants, CPU and CUDA; `docs/VALIDATION.md`), and full protein
+  calculations are 1.4–1.7× faster on the CPU. `preconditioner="multigrid"`
+  reproduces the previous default bit for bit.
+- `pbsolve apbs compare` and `pbsolve apbs run` accept `--preconditioner`
+  (`run_input(..., preconditioner=...)`).
 
 ### Fixed
 

@@ -52,7 +52,7 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   state (ε = pdie everywhere, no ions) solved on the *same* grids so the grid
   self-energy cancels exactly.
 * **Linear solver:** preconditioned CG, written once against `Backend`.
-  Default preconditioner: one geometric multigrid V-cycle (`multigrid.rs`):
+  Preconditioner: one geometric multigrid V-cycle (`multigrid.rs`):
   per-axis vertex coarsening `n → n/2 + 1` (any grid size; axes with < 5 nodes
   are kept), trilinear prolongation `P` and restriction `Pᵀ`, Galerkin coarse
   operators `PᵀAP` (27-point, exactly symmetric), Chebyshev smoothing of
@@ -60,11 +60,12 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   on the coarsest level (≤ 1000 unknowns). The V-cycle is a fixed SPD
   operator, so plain CG theory applies; CG iterations stay at ~10–20
   independent of the spacing. `preconditioner="jacobi"` keeps the v0.0.1
-  solver (bit-identical results). `preconditioner="multigrid-f32"` evaluates
-  the same V-cycle in single precision. The outer CG stays in f64 and uses
-  the flexible (Polak–Ribière) update, because the rounded V-cycle is no
-  longer exactly symmetric. The converged f64 solution is unchanged and the
-  cycle moves half the data.
+  solver (bit-identical results). The default, `preconditioner="multigrid-f32"`
+  (`Preconditioner::DEFAULT`), evaluates the same V-cycle in single precision.
+  The outer CG stays in f64 and uses the flexible (Polak–Ribière) update,
+  because the rounded V-cycle is no longer exactly symmetric. The converged
+  f64 solution is unchanged and the cycle moves half the data.
+  `preconditioner="multigrid"` runs the cycle in f64.
 
 ## The Backend contract
 

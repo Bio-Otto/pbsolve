@@ -121,7 +121,7 @@ batch; identical energies to single-frame solves.
 iterative refinement, the arrangement analysed for multigrid by McCormick,
 Benzaken and Tamstorf [2021a, b]. Optional, off by default until the
 benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
-*Status: done (unreleased), opt-in.*
+*Status: done (unreleased); the default since the robustness sweep below.*
 * `preconditioner="multigrid-f32"`: an f32 V-cycle inside f64 flexible CG.
   The kernels are generic over f64/f32, and the f64 results are unchanged bit
   for bit.
@@ -131,8 +131,13 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
 * On the shared GPU the V-cycle is 2× faster on the device, but a full
   calculation gains only 1.03–1.12×. CG synchronisations (inner products and
   the host coarsest solve) now dominate there.
-* Whether it becomes the default is the maintainer's decision
-  (`docs/VALIDATION.md`, *Mixed precision*).
+* Made the default after a robustness sweep: the Born ion and four proteins
+  (up to 20 179 atoms) with 14 parameter variants on CPU and CUDA, with
+  energies within 4.2e-13 and equal iteration counts (`docs/VALIDATION.md`,
+  *Mixed precision*). `preconditioner="multigrid"` keeps the f64 cycle.
+* On an idle GPU the host stages (maps, Debye–Hückel boundary, right-hand
+  side, multigrid setup) take 75–78 % of a calculation; the CG solve is
+  the smaller part.
 
 ### v0.2 — Accuracy
 

@@ -76,7 +76,18 @@ fn main() {
         let setup = t.elapsed().as_secs_f64();
         let levels = h.levels();
         let t = Instant::now();
-        let (um, sm) = pcg(&be, op.clone(), &b, SolverOptions::new(1e-8, 50_000)).unwrap();
+        // The f64 V-cycle, as documented in docs/VALIDATION.md (the default
+        // multigrid-f32 needs the same iterations).
+        let (um, sm) = pcg(
+            &be,
+            op.clone(),
+            &b,
+            SolverOptions {
+                preconditioner: Preconditioner::Multigrid,
+                ..SolverOptions::new(1e-8, 50_000)
+            },
+        )
+        .unwrap();
         let tm = t.elapsed().as_secs_f64();
 
         let diff = uj.iter().zip(&um).map(|(a, b)| (a - b) * (a - b)).sum::<f64>().sqrt();

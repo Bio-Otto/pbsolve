@@ -10,18 +10,23 @@ pub enum Preconditioner {
     /// Diagonal scaling. Iteration counts grow with grid refinement.
     Jacobi,
     /// Geometric multigrid V-cycle (Galerkin coarse operators, Chebyshev
-    /// smoothing, see [`crate::multigrid`]). Falls back to Jacobi for grids it
-    /// cannot coarsen far enough.
+    /// smoothing, see [`crate::multigrid`]) in f64. Falls back to Jacobi for
+    /// grids it cannot coarsen far enough. Bit-identical to the default of
+    /// pbsolve before mixed precision.
     Multigrid,
-    /// The same V-cycle evaluated in single precision (f32 operators and
-    /// vectors) inside the f64 conjugate-gradient iteration, which then uses
-    /// the flexible (Polak–Ribière) update [Notay 2000]. The converged
-    /// solution satisfies the f64 system to the same tolerance; the cycle
-    /// moves half the data.
+    /// The default: the same V-cycle evaluated in single precision (f32
+    /// operators and vectors) inside the f64 conjugate-gradient iteration,
+    /// which then uses the flexible (Polak–Ribière) update [Notay 2000]. The
+    /// converged solution satisfies the f64 system to the same tolerance; the
+    /// cycle moves half the data. Falls back to Jacobi like [`Self::Multigrid`].
     MultigridF32,
 }
 
 impl Preconditioner {
+    /// Default of [`PbParams`], [`crate::solver::SolverOptions`] and the
+    /// Python `Solver`.
+    pub const DEFAULT: Self = Self::MultigridF32;
+
     pub fn parse(s: &str) -> Result<Self> {
         match s.to_ascii_lowercase().as_str() {
             "jacobi" => Ok(Self::Jacobi),
@@ -158,7 +163,7 @@ impl Default for PbParams {
             bcfl: BoundaryCondition::Mdh,
             tol: 1.0e-8,
             max_iter: 20_000,
-            preconditioner: Preconditioner::Multigrid,
+            preconditioner: Preconditioner::DEFAULT,
         }
     }
 }

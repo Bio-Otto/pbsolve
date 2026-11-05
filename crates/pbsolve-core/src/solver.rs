@@ -27,7 +27,7 @@ impl SolverOptions {
         Self {
             tol,
             max_iter,
-            preconditioner: Preconditioner::Multigrid,
+            preconditioner: Preconditioner::DEFAULT,
         }
     }
 }
@@ -330,5 +330,9 @@ mod tests {
         }
         assert_eq!(Preconditioner::parse("MG-F32").unwrap(), Preconditioner::MultigridF32);
         assert!(Preconditioner::parse("multigrid-f16").is_err());
+        // One default everywhere: PbParams, SolverOptions (and the Python Solver).
+        assert_eq!(Preconditioner::DEFAULT, Preconditioner::MultigridF32);
+        assert_eq!(SolverOptions::new(1e-8, 10).preconditioner, Preconditioner::DEFAULT);
+        assert_eq!(crate::PbParams::default().preconditioner, Preconditioner::DEFAULT);
     }
 }
