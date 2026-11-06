@@ -87,19 +87,35 @@ A backend provides:
 * the multigrid setup (f64 backends only): `galerkin` (Galerkin operator and
   inverse diagonal of the next level), `gershgorin_lmax`, `coarse_to_host`
   (for the coarsest factorisation), and `demote_operator`/`demote_coarse`
-  (f32 copies for the twin).
+  (f32 copies for the twin);
+* the assembly of the linear system (f64 backends only): `mark_maps`
+  (dielectric and ion maps: a fill value, then spheres marked pass by pass),
+  `scatter` (sparse charges and boundary values into a zero vector),
+  `assemble_operator` (κ̄²V and the inverse diagonal from the maps),
+  `source_rhs` (b = 4π l_B q − A g on interior nodes), `operator_to_host`
+  (grids too small to coarsen), and `upload_owned`/`synchronize` with
+  defaults.
 
 The kernels are written once, generic over `Real` (`f64`, `f32`; `real.rs`).
-CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`; the setup kernels
-exist in f64 only. That is the entire surface a new accelerator (HIP, Metal,
-SYCL) must implement. `Hierarchy::build` is the host reference of the setup;
-`Levels::build` runs the same steps through the backend, so the CUDA backend
-builds the coarse operators in device memory and only the coarsest level
-(≤ 1000 unknowns) is factorised on the host. Each Galerkin row is accumulated
-by one thread in the host's loop order. The CUDA kernels are written in the
-same operation order as the CPU ones and compiled with `--fmad=false`, so the
-setup is bit-identical to the host and only the dot-product reduction order
-differs.
+CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`; the setup and
+assembly kernels exist in f64 only. That is the entire surface a new
+accelerator (HIP, Metal, SYCL) must implement. `Hierarchy::build` is the host
+reference of the setup; `Levels::build` runs the same steps through the
+backend, so the CUDA backend builds the coarse operators in device memory and
+only the coarsest level (≤ 1000 unknowns) is factorised on the host. Each
+Galerkin row is accumulated by one thread in the host's loop order. The CUDA
+kernels are written in the same operation order as the CPU ones and compiled
+with `--fmad=false`, so the setup is bit-identical to the host and only the
+dot-product reduction order differs.
+
+The same holds for the assembly. `surface::maps_on` decides which spheres
+mark which value (solute spheres, probe spheres, ion-exclusion spheres) and
+calls `mark_maps`; the CPU backend runs `surface::mark_map`, the CUDA backend
+marks one sphere per warp with the host's node test. Charges are spread on
+the host (`spread_charges_sparse`, the same sums as `spread_charges`) and
+scattered on the device together with the boundary values; `pcg_on` then
+solves without any host copy of the operator. Only the surface itself (SAS
+points), the boundary values and the final potential stay on the host.
 
 ## Concurrent calculations (trajectories, MM-PBSA)
 

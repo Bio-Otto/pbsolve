@@ -65,6 +65,24 @@ pub fn interior_count(d: [usize; 3]) -> usize {
     d.iter().map(|&n| n.saturating_sub(2)).product()
 }
 
+/// Dimensions of the coarsest level of the hierarchy of a `fine` grid: the
+/// level sequence of [`Hierarchy::build`] and [`Levels::build`] depends on
+/// the dimensions only.
+pub fn coarsest_dims(fine: [usize; 3]) -> [usize; 3] {
+    let mut dims = fine;
+    while interior_count(dims) > COARSEST_MAX_UNKNOWNS {
+        let Some(t) = Transfer::new(dims) else { break };
+        dims = t.coarse;
+    }
+    dims
+}
+
+/// False where [`Hierarchy::build`] and [`Levels::build`] return `None`
+/// (coarsest level too large for the banded factorisation).
+pub fn hierarchy_fits(fine: [usize; 3]) -> bool {
+    BandedCholesky::storage(coarsest_dims(fine)) <= MAX_BAND_VALUES
+}
+
 // ------------------------------------------------------------------ transfer
 
 /// Grid transfer between one level and the next coarser one.
@@ -447,6 +465,11 @@ pub struct BandedCholesky {
 }
 
 impl BandedCholesky {
+    /// Grid dimensions of the factorised level.
+    pub fn dims(&self) -> [usize; 3] {
+        self.dims
+    }
+
     /// Storage the factor of a grid would need (number of values).
     pub fn storage(dims: [usize; 3]) -> usize {
         let (ix, iy) = (dims[0].saturating_sub(2), dims[1].saturating_sub(2));
@@ -626,17 +649,17 @@ pub struct Levels<B: Backend> {
 }
 
 impl<B: Backend> Levels<B> {
-    /// Builds the hierarchy of `fine` with the backend's own setup kernels
-    /// (`dev` is `fine` prepared on `be`, which must compute in f64). The
-    /// steps and every operator are those of [`Hierarchy::build`], bit for
-    /// bit; only the coarsest level is factorised on the host. Returns `None`
-    /// where [`Hierarchy::build`] does.
-    pub fn build(be: &B, fine: &StencilOperator, dev: &B::Operator, smoother: Chebyshev) -> Result<Option<Self>> {
+    /// Builds the hierarchy of the fine operator `dev` (grid `fine_dims`)
+    /// with the backend's own setup kernels (`be` must compute in f64). The
+    /// steps and every operator are those of [`Hierarchy::build`] for the
+    /// same operator, bit for bit; only the coarsest level is factorised on
+    /// the host. Returns `None` where [`Hierarchy::build`] does.
+    pub fn build(be: &B, fine_dims: [usize; 3], dev: &B::Operator, smoother: Chebyshev) -> Result<Option<Self>> {
         let mut transfers = Vec::new();
         let mut coarse: Vec<B::Coarse> = Vec::new();
         let mut inv_diag = Vec::new();
         let mut lmax = vec![be.gershgorin_lmax(LevelOp::Fine(dev))?];
-        let mut dims = fine.dims;
+        let mut dims = fine_dims;
         while interior_count(dims) > COARSEST_MAX_UNKNOWNS {
             let Some(t) = Transfer::new(dims) else { break };
             let (next, inv) = {
@@ -657,7 +680,7 @@ impl<B: Backend> Levels<B> {
         }
         let coarsest = match coarse.last() {
             Some(s) => BandedCholesky::factor(LevelMatrix::TwentySeven(&be.coarse_to_host(s)?))?,
-            None => BandedCholesky::factor(LevelMatrix::Seven(fine))?,
+            None => BandedCholesky::factor(LevelMatrix::Seven(&be.operator_to_host(dev)?))?,
         };
         Ok(Some(Self {
             transfers,
@@ -712,6 +735,11 @@ impl<B: Backend> Levels<B> {
     /// Number of levels including the fine grid.
     pub fn levels(&self) -> usize {
         self.coarse.len() + 1
+    }
+
+    /// Dimensions of the fine grid.
+    pub fn fine_dims(&self) -> [usize; 3] {
+        self.transfers.first().map_or(self.coarsest.dims(), |t| t.fine)
     }
 }
 
@@ -773,14 +801,15 @@ pub struct MultigridPreconditioner<B: Backend> {
 impl<B: Backend> MultigridPreconditioner<B> {
     /// The V-cycle of a host hierarchy, uploaded to `be`.
     pub fn new(be: &B, fine: &StencilOperator, h: Hierarchy) -> Result<Self> {
-        Self::from_levels(be, fine, Levels::upload(be, h)?)
+        Self::from_levels(be, be.upload(&fine.inv_diag)?, Levels::upload(be, h)?)
     }
 
-    /// The V-cycle of levels already on `be` (the fine inverse diagonal is
-    /// uploaded from `fine`).
-    pub fn from_levels(be: &B, fine: &StencilOperator, l: Levels<B>) -> Result<Self> {
+    /// The V-cycle of levels already on `be`; `inv_diag` is the inverse
+    /// diagonal of the fine operator (0 on boundary nodes).
+    pub fn from_levels(be: &B, inv_diag: B::Vector, l: Levels<B>) -> Result<Self> {
+        let n: usize = l.fine_dims().iter().product();
         let mut levels = Vec::with_capacity(l.coarse.len());
-        let mut nc = fine.len();
+        let mut nc = n;
         for (lev, (op, inv_diag)) in l.coarse.into_iter().zip(l.inv_diag).enumerate() {
             nc = l.transfers[lev].coarse.iter().product();
             levels.push(CoarseLevel {
@@ -791,7 +820,7 @@ impl<B: Backend> MultigridPreconditioner<B> {
             });
         }
         Ok(Self {
-            fine: Work::new(be, be.upload(&fine.inv_diag)?, fine.len(), l.lmax[0])?,
+            fine: Work::new(be, inv_diag, n, l.lmax[0])?,
             levels,
             transfers: l.transfers,
             coarsest: l.coarsest,
@@ -1356,14 +1385,20 @@ mod tests {
     #[test]
     fn levels_built_on_the_cpu_backend_equal_the_host_hierarchy() {
         use crate::cpu::CpuSingle;
-        for dims in [[41, 41, 41], [66, 41, 6], [50, 37, 29]] {
+        // [9, 11, 8] is too small to coarsen: its only level is factorised
+        // from the backend's copy of the fine operator.
+        for dims in [[41, 41, 41], [66, 41, 6], [50, 37, 29], [9, 11, 8]] {
             let op = Arc::new(molecule_operator(dims, 0.35));
             let be = CpuBackend::new();
             let dev = be.prepare(op.clone()).unwrap();
             let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
-            let l = Levels::build(&be, &op, &dev, Chebyshev::default()).unwrap().unwrap();
+            let l = Levels::build(&be, op.dims, &dev, Chebyshev::default())
+                .unwrap()
+                .unwrap();
             assert_eq!(l.levels(), h.levels(), "{dims:?}");
             assert_eq!(l.transfers, h.transfers);
+            assert!(hierarchy_fits(dims));
+            assert_eq!(coarsest_dims(dims), h.coarsest.dims());
             assert_eq!(bits(&l.lmax), bits(&h.lmax));
             assert_eq!(l.coarsest, h.coarsest);
             for (lev, s) in h.coarse.iter().enumerate() {
@@ -1402,7 +1437,7 @@ mod tests {
         let host = Hierarchy::build(&op, Chebyshev::default()).unwrap_err().to_string();
         let be = CpuBackend::new();
         let dev = be.prepare(op.clone()).unwrap();
-        let levels = Levels::build(&be, &op, &dev, Chebyshev::default())
+        let levels = Levels::build(&be, op.dims, &dev, Chebyshev::default())
             .err()
             .unwrap()
             .to_string();

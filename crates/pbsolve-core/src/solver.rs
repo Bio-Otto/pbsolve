@@ -6,7 +6,7 @@
 
 use crate::backend::Backend;
 use crate::error::{PbError, Result};
-use crate::multigrid::{Chebyshev, Levels, MultigridPreconditioner};
+use crate::multigrid::{hierarchy_fits, Chebyshev, Levels, MultigridPreconditioner};
 use crate::operator::StencilOperator;
 use crate::params::Preconditioner;
 use std::sync::Arc;
@@ -62,34 +62,42 @@ enum Precond<B: Backend> {
 }
 
 impl<B: Backend> Precond<B> {
-    /// `dev` is `op` prepared on `be`; the hierarchy is built on the backend.
-    fn build(be: &B, op: &Arc<StencilOperator>, dev: &B::Operator, kind: Preconditioner) -> Result<Self> {
+    /// `op` is the operator of a grid of `dims` on `be` and `inv_diag` its
+    /// inverse diagonal; the hierarchy is built on the backend.
+    fn build(be: &B, dims: [usize; 3], op: &B::Operator, inv_diag: B::Vector, kind: Preconditioner) -> Result<Self> {
         match kind {
             Preconditioner::Jacobi => {}
             Preconditioner::Multigrid => {
-                if let Some(l) = Levels::build(be, op, dev, Chebyshev::default())? {
+                if let Some(l) = Levels::build(be, dims, op, Chebyshev::default())? {
                     return Ok(Self::Multigrid(Box::new(MultigridPreconditioner::from_levels(
-                        be, op, l,
+                        be, inv_diag, l,
                     )?)));
                 }
             }
-            Preconditioner::MultigridF32 => {
-                if let Some(l) = Levels::build(be, op, dev, Chebyshev::default())? {
-                    let single = be.single()?;
-                    let l = l.demote(be, &single)?;
-                    let mg = MultigridPreconditioner::from_levels(&single, op, l)?;
-                    let n = op.len();
-                    return Ok(Self::Mixed(Box::new(Mixed {
-                        op: be.demote_operator(dev)?,
-                        r: single.zeros(n)?,
-                        z: single.zeros(n)?,
-                        mg,
-                        single,
-                    })));
-                }
+            // The f32 copy of the inverse diagonal is made first, so the f64
+            // one is freed before the hierarchy is built (lower peak memory).
+            Preconditioner::MultigridF32 if hierarchy_fits(dims) => {
+                let single = be.single()?;
+                let n = dims.iter().product();
+                let mut inv32 = single.zeros(n)?;
+                be.demote(&inv_diag, &mut inv32)?;
+                drop(inv_diag);
+                let l = Levels::build(be, dims, op, Chebyshev::default())?
+                    .ok_or_else(|| PbError::Backend(format!("multigrid: no hierarchy for {dims:?}")))?;
+                let l = l.demote(be, &single)?;
+                let mg = MultigridPreconditioner::from_levels(&single, inv32, l)?;
+                return Ok(Self::Mixed(Box::new(Mixed {
+                    op: be.demote_operator(op)?,
+                    r: single.zeros(n)?,
+                    z: single.zeros(n)?,
+                    mg,
+                    single,
+                })));
             }
+            // No hierarchy fits (where `Levels::build` returns `None`): Jacobi.
+            Preconditioner::MultigridF32 => {}
         }
-        Ok(Self::Jacobi(be.upload(&op.inv_diag)?))
+        Ok(Self::Jacobi(inv_diag))
     }
 
     fn kind(&self) -> (Preconditioner, usize) {
@@ -119,7 +127,8 @@ impl<B: Backend> Precond<B> {
     }
 }
 
-/// Solves A x = b (x on interior nodes, zero on the boundary).
+/// Solves A x = b (x on interior nodes, zero on the boundary) for a host
+/// operator: uploads it and runs [`pcg_on`].
 pub fn pcg<B: Backend>(
     be: &B,
     op: Arc<StencilOperator>,
@@ -127,12 +136,38 @@ pub fn pcg<B: Backend>(
     opts: SolverOptions,
 ) -> Result<(Vec<f64>, SolveStats)> {
     let start = Instant::now();
-    let n = b.len();
     let bv = be.upload(b)?;
-    let bnorm = be.dot(&bv, &bv)?.sqrt();
+    let dims = op.dims;
+    let inv_diag = be.upload(&op.inv_diag)?;
+    // The host operator is released once the backend holds its copy, not after the solve.
+    let dop = be.prepare(op)?;
+    let uploads = start.elapsed().as_secs_f64();
+    let (x, mut stats) = pcg_on(be, dims, &dop, inv_diag, bv, opts)?;
+    let t = Instant::now();
+    let x = be.download(&x)?;
+    stats.setup_seconds += uploads;
+    stats.solve_seconds += t.elapsed().as_secs_f64();
+    Ok((x, stats))
+}
+
+/// Solves A x = b on the backend: `op` is the operator of a grid of `dims`,
+/// `inv_diag` its inverse diagonal (0 on boundary nodes); x is zero on the
+/// boundary. `setup_seconds` covers the preconditioner, `solve_seconds` the
+/// iterations.
+pub fn pcg_on<B: Backend>(
+    be: &B,
+    dims: [usize; 3],
+    op: &B::Operator,
+    inv_diag: B::Vector,
+    b: B::Vector,
+    opts: SolverOptions,
+) -> Result<(B::Vector, SolveStats)> {
+    let start = Instant::now();
+    let n = dims.iter().product();
+    let bnorm = be.dot(&b, &b)?.sqrt();
     if bnorm == 0.0 {
         return Ok((
-            vec![0.0; n],
+            be.zeros(n)?,
             SolveStats {
                 iterations: 0,
                 relative_residual: 0.0,
@@ -143,28 +178,26 @@ pub fn pcg<B: Backend>(
             },
         ));
     }
-    let dop = be.prepare(op.clone())?;
-    let mut pre = Precond::build(be, &op, &dop, opts.preconditioner)?;
-    // Release the host operator now (device backends hold their own copy),
-    // not after the solve.
-    drop(op);
+    let mut pre = Precond::build(be, dims, op, inv_diag, opts.preconditioner)?;
     let flexible = pre.is_flexible();
     let (preconditioner, levels) = pre.kind();
+    // Queued setup work (f32 copies) belongs to the setup time.
+    be.synchronize()?;
     let setup_seconds = start.elapsed().as_secs_f64();
     let iterating = Instant::now();
 
     let mut x = be.zeros(n)?;
-    let mut r = bv;
+    let mut r = b;
     let mut z = be.zeros(n)?;
     let mut q = be.zeros(n)?;
     let mut p = be.zeros(n)?;
-    pre.apply(be, &dop, &r, &mut z)?;
+    pre.apply(be, op, &r, &mut z)?;
     be.copy(&z, &mut p)?;
     let mut rz = be.dot(&r, &z)?;
 
     let mut rel = 1.0;
     for it in 1..=opts.max_iter {
-        be.apply(&dop, &p, &mut q)?;
+        be.apply(op, &p, &mut q)?;
         let pq = be.dot(&p, &q)?;
         if pq.is_nan() || pq <= 0.0 {
             return Err(PbError::Backend(format!(
@@ -182,7 +215,6 @@ pub fn pcg<B: Backend>(
         };
         rel = rr.sqrt() / bnorm;
         if rel < opts.tol {
-            let x = be.download(&x)?;
             return Ok((
                 x,
                 SolveStats {
@@ -199,7 +231,7 @@ pub fn pcg<B: Backend>(
         // β = r_{k+1}ᵀ(z_{k+1} − z_k) / r_kᵀz_k keeps the search directions
         // conjugate when the preconditioner is slightly non-symmetric. For an
         // exactly symmetric one r_{k+1}ᵀz_k = 0 and this is plain PCG.
-        pre.apply(be, &dop, &r, &mut z)?;
+        pre.apply(be, op, &r, &mut z)?;
         let rz_new = be.dot(&r, &z)?;
         if rz_new.is_nan() || rz_new <= 0.0 {
             return Err(PbError::Backend(format!(

@@ -5,17 +5,16 @@
 use crate::autogrid::GridSpec;
 use crate::backend::Backend;
 use crate::boundary::{analytic_boundary, focus_boundary, BoundaryMedium};
-use crate::charge::spread_charges;
+use crate::charge::{spread_charges, spread_charges_sparse};
 use crate::error::Result;
 use crate::grid::Grid;
 use crate::molecule::Atom;
-use crate::operator::{assemble_rhs, StencilOperator};
 use crate::params::PbParams;
-use crate::solver::{pcg, SolveStats, SolverOptions};
-use crate::surface::{CoefficientMaps, MolecularSurface};
+use crate::solver::{pcg_on, SolveStats, SolverOptions};
+use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
 use rayon::prelude::*;
-use std::sync::Arc;
+use std::f64::consts::PI;
 use std::time::Instant;
 
 /// Which dielectric/ionic environment to solve.
@@ -159,16 +158,64 @@ pub fn solve_with_maps<B: Backend>(
     if bad_eps || maps.kappa_sq.par_iter().any(|k| k.is_nan() || *k < 0.0) {
         return crate::error::invalid("dielectric maps must be positive and kappa_sq non-negative");
     }
-    let mut g = vec![0.0; n];
-    for c in grid.boundary_indices() {
-        g[c] = g_ext[c];
+    let maps = [
+        be.upload_owned(maps.eps_x)?,
+        be.upload_owned(maps.eps_y)?,
+        be.upload_owned(maps.eps_z)?,
+        be.upload_owned(maps.kappa_sq)?,
+    ];
+    let q = be.upload(node_charge)?;
+    solve_assembled(be, grid, maps, q, g_ext, bjerrum_length_vacuum(temperature), opts)
+}
+
+/// Assembles the system of maps and node charges already on `be` (as
+/// [`crate::operator::StencilOperator::new`] and
+/// [`crate::operator::assemble_rhs`] do on the host) and solves it. Returns
+/// u = x + g with g = `g_ext` on boundary nodes and 0 inside.
+fn solve_assembled<B: Backend>(
+    be: &B,
+    grid: &Grid,
+    maps: [B::Vector; 4],
+    q: B::Vector,
+    g_ext: &[f64],
+    lb0: f64,
+    opts: SolverOptions,
+) -> Result<(Vec<f64>, SolveStats)> {
+    let n = grid.len();
+    let (op, inv_diag) = be.assemble_operator(grid, maps)?;
+    // b = 4π l_B0 q − A g on interior nodes, 0 on the boundary.
+    let mut b = be.zeros(n)?;
+    {
+        let boundary = grid.boundary_indices();
+        let values: Vec<f64> = boundary.iter().map(|&c| g_ext[c]).collect();
+        let g = be.scatter(n, &boundary, &values)?;
+        be.apply(&op, &g, &mut b)?;
     }
-    let lb0 = bjerrum_length_vacuum(temperature);
-    let op = Arc::new(StencilOperator::new(grid, maps));
-    let b = assemble_rhs(&op, node_charge, &g, lb0);
-    let (mut u, stats) = pcg(be, op, &b, opts)?;
-    u.par_iter_mut().zip(g.par_iter()).for_each(|(ui, gi)| *ui += gi);
+    be.source_rhs(4.0 * PI * lb0, &q, &inv_diag, &mut b)?;
+    drop(q);
+    be.synchronize()?;
+    let (x, mut stats) = pcg_on(be, grid.dims, &op, inv_diag, b, opts)?;
+    drop(op);
+    let t = Instant::now();
+    let mut u = be.download(&x)?;
+    drop(x);
+    stats.solve_seconds += t.elapsed().as_secs_f64();
+    add_boundary_values(grid, &mut u, g_ext);
     Ok((u, stats))
+}
+
+/// u ← u + g, g = `g_ext` on boundary nodes and 0.0 on interior ones.
+fn add_boundary_values(grid: &Grid, u: &mut [f64], g_ext: &[f64]) {
+    let [nx, ny, _] = grid.dims;
+    u.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+        for j in 0..ny {
+            for i in 0..nx {
+                let c = i + nx * (j + ny * k);
+                let g = if grid.is_boundary(i, j, k) { g_ext[c] } else { 0.0 };
+                plane[i + nx * j] += g;
+            }
+        }
+    });
 }
 
 /// One LPBE solve on `grid` with Dirichlet data `g_ext`. Returns u = x + g_ext.
@@ -182,16 +229,20 @@ fn solve_level<B: Backend>(
     timings: &mut Timings,
 ) -> Result<(Vec<f64>, SolveStats)> {
     let t = Instant::now();
-    let maps = maps_with(grid, atoms, params, surf);
+    // Maps built from validated parameters are valid (ε > 0, κ̄² ≥ 0).
+    let maps = maps_on(be, grid, atoms, params, surf)?;
+    be.synchronize()?;
     timings.maps += t.elapsed().as_secs_f64();
     let t = Instant::now();
-    let q = spread_charges(grid, atoms)?;
+    let (nodes, charges) = spread_charges_sparse(grid, atoms)?;
+    let q = be.scatter(grid.len(), &nodes, &charges)?;
     let opts = SolverOptions {
         tol: params.tol,
         max_iter: params.max_iter,
         preconditioner: params.preconditioner,
     };
-    let (u, stats) = solve_with_maps(be, grid, maps, &q, &g_ext, params.temperature, opts)?;
+    let lb0 = bjerrum_length_vacuum(params.temperature);
+    let (u, stats) = solve_assembled(be, grid, maps, q, &g_ext, lb0, opts)?;
     let total = t.elapsed().as_secs_f64();
     timings.setup += stats.setup_seconds;
     timings.solve += stats.solve_seconds;

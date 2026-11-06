@@ -29,6 +29,9 @@
 //! arithmetic (`(z² + y²) + x² ≤ r²` in grid-relative coordinates).
 //! The ion-accessibility map marks `r_i + r_ion` spheres the same way.
 
+use crate::backend::Backend;
+use crate::cpu::CpuBackend;
+use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::molecule::{dist2, Atom};
 use crate::params::{PbParams, SurfaceMethod};
@@ -77,37 +80,8 @@ impl CoefficientMaps {
     /// [`Self::solvated`] with a prebuilt surface (it depends only on the
     /// atoms and `params`, so focusing levels share it).
     pub fn solvated_with(grid: &Grid, atoms: &[Atom], params: &PbParams, surf: &MolecularSurface) -> Self {
-        let (pdie, sdie) = (params.pdie, params.sdie);
-        let h = grid.spacing;
-
-        let (eps_x, eps_y, eps_z) = match params.surface {
-            SurfaceMethod::Mol | SurfaceMethod::Vdw => (
-                surf.dielectric_map(grid, [0.5 * h[0], 0.0, 0.0], pdie, sdie),
-                surf.dielectric_map(grid, [0.0, 0.5 * h[1], 0.0], pdie, sdie),
-                surf.dielectric_map(grid, [0.0, 0.0, 0.5 * h[2]], pdie, sdie),
-            ),
-            SurfaceMethod::HarmonicMol => {
-                let node = surf.dielectric_map(grid, [0.0; 3], pdie, sdie);
-                harmonic_faces(grid, &node)
-            }
-        };
-
-        let kbar2 = kappa_bar_squared(&params.ions, params.temperature);
-        let kappa_sq = if kbar2 > 0.0 {
-            let ion_r = params.ion_exclusion_radius();
-            let spheres: Vec<Sphere> = atoms
-                .iter()
-                .filter(|a| a.radius > APBS_VSMALL)
-                .map(|a| Sphere {
-                    center: a.position,
-                    radius: ion_r + a.radius,
-                })
-                .collect();
-            mark_map(grid, [0.0; 3], kbar2, &[(&spheres, 0.0)])
-        } else {
-            vec![0.0; grid.len()]
-        };
-
+        let [eps_x, eps_y, eps_z, kappa_sq] =
+            maps_on(&CpuBackend::new(), grid, atoms, params, Some(surf)).expect("the f64 CPU backend builds maps");
         Self {
             eps_x,
             eps_y,
@@ -115,6 +89,64 @@ impl CoefficientMaps {
             kappa_sq,
         }
     }
+}
+
+/// The maps `[eps_x, eps_y, eps_z, kappa_sq]` of one grid level built on a
+/// backend: the solvated state's for a surface `surf` (prebuilt, shared by
+/// focusing levels), else the reference state's (ε = pdie, no ions). The
+/// values are those of [`CoefficientMaps::solvated_with`] and
+/// [`CoefficientMaps::homogeneous`], bit for bit, on every backend.
+pub fn maps_on<B: Backend>(
+    be: &B,
+    grid: &Grid,
+    atoms: &[Atom],
+    params: &PbParams,
+    surf: Option<&MolecularSurface>,
+) -> Result<[B::Vector; 4]> {
+    let Some(surf) = surf else {
+        let [x, y, z] = exactly(be.mark_maps(grid, &[[0.0; 3]; 3], params.pdie, &[])?)?;
+        return Ok([x, y, z, be.zeros(grid.len())?]);
+    };
+    let (pdie, sdie) = (params.pdie, params.sdie);
+    let h = grid.spacing;
+    let [eps_x, eps_y, eps_z] = match params.surface {
+        SurfaceMethod::Mol | SurfaceMethod::Vdw => exactly(be.mark_maps(
+            grid,
+            &[[0.5 * h[0], 0.0, 0.0], [0.0, 0.5 * h[1], 0.0], [0.0, 0.0, 0.5 * h[2]]],
+            sdie,
+            &[(&surf.solute, pdie), (&surf.probes, sdie)],
+        )?)?,
+        SurfaceMethod::HarmonicMol => {
+            // Not an APBS surface; built on the host.
+            let node = surf.dielectric_map(grid, [0.0; 3], pdie, sdie);
+            let (x, y, z) = harmonic_faces(grid, &node);
+            [be.upload_owned(x)?, be.upload_owned(y)?, be.upload_owned(z)?]
+        }
+    };
+
+    let kbar2 = kappa_bar_squared(&params.ions, params.temperature);
+    let kappa_sq = if kbar2 > 0.0 {
+        let ion_r = params.ion_exclusion_radius();
+        let spheres: Vec<Sphere> = atoms
+            .iter()
+            .filter(|a| a.radius > APBS_VSMALL)
+            .map(|a| Sphere {
+                center: a.position,
+                radius: ion_r + a.radius,
+            })
+            .collect();
+        let [k] = exactly(be.mark_maps(grid, &[[0.0; 3]], kbar2, &[(&spheres, 0.0)])?)?;
+        k
+    } else {
+        be.zeros(grid.len())?
+    };
+    Ok([eps_x, eps_y, eps_z, kappa_sq])
+}
+
+/// The maps of [`Backend::mark_maps`], one per shift.
+fn exactly<V, const N: usize>(maps: Vec<V>) -> Result<[V; N]> {
+    maps.try_into()
+        .map_err(|m: Vec<V>| PbError::Backend(format!("mark_maps returned {} maps for {N} shifts", m.len())))
 }
 
 /// APBS' cell-list radius (`Vpbe_ctor2`): max(srad, largest ion radius) + 0.5 Å.

@@ -8,8 +8,10 @@
 //! all backends round identically.
 
 use crate::error::Result;
+use crate::grid::Grid;
 use crate::multigrid::{LevelOp, Stencil27, Transfer};
 use crate::operator::StencilOperator;
+use crate::surface::Sphere;
 use std::sync::Arc;
 
 pub trait Backend {
@@ -41,6 +43,11 @@ pub trait Backend {
     fn prepare(&self, op: Arc<StencilOperator>) -> Result<Self::Operator>;
     fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse>;
     fn upload(&self, host: &[f64]) -> Result<Self::Vector>;
+    /// [`upload`](Self::upload) of a buffer the caller no longer needs (the
+    /// f64 CPU backend keeps it without a copy).
+    fn upload_owned(&self, host: Vec<f64>) -> Result<Self::Vector> {
+        self.upload(&host)
+    }
     fn zeros(&self, n: usize) -> Result<Self::Vector>;
     fn download(&self, v: &Self::Vector) -> Result<Vec<f64>>;
     /// Copies a device vector into an existing host buffer of the same length.
@@ -95,4 +102,48 @@ pub trait Backend {
     /// A coarse operator rounded to f32 for the twin, as the twin's
     /// [`prepare_coarse`](Self::prepare_coarse) would round it.
     fn demote_coarse(&self, op: &Self::Coarse) -> Result<<Self::Single as Backend>::Coarse>;
+
+    // Assembly of the linear system ([`crate::pb`]). Only f64 backends
+    // assemble; their twins return an error.
+
+    /// One map per entry of `shifts` on the grid shifted by it (Å): `fill`
+    /// everywhere, then for each pass `(spheres, value)` in order, `value` at
+    /// every node within (≤) one of the spheres. Bit-identical to
+    /// [`crate::surface::mark_map`].
+    fn mark_maps(
+        &self,
+        grid: &Grid,
+        shifts: &[[f64; 3]],
+        fill: f64,
+        passes: &[(&[Sphere], f64)],
+    ) -> Result<Vec<Self::Vector>>;
+    /// A vector of length `n`, zero except `v[idx[m]] = values[m]` (distinct indices).
+    fn scatter(&self, n: usize, idx: &[usize], values: &[f64]) -> Result<Self::Vector>;
+    /// The 7-point operator of `grid` from its maps `[eps_x, eps_y, eps_z,
+    /// kappa_sq]` and its inverse diagonal (0 on boundary nodes), as
+    /// [`StencilOperator::new`] computes them.
+    fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)>;
+    /// y_i ← 0 where d_i = 0, else src·q_i − y_i: with y = A g and d = 1/diag(A)
+    /// this is the right-hand side of [`crate::operator::assemble_rhs`].
+    fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+    /// A host copy of a fine operator (for grids too small to coarsen, whose
+    /// multigrid is a single factorised level).
+    fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
+    /// Waits until all queued work has finished (stage timings). Backends that
+    /// compute synchronously keep the default no-op.
+    fn synchronize(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Checks the arguments of [`Backend::scatter`]: as many values as indices,
+/// every index below `n`.
+pub fn check_scatter(n: usize, idx: &[usize], values: &[f64]) -> Result<()> {
+    if idx.len() != values.len() {
+        return crate::error::invalid(format!("scatter: {} indices but {} values", idx.len(), values.len()));
+    }
+    if let Some(c) = idx.iter().find(|&&c| c >= n) {
+        return crate::error::invalid(format!("scatter: index {c} outside a vector of {n} values"));
+    }
+    Ok(())
 }

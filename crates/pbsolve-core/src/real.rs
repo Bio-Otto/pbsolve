@@ -65,6 +65,15 @@ pub fn convert<S: Real, D: Real>(src: &[S]) -> Vec<D> {
     src.par_iter().map(|v| D::from_f64(v.to_f64())).collect()
 }
 
+/// `n` zeros written in parallel. A fresh large allocation is mapped lazily,
+/// page by page; a device-to-host copy into it would fault every page in on
+/// one thread (~1.4 GB/s here). Writing the zeros first spreads that over
+/// the thread pool.
+pub fn zeros_touched<T: Real>(n: usize) -> Vec<T> {
+    use rayon::prelude::*;
+    (0..n).into_par_iter().map(|_| T::ZERO).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

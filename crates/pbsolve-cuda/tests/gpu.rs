@@ -313,11 +313,14 @@ fn device_multigrid_setup_equals_the_host_bit_for_bit() {
         (operator([66, 41, 6], 0.35, 0.15), "semi-coarsening"),
         (operator([50, 37, 29], 0.3, 0.0), "even and odd sizes, no salt"),
         (operator([97, 97, 97], 0.25, 1.0), "97³, 1 M"),
+        (operator([9, 11, 8], 0.35, 0.15), "too small to coarsen"),
     ];
     for (op, what) in cases {
         let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
         let dev = gpu.prepare(op.clone()).unwrap();
-        let l = Levels::build(&gpu, &op, &dev, Chebyshev::default()).unwrap().unwrap();
+        let l = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
+            .unwrap()
+            .unwrap();
         assert_eq!(l.levels(), h.levels(), "{what}");
         assert_eq!(l.transfers, h.transfers, "{what}");
         assert_eq!(bits(&l.lmax), bits(&h.lmax), "{what}: Gershgorin bounds");
@@ -374,8 +377,10 @@ fn vcycle_of_device_levels_equals_the_host_vcycle() {
     let r = gpu.upload(&b).unwrap();
     let mut host =
         MultigridPreconditioner::new(&gpu, &op, Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap()).unwrap();
-    let levels = Levels::build(&gpu, &op, &dev, Chebyshev::default()).unwrap().unwrap();
-    let mut device = MultigridPreconditioner::from_levels(&gpu, &op, levels).unwrap();
+    let levels = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
+        .unwrap()
+        .unwrap();
+    let mut device = MultigridPreconditioner::from_levels(&gpu, gpu.upload(&op.inv_diag).unwrap(), levels).unwrap();
     let (mut z1, mut z2) = (gpu.zeros(b.len()).unwrap(), gpu.zeros(b.len()).unwrap());
     host.apply(&gpu, &dev, &r, &mut z1).unwrap();
     device.apply(&gpu, &dev, &r, &mut z2).unwrap();
@@ -386,8 +391,12 @@ fn vcycle_of_device_levels_equals_the_host_vcycle() {
     let r32 = single.upload(&b).unwrap();
     let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
     let mut host = MultigridPreconditioner::new(&single, &op, h).unwrap();
-    let levels = Levels::build(&gpu, &op, &dev, Chebyshev::default()).unwrap().unwrap();
-    let mut device = MultigridPreconditioner::from_levels(&single, &op, levels.demote(&gpu, &single).unwrap()).unwrap();
+    let levels = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
+        .unwrap()
+        .unwrap();
+    let inv32 = single.upload(&op.inv_diag).unwrap();
+    let mut device =
+        MultigridPreconditioner::from_levels(&single, inv32, levels.demote(&gpu, &single).unwrap()).unwrap();
     let (mut z1, mut z2) = (single.zeros(b.len()).unwrap(), single.zeros(b.len()).unwrap());
     host.apply(&single, &op32, &r32, &mut z1).unwrap();
     device
@@ -413,7 +422,7 @@ fn device_setup_reports_a_negative_diagonal_like_the_host() {
     let host = Hierarchy::build(&op, Chebyshev::default()).unwrap_err().to_string();
     let gpu = CudaBackend::new(0).unwrap();
     let dev = gpu.prepare(op.clone()).unwrap();
-    let device = Levels::build(&gpu, &op, &dev, Chebyshev::default())
+    let device = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
         .err()
         .unwrap()
         .to_string();
@@ -425,4 +434,352 @@ fn device_setup_reports_a_negative_diagonal_like_the_host() {
     let t = Transfer::new(op.dims).unwrap();
     assert!(single.galerkin(&t, LevelOp::Fine(&d32)).is_err());
     assert!(single.gershgorin_lmax(LevelOp::Fine(&d32)).is_err());
+}
+
+/// Pseudo-random numbers in [0, 1).
+fn rng(seed: u64) -> impl FnMut() -> f64 {
+    let mut s = seed;
+    move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (s >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+/// Sphere marking on the GPU equals `mark_map` bit for bit: spheres inside,
+/// partly and fully outside the grid, of zero radius, and nodes lying exactly
+/// on a sphere (which count as inside); several passes and shifted grids.
+#[test]
+fn device_sphere_marking_equals_the_host_bit_for_bit() {
+    use pbsolve_core::surface::{mark_map, Sphere};
+    if !gpu_present("device_sphere_marking_equals_the_host_bit_for_bit") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let grid = Grid::centered([0.4, -0.3, 0.2], [14.0, 11.0, 9.5], [57, 45, 39]).unwrap();
+    let mut rnd = rng(17);
+    let random = |rnd: &mut dyn FnMut() -> f64, n: usize, rmax: f64| -> Vec<Sphere> {
+        (0..n)
+            .map(|_| Sphere {
+                center: [rnd(), rnd(), rnd()].map(|v| 20.0 * (v - 0.5)),
+                radius: rmax * rnd(),
+            })
+            .collect()
+    };
+    let mut solute = random(&mut rnd, 300, 4.0);
+    // Exactly on nodes, radius a multiple of the spacing: boundary nodes are inside.
+    let h = grid.spacing;
+    for (i, j, k, m) in [(10, 12, 8, 4.0), (30, 20, 19, 3.0), (0, 0, 0, 2.0), (56, 44, 38, 5.0)] {
+        let p = grid.position(i, j, k);
+        solute.push(Sphere {
+            center: p,
+            radius: m * h[0],
+        });
+    }
+    solute.push(Sphere {
+        center: [0.0; 3],
+        radius: 0.0,
+    });
+    solute.push(Sphere {
+        center: [100.0, 0.0, 0.0],
+        radius: 3.0,
+    });
+    let probes = random(&mut rnd, 2000, 1.4);
+    let shifts = [
+        [0.0; 3],
+        [0.5 * h[0], 0.0, 0.0],
+        [0.0, 0.5 * h[1], 0.0],
+        [0.0, 0.0, 0.5 * h[2]],
+    ];
+    for passes in [
+        vec![(&solute[..], 2.0), (&probes[..], 78.54)],
+        vec![(&probes[..], 0.0)],
+        vec![],
+    ] {
+        let maps = gpu.mark_maps(&grid, &shifts, 78.54, &passes).unwrap();
+        assert_eq!(maps.len(), shifts.len());
+        for (shift, map) in shifts.iter().zip(&maps) {
+            let host = mark_map(&grid, *shift, 78.54, &passes);
+            let device = gpu.download(map).unwrap();
+            assert_eq!(bits(&device), bits(&host), "{} passes, shift {shift:?}", passes.len());
+        }
+    }
+}
+
+/// Atoms of a small protein-like cluster for the assembly tests.
+fn cluster(n: usize, seed: u64) -> Vec<Atom> {
+    let mut rnd = rng(seed);
+    (0..n)
+        .map(|i| Atom {
+            position: [rnd(), rnd(), rnd()].map(|v| 14.0 * (v - 0.5)),
+            charge: rnd() - 0.5,
+            // Some hydrogens without radius (they still bury SAS points).
+            radius: if i % 7 == 0 { 0.0 } else { 1.1 + 0.8 * rnd() },
+        })
+        .collect()
+}
+
+/// The maps of every surface and medium, built on the GPU, equal the host maps.
+#[test]
+fn device_coefficient_maps_equal_the_host_maps() {
+    use pbsolve_core::surface::maps_on;
+    use pbsolve_core::{MolecularSurface, SurfaceMethod};
+    if !gpu_present("device_coefficient_maps_equal_the_host_maps") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let atoms = cluster(120, 3);
+    let grid = Grid::centered([0.2, 0.1, -0.3], [26.0, 24.0, 22.0], [65, 57, 49]).unwrap();
+    let base = PbParams {
+        pdie: 2.0,
+        ..PbParams::default()
+    };
+    let cases = [
+        ("mol, 0.15 M", base.clone().with_salt(0.15, 2.0)),
+        ("mol, no salt", base.clone()),
+        (
+            "vdw",
+            PbParams {
+                surface: SurfaceMethod::Vdw,
+                ..base.clone().with_salt(0.15, 2.0)
+            },
+        ),
+        (
+            "harmonic",
+            PbParams {
+                surface: SurfaceMethod::HarmonicMol,
+                ..base.clone().with_salt(0.5, 1.5)
+            },
+        ),
+    ];
+    for (what, params) in cases {
+        let surf = MolecularSurface::for_params(&atoms, &params);
+        for (state, s) in [("solvated", Some(&surf)), ("reference", None)] {
+            let host = maps_on(&CpuBackend::new(), &grid, &atoms, &params, s).unwrap();
+            let device = maps_on(&gpu, &grid, &atoms, &params, s).unwrap();
+            for (m, (a, b)) in host.iter().zip(&device).enumerate() {
+                assert_eq!(bits(a), bits(&gpu.download(b).unwrap()), "{what}, {state}: map {m}");
+            }
+        }
+    }
+}
+
+/// Operator, inverse diagonal, charges and right-hand side assembled on the
+/// GPU equal the host's, and a solve from GPU-assembled maps equals the solve
+/// of the host-assembled system (both on the GPU) bit for bit.
+#[test]
+fn device_assembly_equals_the_host_assembly_bit_for_bit() {
+    use pbsolve_core::charge::spread_charges_sparse;
+    use pbsolve_core::solve_with_maps;
+    use pbsolve_core::surface::maps_on;
+    use pbsolve_core::MolecularSurface;
+    use std::f64::consts::PI;
+    if !gpu_present("device_assembly_equals_the_host_assembly_bit_for_bit") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let atoms = cluster(150, 9);
+    // Anisotropic spacing: three different face coefficients.
+    let grid = Grid::centered([0.0, 0.3, -0.1], [27.0, 25.0, 23.0], [57, 49, 41]).unwrap();
+    let params = PbParams {
+        pdie: 4.0,
+        ..PbParams::default()
+    }
+    .with_salt(0.15, 2.0);
+    let surf = MolecularSurface::for_params(&atoms, &params);
+    let maps = CoefficientMaps::solvated_with(&grid, &atoms, &params, &surf);
+    let host = StencilOperator::new(&grid, maps.clone());
+
+    let (dev, inv) = gpu
+        .assemble_operator(&grid, maps_on(&gpu, &grid, &atoms, &params, Some(&surf)).unwrap())
+        .unwrap();
+    let back = gpu.operator_to_host(&dev).unwrap();
+    assert_eq!(bits(&host.coef), bits(&back.coef));
+    for (a, b, what) in [
+        (&host.eps_x, &back.eps_x, "eps_x"),
+        (&host.eps_y, &back.eps_y, "eps_y"),
+        (&host.eps_z, &back.eps_z, "eps_z"),
+        (&host.kvol, &back.kvol, "kvol"),
+        (&host.inv_diag, &back.inv_diag, "1/diag (host recomputation)"),
+    ] {
+        assert_eq!(bits(a), bits(b), "{what}");
+    }
+    assert_eq!(bits(&host.inv_diag), bits(&gpu.download(&inv).unwrap()), "1/diag");
+
+    // Charges (sparse upload) and boundary values (scattered).
+    let q = spread_charges(&grid, &atoms).unwrap();
+    let (nodes, values) = spread_charges_sparse(&grid, &atoms).unwrap();
+    let qd = gpu.scatter(grid.len(), &nodes, &values).unwrap();
+    assert_eq!(bits(&q), bits(&gpu.download(&qd).unwrap()));
+    let mut rnd = rng(23);
+    let mut g = vec![0.0; grid.len()];
+    let boundary = grid.boundary_indices();
+    for &c in &boundary {
+        g[c] = rnd() - 0.5;
+    }
+    let gb: Vec<f64> = boundary.iter().map(|&c| g[c]).collect();
+    let gd = gpu.scatter(grid.len(), &boundary, &gb).unwrap();
+    assert_eq!(bits(&g), bits(&gpu.download(&gd).unwrap()));
+
+    let lb0 = bjerrum_length_vacuum(params.temperature);
+    let b_host = assemble_rhs(&host, &q, &g, lb0);
+    let mut bd = gpu.zeros(grid.len()).unwrap();
+    gpu.apply(&dev, &gd, &mut bd).unwrap();
+    gpu.source_rhs(4.0 * PI * lb0, &qd, &inv, &mut bd).unwrap();
+    assert_eq!(bits(&b_host), bits(&gpu.download(&bd).unwrap()), "right-hand side");
+
+    // Whole solves: host-assembled system uploaded vs maps assembled on the GPU.
+    for pc in [
+        Preconditioner::MultigridF32,
+        Preconditioner::Multigrid,
+        Preconditioner::Jacobi,
+    ] {
+        let opts = SolverOptions {
+            preconditioner: pc,
+            ..SolverOptions::new(1e-9, 10_000)
+        };
+        let (x, s1) = pcg(&gpu, Arc::new(host.clone()), &b_host, opts).unwrap();
+        let u_host: Vec<f64> = x.iter().zip(&g).map(|(x, g)| x + g).collect();
+        let (u_dev, s2) = solve_with_maps(&gpu, &grid, maps.clone(), &q, &g, params.temperature, opts).unwrap();
+        assert_eq!(s1.iterations, s2.iterations, "{pc:?}");
+        assert_eq!(s1.relative_residual.to_bits(), s2.relative_residual.to_bits(), "{pc:?}");
+        assert_eq!(bits(&u_host), bits(&u_dev), "{pc:?}: potential");
+    }
+}
+
+/// Assembly checks its arguments and runs on f64 backends only.
+#[test]
+fn device_assembly_rejects_bad_arguments() {
+    use pbsolve_core::surface::Sphere;
+    if !gpu_present("device_assembly_rejects_bad_arguments") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let cpu = CpuBackend::new();
+    for e in [
+        gpu.scatter(10, &[3, 10], &[1.0, 2.0]).err().unwrap(),
+        cpu.scatter(10, &[3, 10], &[1.0, 2.0]).err().unwrap(),
+    ] {
+        assert!(e.to_string().contains("index 10 outside a vector of 10"), "{e}");
+    }
+    for e in [
+        gpu.scatter(10, &[3], &[1.0, 2.0]).err().unwrap(),
+        cpu.scatter(10, &[3], &[1.0, 2.0]).err().unwrap(),
+    ] {
+        assert!(e.to_string().contains("1 indices but 2 values"), "{e}");
+    }
+    let grid = Grid::centered([0.0; 3], [8.0; 3], [9; 3]).unwrap();
+    let ball = [Sphere {
+        center: [0.0; 3],
+        radius: 2.0,
+    }];
+    let single = gpu.single().unwrap();
+    let e = single
+        .mark_maps(&grid, &[[0.0; 3]], 1.0, &[(&ball[..], 2.0)])
+        .err()
+        .unwrap();
+    assert!(e.to_string().contains("f64"), "{e}");
+    assert!(single.scatter(10, &[1], &[1.0]).is_err());
+    assert!(pbsolve_core::CpuSingle::new().scatter(10, &[1], &[1.0]).is_err());
+    let maps = [0, 1, 2, 3].map(|_| single.zeros(grid.len()).unwrap());
+    assert!(single.assemble_operator(&grid, maps).is_err());
+    // Maps of the wrong length are refused, not read out of bounds.
+    let short = [0, 1, 2, 3].map(|_| gpu.zeros(grid.len() - 1).unwrap());
+    assert!(gpu.assemble_operator(&grid, short).is_err());
+}
+
+/// Spheres built so that `mark_map`'s exact arithmetic decides: nodes lying
+/// exactly on a sphere (dyadic grid: every distance is exact) and nodes whose
+/// squared distance rounds to either side of r² depending on the summation
+/// order ((dz² + dy²) + dx² is the host's). The GPU must agree on all of them.
+#[test]
+fn device_sphere_marking_follows_the_host_arithmetic_at_the_boundary() {
+    use pbsolve_core::surface::{mark_map, Sphere};
+    if !gpu_present("device_sphere_marking_follows_the_host_arithmetic_at_the_boundary") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    // h = 0.5 and origin -10: node coordinates and their differences are exact.
+    let grid = Grid::from_spacing([0.0; 3], [0.5; 3], [41, 41, 41]).unwrap();
+    let mut on_boundary = Vec::new();
+    for (i, j, k, r) in [(10, 12, 8, 2.0), (30, 20, 19, 1.5), (20, 20, 20, 3.0), (5, 33, 27, 2.5)] {
+        on_boundary.push(Sphere {
+            center: grid.position(i, j, k),
+            radius: r,
+        });
+    }
+    // Order-sensitive nodes: search sphere centres (off the dyadic lattice)
+    // and radii for which the two summation orders disagree at a target node.
+    let min = grid.origin;
+    let h = grid.spacing;
+    let mut rnd = rng(31);
+    let mut sensitive = Vec::new();
+    while sensitive.len() < 200 {
+        let (i, j, k) = (
+            10 + (rnd() * 20.0) as usize,
+            10 + (rnd() * 20.0) as usize,
+            10 + (rnd() * 20.0) as usize,
+        );
+        let p = grid.position(i, j, k);
+        let center = [0, 1, 2].map(|a| p[a] + 3.0 * (rnd() - 0.5));
+        let pos = [0, 1, 2].map(|a| center[a] - min[a]);
+        let dx = pos[0] - h[0] * i as f64;
+        let dy = pos[1] - h[1] * j as f64;
+        let dz = pos[2] - h[2] * k as f64;
+        let (dx2, dy2, dz2) = (dx * dx, dy * dy, dz * dz);
+        let host_order = dz2 + dy2 + dx2;
+        let other = dx2 + dy2 + dz2;
+        if host_order == other {
+            continue;
+        }
+        // A radius whose square equals the smaller sum: inside for one order only.
+        let target = host_order.min(other);
+        let mut r = target.sqrt();
+        for _ in 0..8 {
+            if r * r == target {
+                break;
+            }
+            r = if r * r < target { r.next_up() } else { r.next_down() };
+        }
+        if r * r == target && dx2 + dy2 <= r * r {
+            sensitive.push(Sphere { center, radius: r });
+        }
+    }
+    let passes = [(&on_boundary[..], 1.0), (&sensitive[..], 2.0)];
+    let host = mark_map(&grid, [0.0; 3], 0.0, &passes);
+    let device = gpu.mark_maps(&grid, &[[0.0; 3]], 0.0, &passes).unwrap();
+    // The test is only meaningful if the boundary cases were marked by the host.
+    let marked = |v: f64| host.iter().filter(|&&x| x == v).count();
+    assert!(marked(1.0) > 0 && marked(2.0) > 0);
+    assert_eq!(bits(&gpu.download(&device[0]).unwrap()), bits(&host));
+}
+
+/// The operator of arbitrary maps (random ε and κ̄², so every rounding of
+/// the diagonal shows) assembled on the GPU equals `StencilOperator::new`.
+#[test]
+fn device_operator_of_random_maps_equals_the_host() {
+    if !gpu_present("device_operator_of_random_maps_equals_the_host") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let grid = Grid::centered([0.1, 0.0, -0.2], [13.0, 17.0, 11.0], [33, 41, 29]).unwrap();
+    let mut rnd = rng(41);
+    let mut map = |lo: f64, hi: f64| -> Vec<f64> { (0..grid.len()).map(|_| lo + (hi - lo) * rnd()).collect() };
+    let maps = CoefficientMaps {
+        eps_x: map(1.0, 80.0),
+        eps_y: map(1.0, 80.0),
+        eps_z: map(1.0, 80.0),
+        kappa_sq: map(0.0, 0.3),
+    };
+    let host = StencilOperator::new(&grid, maps.clone());
+    let up = [&maps.eps_x, &maps.eps_y, &maps.eps_z, &maps.kappa_sq].map(|m| gpu.upload(m).unwrap());
+    let (dev, inv) = gpu.assemble_operator(&grid, up).unwrap();
+    let back = gpu.operator_to_host(&dev).unwrap();
+    assert_eq!(bits(&host.kvol), bits(&back.kvol));
+    assert_eq!(bits(&host.inv_diag), bits(&gpu.download(&inv).unwrap()));
+    let x = gpu.upload(&system_like(grid.len())).unwrap();
+    let mut y = gpu.zeros(grid.len()).unwrap();
+    gpu.apply(&dev, &x, &mut y).unwrap();
+    let mut yh = vec![0.0; grid.len()];
+    host.apply(&system_like(grid.len()), &mut yh);
+    assert_eq!(bits(&yh), bits(&gpu.download(&y).unwrap()));
 }

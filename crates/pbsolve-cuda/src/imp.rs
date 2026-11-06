@@ -4,10 +4,12 @@ use cudarc::driver::{
     ValidAsZeroBits,
 };
 use cudarc::nvrtc::Ptx;
+use pbsolve_core::backend::check_scatter;
 use pbsolve_core::multigrid::{LevelOp, Stencil27, Transfer};
 use pbsolve_core::operator::StencilOperator;
-use pbsolve_core::real::{convert, Real};
-use pbsolve_core::{Backend, PbError, Result};
+use pbsolve_core::real::{convert, zeros_touched, Real};
+use pbsolve_core::surface::Sphere;
+use pbsolve_core::{Backend, Grid, PbError, Result};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +17,8 @@ const KERNELS: &str = include_str!("../kernels/pb_kernels.cu");
 const BLOCK: u32 = 256;
 const MAX_REDUCTION_BLOCKS: u32 = 1024;
 const MAX_GRID_BLOCKS: u32 = 1 << 20;
+/// Spheres (one warp each) per block of `pb_mark_spheres` (MARK_WARPS there).
+const MARK_WARPS: usize = 4;
 
 fn cuda_err<E: std::fmt::Debug>(what: &str) -> impl FnOnce(E) -> PbError + '_ {
     move |e| PbError::Backend(format!("CUDA {what}: {e:?}"))
@@ -152,7 +156,7 @@ struct Kernels {
     promote: CudaFunction,
 }
 
-/// Multigrid setup kernels (f64 only).
+/// Multigrid setup and assembly kernels (f64 only).
 struct Setup {
     galerkin7: CudaFunction,
     galerkin27: CudaFunction,
@@ -160,6 +164,11 @@ struct Setup {
     diagonal: CudaFunction,
     gershgorin7: CudaFunction,
     gershgorin27: CudaFunction,
+    fill: CudaFunction,
+    mark: CudaFunction,
+    operator7: CudaFunction,
+    source_rhs: CudaFunction,
+    scatter: CudaFunction,
 }
 
 impl Setup {
@@ -172,6 +181,11 @@ impl Setup {
             diagonal: f("pb_diagonal27")?,
             gershgorin7: f("pb_gershgorin7")?,
             gershgorin27: f("pb_gershgorin27")?,
+            fill: f("pb_fill")?,
+            mark: f("pb_mark_spheres")?,
+            operator7: f("pb_operator7")?,
+            source_rhs: f("pb_source_rhs")?,
+            scatter: f("pb_scatter")?,
         })
     }
 }
@@ -348,6 +362,19 @@ impl<T: CudaReal> Dev<T> {
             .ok_or_else(|| PbError::Backend("multigrid setup needs the f64 backend".into()))
     }
 
+    fn assembly(&self) -> Result<&Setup> {
+        self.setup
+            .as_ref()
+            .ok_or_else(|| PbError::Backend("assembly needs the f64 backend".into()))
+    }
+
+    /// A device buffer of `n` values that the caller overwrites completely.
+    fn uninit(&self, n: usize) -> Result<CudaSlice<T>> {
+        // SAFETY: every caller launches a kernel that writes all n values
+        // before the buffer is read.
+        unsafe { self.stream().alloc::<T>(n) }.map_err(cuda_err("allocation"))
+    }
+
     /// A vector of this precision rounded to f32 (a new device buffer).
     fn to_f32(&self, x: &CudaSlice<T>) -> Result<CudaSlice<f32>> {
         let mut y = self
@@ -415,7 +442,7 @@ impl<T: CudaReal> Backend for Dev<T> {
     }
 
     fn download(&self, v: &Self::Vector) -> Result<Vec<f64>> {
-        let mut out = vec![0.0; v.len()];
+        let mut out = zeros_touched(v.len());
         T::read(self.stream(), v, &mut out)?;
         Ok(out)
     }
@@ -690,5 +717,146 @@ impl<T: CudaReal> Backend for Dev<T> {
             n: op.n,
             coef: self.to_f32(&op.coef)?,
         })
+    }
+
+    fn mark_maps(
+        &self,
+        grid: &Grid,
+        shifts: &[[f64; 3]],
+        fill: f64,
+        passes: &[(&[Sphere], f64)],
+    ) -> Result<Vec<Self::Vector>> {
+        let k = self.assembly()?;
+        let n = grid.len();
+        let [nx, ny, nz] = grid.dims.map(|d| d as i32);
+        let [hx, hy, hz] = grid.spacing;
+        // Every pass is uploaded once for all shifts.
+        let mut uploaded = Vec::with_capacity(passes.len());
+        for (spheres, value) in passes {
+            if spheres.is_empty() {
+                continue;
+            }
+            let flat: Vec<f64> = spheres
+                .iter()
+                .flat_map(|s| [s.center[0], s.center[1], s.center[2], s.radius])
+                .collect();
+            let buf = self.stream().clone_htod(&flat).map_err(cuda_err("upload"))?;
+            uploaded.push((buf, spheres.len(), *value));
+        }
+        let mut maps = Vec::with_capacity(shifts.len());
+        for shift in shifts {
+            let mut map = self.uninit(n)?;
+            {
+                let n64 = n as i64;
+                let mut b = self.stream().launch_builder(&k.fill);
+                b.arg(&n64).arg(&fill).arg(&mut map);
+                // SAFETY: argument list matches pb_fill; map holds n values.
+                unsafe { b.launch(Self::grid_for(n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_fill"))?;
+            }
+            let [minx, miny, minz] = [0, 1, 2].map(|a| grid.origin[a] + shift[a]);
+            for (buf, count, value) in &uploaded {
+                let count64 = *count as i64;
+                let mut b = self.stream().launch_builder(&k.mark);
+                b.arg(&nx).arg(&ny).arg(&nz).arg(&hx).arg(&hy).arg(&hz);
+                b.arg(&minx).arg(&miny).arg(&minz).arg(&count64).arg(buf).arg(value);
+                b.arg(&mut map);
+                let cfg = LaunchConfig {
+                    grid_dim: (count.div_ceil(MARK_WARPS).min(MAX_GRID_BLOCKS as usize) as u32, 1, 1),
+                    block_dim: (32 * MARK_WARPS as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                // SAFETY: argument list matches pb_mark_spheres; buf holds 4 count values, map n.
+                unsafe { b.launch(cfg) }.map_err(cuda_err("pb_mark_spheres"))?;
+            }
+            maps.push(map);
+        }
+        Ok(maps)
+    }
+
+    fn scatter(&self, n: usize, idx: &[usize], values: &[f64]) -> Result<Self::Vector> {
+        let k = self.assembly()?;
+        check_scatter(n, idx, values)?;
+        if n > u32::MAX as usize {
+            return Err(PbError::Backend(format!("scatter: {n} values exceed 32-bit indices")));
+        }
+        let mut out = self.zeros(n)?;
+        if idx.is_empty() {
+            return Ok(out);
+        }
+        let idx32: Vec<u32> = idx.iter().map(|&c| c as u32).collect();
+        let idx_dev = self.stream().clone_htod(&idx32).map_err(cuda_err("upload"))?;
+        let val_dev = self.stream().clone_htod(values).map_err(cuda_err("upload"))?;
+        let m = idx.len() as i64;
+        let mut b = self.stream().launch_builder(&k.scatter);
+        b.arg(&m).arg(&idx_dev).arg(&val_dev).arg(&mut out);
+        // SAFETY: argument list matches pb_scatter; every index is below n (checked).
+        unsafe { b.launch(Self::grid_for(idx.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_scatter"))?;
+        Ok(out)
+    }
+
+    fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)> {
+        let k = self.assembly()?;
+        let n = grid.len();
+        if let Some(m) = maps.iter().find(|m| m.len() != n) {
+            return Err(PbError::Backend(format!(
+                "a map has {} values, grid has {n} nodes",
+                m.len()
+            )));
+        }
+        let [eps_x, eps_y, eps_z, mut kvol] = maps;
+        let coef = StencilOperator::face_coefficients(grid);
+        let vol = grid.cell_volume();
+        let dims = grid.dims.map(|d| d as i32);
+        let mut inv_diag = self.uninit(n)?;
+        {
+            let [nx, ny, nz] = dims;
+            let [cx, cy, cz] = coef;
+            let mut b = self.stream().launch_builder(&k.operator7);
+            b.arg(&nx).arg(&ny).arg(&nz).arg(&cx).arg(&cy).arg(&cz).arg(&vol);
+            b.arg(&eps_x).arg(&eps_y).arg(&eps_z).arg(&mut kvol).arg(&mut inv_diag);
+            // SAFETY: argument list matches pb_operator7; every buffer holds n values.
+            unsafe { b.launch(Self::grid_for(n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_operator7"))?;
+        }
+        let op = CudaOperator {
+            dims,
+            coef: coef.map(T::from_f64),
+            n,
+            eps_x,
+            eps_y,
+            eps_z,
+            kvol,
+        };
+        Ok((op, inv_diag))
+    }
+
+    fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        let k = self.assembly()?;
+        let n = y.len() as i64;
+        let mut b = self.stream().launch_builder(&k.source_rhs);
+        b.arg(&n).arg(&src).arg(q).arg(d).arg(y);
+        // SAFETY: argument list matches pb_source_rhs; the vectors have the same length.
+        unsafe { b.launch(Self::grid_for(n as usize, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_source_rhs"))?;
+        Ok(())
+    }
+
+    fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator> {
+        self.assembly()?;
+        let read = |v: &CudaSlice<T>| -> Result<Vec<f64>> {
+            let mut host = vec![0.0; op.n];
+            T::read(self.stream(), v, &mut host)?;
+            Ok(host)
+        };
+        Ok(StencilOperator::from_parts(
+            op.dims.map(|d| d as usize),
+            op.coef.map(|c| c.to_f64()),
+            read(&op.eps_x)?,
+            read(&op.eps_y)?,
+            read(&op.eps_z)?,
+            read(&op.kvol)?,
+        ))
+    }
+
+    fn synchronize(&self) -> Result<()> {
+        self.stream().synchronize().map_err(cuda_err("synchronize"))
     }
 }

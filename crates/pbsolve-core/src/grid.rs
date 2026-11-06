@@ -160,16 +160,18 @@ impl Grid {
         Some((0..8).map(|n| field[idx[n]] * w[n]).sum())
     }
 
-    /// Indices of all boundary nodes.
+    /// Indices of all boundary nodes, in increasing order.
     pub fn boundary_indices(&self) -> Vec<usize> {
         let [nx, ny, nz] = self.dims;
         let mut out = Vec::with_capacity(2 * (nx * ny + ny * nz + nx * nz));
         for k in 0..nz {
             for j in 0..ny {
-                for i in 0..nx {
-                    if self.is_boundary(i, j, k) {
-                        out.push(self.index(i, j, k));
-                    }
+                let row = nx * (j + ny * k);
+                if k == 0 || k == nz - 1 || j == 0 || j == ny - 1 {
+                    out.extend(row..row + nx);
+                } else {
+                    out.push(row);
+                    out.push(row + nx - 1);
                 }
             }
         }
@@ -194,5 +196,19 @@ mod tests {
         let p = [0.37, -1.11, 2.9];
         let exact = 2.0 * p[0] - 3.0 * p[1] + 0.5 * p[2] + 1.0;
         assert!((g.interpolate(&f, p).unwrap() - exact).abs() < 1e-12);
+    }
+
+    #[test]
+    fn boundary_indices_are_the_boundary_nodes_in_order() {
+        for dims in [[5, 5, 5], [7, 5, 6], [9, 17, 5], [33, 6, 11]] {
+            let g = Grid::from_spacing([0.0; 3], [0.5; 3], dims).unwrap();
+            let brute: Vec<usize> = (0..g.len())
+                .filter(|&c| {
+                    let (i, j, k) = g.ijk(c);
+                    g.is_boundary(i, j, k)
+                })
+                .collect();
+            assert_eq!(g.boundary_indices(), brute, "{dims:?}");
+        }
     }
 }

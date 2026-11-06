@@ -31,30 +31,48 @@ pub struct StencilOperator {
 
 impl StencilOperator {
     pub fn new(grid: &Grid, maps: CoefficientMaps) -> Self {
-        let [hx, hy, hz] = grid.spacing;
-        let coef = [hy * hz / hx, hx * hz / hy, hx * hy / hz];
+        let coef = Self::face_coefficients(grid);
         let vol = grid.cell_volume();
         let kvol: Vec<f64> = maps.kappa_sq.par_iter().map(|k| k * vol).collect();
-        let [nx, ny, _] = grid.dims;
+        Self::from_parts(grid.dims, coef, maps.eps_x, maps.eps_y, maps.eps_z, kvol)
+    }
+
+    /// The face coefficients c_x = h_y h_z / h_x, c_y, c_z of `grid`.
+    pub fn face_coefficients(grid: &Grid) -> [f64; 3] {
+        let [hx, hy, hz] = grid.spacing;
+        [hy * hz / hx, hx * hz / hy, hx * hy / hz]
+    }
+
+    /// The operator of given face coefficients, ε maps and κ̄²V; computes the
+    /// inverse diagonal as [`new`](Self::new) does.
+    pub fn from_parts(
+        dims: [usize; 3],
+        coef: [f64; 3],
+        eps_x: Vec<f64>,
+        eps_y: Vec<f64>,
+        eps_z: Vec<f64>,
+        kvol: Vec<f64>,
+    ) -> Self {
+        let [nx, ny, nz] = dims;
         let (sx, sy, sz) = (1usize, nx, nx * ny);
-        let mut inv_diag = vec![0.0; grid.len()];
+        let mut inv_diag = vec![0.0; nx * ny * nz];
         inv_diag.par_iter_mut().enumerate().for_each(|(c, d)| {
-            let (i, j, k) = grid.ijk(c);
-            if grid.is_boundary(i, j, k) {
+            let (i, j, k) = (c % nx, (c / nx) % ny, c / (nx * ny));
+            if i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1 {
                 return;
             }
-            let diag = coef[0] * (maps.eps_x[c - sx] + maps.eps_x[c])
-                + coef[1] * (maps.eps_y[c - sy] + maps.eps_y[c])
-                + coef[2] * (maps.eps_z[c - sz] + maps.eps_z[c])
+            let diag = coef[0] * (eps_x[c - sx] + eps_x[c])
+                + coef[1] * (eps_y[c - sy] + eps_y[c])
+                + coef[2] * (eps_z[c - sz] + eps_z[c])
                 + kvol[c];
             *d = 1.0 / diag;
         });
         Self {
-            dims: grid.dims,
+            dims,
             coef,
-            eps_x: maps.eps_x,
-            eps_y: maps.eps_y,
-            eps_z: maps.eps_z,
+            eps_x,
+            eps_y,
+            eps_z,
             kvol,
             inv_diag,
         }

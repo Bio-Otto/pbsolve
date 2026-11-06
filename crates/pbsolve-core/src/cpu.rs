@@ -8,9 +8,11 @@
 
 use crate::backend::Backend;
 use crate::error::{PbError, Result};
+use crate::grid::Grid;
 use crate::multigrid::{self, Coarse27, LevelMatrix, LevelOp, Stencil27, Transfer};
 use crate::operator::{Stencil7, StencilOperator};
 use crate::real::Real;
+use crate::surface::{self, CoefficientMaps, Sphere};
 use rayon::prelude::*;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -34,6 +36,11 @@ pub trait CpuReal: Real {
     /// f32 copies for the twin.
     fn demote_op(op: &Self::Op) -> Arc<Stencil7<f32>>;
     fn demote_coarse(op: &Self::Coarse) -> Arc<Coarse27<f32>>;
+    /// Host f64 data as a vector of this precision without a copy; for f32
+    /// (which needs a rounded copy) the data is handed back.
+    fn from_host(v: Vec<f64>) -> std::result::Result<Vec<Self>, Vec<f64>>;
+    /// The f64 data of a vector of this precision; `None` for f32.
+    fn into_host(v: Vec<Self>) -> Option<Vec<f64>>;
 }
 
 impl CpuReal for f64 {
@@ -62,6 +69,12 @@ impl CpuReal for f64 {
     }
     fn demote_coarse(op: &Self::Coarse) -> Arc<Coarse27<f32>> {
         Arc::new(Coarse27::from_stencil(op))
+    }
+    fn from_host(v: Vec<f64>) -> std::result::Result<Vec<f64>, Vec<f64>> {
+        Ok(v)
+    }
+    fn into_host(v: Vec<f64>) -> Option<Vec<f64>> {
+        Some(v)
     }
 }
 
@@ -92,6 +105,12 @@ impl CpuReal for f32 {
     fn demote_coarse(op: &Self::Coarse) -> Arc<Coarse27<f32>> {
         op.clone()
     }
+    fn from_host(v: Vec<f64>) -> std::result::Result<Vec<f32>, Vec<f64>> {
+        Err(v)
+    }
+    fn into_host(_: Vec<f32>) -> Option<Vec<f64>> {
+        None
+    }
 }
 
 /// The f64 matrix of a level (multigrid setup runs in f64 only).
@@ -101,6 +120,10 @@ fn level_matrix<T: CpuReal>(level: LevelOp<'_, Cpu<T>>) -> Result<LevelMatrix<'_
         LevelOp::Coarse(op) => T::coarse_matrix(op).map(LevelMatrix::TwentySeven),
     };
     m.ok_or_else(|| PbError::Backend("multigrid setup needs the f64 backend".into()))
+}
+
+fn assembly<V>(v: Option<V>) -> Result<V> {
+    v.ok_or_else(|| PbError::Backend("assembly needs the f64 backend".into()))
 }
 
 /// CPU backend computing in `T`.
@@ -163,6 +186,13 @@ impl<T: CpuReal> Backend for Cpu<T> {
 
     fn upload(&self, host: &[f64]) -> Result<Self::Vector> {
         Ok(host.par_iter().map(|&v| T::from_f64(v)).collect())
+    }
+
+    fn upload_owned(&self, host: Vec<f64>) -> Result<Self::Vector> {
+        match T::from_host(host) {
+            Ok(v) => Ok(v),
+            Err(host) => self.upload(&host),
+        }
     }
 
     fn zeros(&self, n: usize) -> Result<Self::Vector> {
@@ -289,5 +319,62 @@ impl<T: CpuReal> Backend for Cpu<T> {
 
     fn demote_coarse(&self, op: &Self::Coarse) -> Result<Arc<Coarse27<f32>>> {
         Ok(T::demote_coarse(op))
+    }
+
+    fn mark_maps(
+        &self,
+        grid: &Grid,
+        shifts: &[[f64; 3]],
+        fill: f64,
+        passes: &[(&[Sphere], f64)],
+    ) -> Result<Vec<Self::Vector>> {
+        assembly((T::NAME == "f64").then_some(()))?;
+        shifts
+            .iter()
+            .map(|&shift| assembly(T::from_host(surface::mark_map(grid, shift, fill, passes)).ok()))
+            .collect()
+    }
+
+    fn scatter(&self, n: usize, idx: &[usize], values: &[f64]) -> Result<Self::Vector> {
+        assembly((T::NAME == "f64").then_some(()))?;
+        crate::backend::check_scatter(n, idx, values)?;
+        let mut v = vec![0.0; n];
+        for (&c, &x) in idx.iter().zip(values) {
+            v[c] = x;
+        }
+        assembly(T::from_host(v).ok())
+    }
+
+    fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)> {
+        let n = grid.len();
+        if let Some(m) = maps.iter().find(|m| m.len() != n) {
+            return Err(PbError::Backend(format!(
+                "a map has {} values, grid has {n} nodes",
+                m.len()
+            )));
+        }
+        let [eps_x, eps_y, eps_z, kappa_sq] = maps.map(T::into_host);
+        let maps = CoefficientMaps {
+            eps_x: assembly(eps_x)?,
+            eps_y: assembly(eps_y)?,
+            eps_z: assembly(eps_z)?,
+            kappa_sq: assembly(kappa_sq)?,
+        };
+        let op = StencilOperator::new(grid, maps);
+        let inv_diag = assembly(T::from_host(op.inv_diag.clone()).ok())?;
+        Ok((T::prepare(Arc::new(op)), inv_diag))
+    }
+
+    fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
+        assembly((T::NAME == "f64").then_some(()))?;
+        let src = T::from_f64(src);
+        y.par_iter_mut()
+            .zip(q.par_iter().zip(d.par_iter()))
+            .for_each(|(y, (q, d))| *y = if *d == T::ZERO { T::ZERO } else { src * *q - *y });
+        Ok(())
+    }
+
+    fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator> {
+        assembly(T::fine_matrix(op).cloned())
     }
 }

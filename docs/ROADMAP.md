@@ -154,12 +154,19 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
 * Multigrid setup on the GPU (done): Galerkin operators, inverse diagonals,
   Gershgorin bounds and f32 copies are built in device memory, bit-identical
   to the host. CUDA setup 2.2–3.1× faster, a calculation 1.2–1.3× faster.
+* Maps and right-hand side on the GPU (done): the dielectric and ion maps,
+  the operator, the node charges and the right-hand side are assembled in
+  device memory through the backend, bit-identical to the host; the host
+  operator is no longer built or uploaded. A CUDA calculation is 1.23–1.32×
+  faster (5DK3 10.3 → 8.4 s on a shared GPU).
 * *Next:*
-  * build the coefficient maps and the right-hand side on the device and
-    upload less (the f64 operator upload is now the largest setup item);
   * choose the number of concurrent CUDA workers from the free device
     memory. Three concurrent 5DK3 calculations need about 7 GB and can run
-    out of memory on an 8 GB card, before and after this change.
+    out of memory on an 8 GB card;
+  * on CUDA the `mdh` boundary (host, 3.5 s for 5DK3) and the CG solve are
+    now the largest stages; the full potential is downloaded after every
+    solve (0.3 s per 5DK3 calculation) although the energy and the next
+    focusing level only need values at atoms and boundary nodes.
 
 ### v0.2 — Accuracy
 

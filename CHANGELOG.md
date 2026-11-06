@@ -54,6 +54,15 @@
   `Stencil27::from_coef`, and the `Backend` methods `galerkin`,
   `gershgorin_lmax`, `coarse_to_host`, `demote_operator` and
   `demote_coarse`. `Hierarchy::build` stays the host reference.
+- Assembly on any backend: `surface::maps_on`, `solver::pcg_on`,
+  `charge::spread_charges_sparse`, `StencilOperator::from_parts`,
+  `StencilOperator::face_coefficients`, `multigrid::coarsest_dims`,
+  `multigrid::hierarchy_fits` and `real::zeros_touched`, and the `Backend` methods
+  `mark_maps`, `scatter`, `assemble_operator`, `source_rhs`,
+  `operator_to_host`, `upload_owned` and `synchronize`. `mark_map`,
+  `StencilOperator::new`, `spread_charges` and `assemble_rhs` stay the host
+  references. `Levels::build` and `MultigridPreconditioner::from_levels` take
+  the fine grid size and inverse diagonal instead of a host operator.
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
@@ -84,6 +93,12 @@
   order. Results are identical bit for bit. On a shared RTX 2080 SUPER the
   setup stage is 2.2–3.1× faster and a calculation 1.2–1.3× faster (5DK3:
   13.5 → 10.5 s). The CPU path is unchanged.
+- The CUDA backend also builds the dielectric and ion maps, the operator, the
+  charges on the grid and the right-hand side in device memory; the host
+  operator is no longer built or uploaded. Results are identical bit for bit.
+  A calculation is 1.23–1.32× faster on a shared RTX 2080 SUPER (5DK3:
+  10.3 → 8.4 s). The CPU runs the same pipeline through the CPU backend and
+  is unchanged in speed.
 
 ### Fixed
 

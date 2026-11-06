@@ -54,6 +54,7 @@ should update the status table below.
 | Host stages (unreleased) | Faster maps, `mdh` boundary, operator setup and host transfers; every energy, iteration count, residual, map and potential bit-identical to the previous commit on CPU and CUDA (13 cases + MM-PBSA species); 1.06–1.26× (CPU), 1.03–1.19× (CUDA) per calculation; see *Host stages* |
 | `bcfl="mdh-fast"` (unreleased, opt-in) | Interpolated `mdh`: ΔG_polar within 1.1e-13 of `mdh` (Born, 1YCR ×4, 1HPV, 1TII, 5DK3; CPU and CUDA), equal iterations; boundary 5DK3 3.39 → 0.55 s; 1YCR APBS comparison prints identical energies; see *mdh-fast* |
 | Multigrid setup on the GPU (unreleased) | Galerkin operators, 1/diag, Gershgorin bounds and f32 copies built on the device: bit-identical to the host hierarchy (4 operators incl. semi-coarsening, all levels) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA setup 2.2–3.1×, calculation 1.2–1.3× faster on a shared GPU; see *Multigrid setup on the GPU* |
+| Maps and right-hand side on the GPU (unreleased) | Dielectric and ion maps, operator, node charges and right-hand side assembled through the backend: bit-identical to the host (sphere marking incl. constructed boundary and summation-order cases, all surfaces and media, random maps, whole solves) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; CUDA calculation 1.23–1.32× faster on a shared GPU, CPU unchanged; see *Maps and right-hand side on the GPU* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -603,6 +604,117 @@ The f64 copy of the first coarse level exists briefly during the setup
 (+80 MiB per calculation for 5DK3). Three concurrent 5DK3 calculations were
 already at the limit of an 8 GB card before this change. The number of
 CUDA workers should follow the free device memory (see `docs/ROADMAP.md`).
+
+## Maps and right-hand side on the GPU
+
+**Problem.** After the multigrid setup moved to the GPU, a CUDA calculation
+still built the dielectric and ion maps, the operator (κ̄²V, inverse
+diagonal), the node charges and the right-hand side on the host, and then
+uploaded the operator (four f64 grids) and the right-hand side. For 5DK3
+(19.4 M nodes per grid, four solves) these host steps and transfers took
+about 2.1 s of a 10.3 s calculation: marking 0.66 s, operator and
+right-hand side 0.58 s, uploads 0.51 s, the dense boundary vector 0.18 s,
+map checks and freeing the host operator 0.19 s (shared GPU, four solves).
+
+**Change.** The pipeline (`pb.rs`) assembles the system through new
+`Backend` methods. `surface::maps_on` decides which spheres mark which value
+and calls `mark_maps`; the CPU backend runs `surface::mark_map`, the CUDA
+backend runs f64 kernels:
+* `pb_mark_spheres`: one warp per sphere. The `mark_range` bounds of the
+  three axes are computed by six lanes (the same divisions, `ceil`, `floor`,
+  `fmax` and `fmin`), the squared axis distances dx², dy², dz² once per
+  sphere into shared memory, and each lane tests whole rows with the host's
+  sum (dz² + dy²) + dx² ≤ r². The host skips nodes with dx² + dy² > r² first;
+  because rounding is monotone and the squares are non-negative, such nodes
+  (and rows with dz² + dy² > r²) fail the full test as well, so the GPU tests
+  only the sum. Writes of the same value by several spheres need no order.
+* `pb_fill`, `pb_operator7` (κ̄²V in place and 1/diag), `pb_scatter`
+  (charges and boundary values from sparse host lists) and `pb_source_rhs`
+  (b = 4π l_B q − A g on interior nodes, with `apply` for A g).
+
+The node charges are spread on the host as a sparse list
+(`spread_charges_sparse`: every node sums its contributions in the order of
+`spread_charges`, starting from 0.0). `pcg_on` solves with the device
+operator; `pcg` keeps its signature and uploads a host operator. The final
+u = x + g adds the boundary values on the host as before (interior nodes add
+0.0). The surface (SAS points), the boundary values, the potential download
+and the energies stay on the host. Two small host changes keep the solve
+stage as fast as before: the CUDA download writes its target buffer in
+parallel first (a fresh 155 MB buffer was otherwise faulted in page by page
+during the copy: 113 → 80 ms per 5DK3 download), and `pcg_on` waits for the
+queued f32 copies before it reports the setup time. With `multigrid-f32`
+the inverse diagonal is rounded to f32 before the hierarchy is built, so the
+f64 copy is freed early (`multigrid::hierarchy_fits` tells from the grid
+size alone whether a hierarchy can be built; otherwise Jacobi keeps the f64
+copy). `Grid::boundary_indices` no longer visits interior nodes (same
+indices, same order).
+
+**Checks.**
+* `device_sphere_marking_equals_the_host_bit_for_bit` (CUDA): random
+  spheres inside, partly and fully outside the grid, radius 0, spheres on
+  nodes; three passes on four shifted grids.
+* `device_sphere_marking_follows_the_host_arithmetic_at_the_boundary`:
+  200 spheres constructed so that the two summation orders disagree at a
+  node, and nodes exactly on spheres (dyadic grid). Kernel mutations (`<`
+  instead of `≤`, another summation order) fail this test; other mutations
+  (diagonal order, κ̄²V, right-hand-side sign, scatter values) fail the
+  operator and assembly tests. Dropping the host's dx² + dy² pre-test
+  passes, as the argument above says.
+* `device_coefficient_maps_equal_the_host_maps`: `mol` with and without
+  salt, `vdw` and `harmonic`, solvated and reference states.
+* `device_operator_of_random_maps_equals_the_host` and
+  `device_assembly_equals_the_host_assembly_bit_for_bit`: operator, inverse
+  diagonal, charges, boundary values and right-hand side equal the host's;
+  a whole solve from device-built maps equals the solve of the uploaded host
+  system bit for bit (potential, iterations, residual) for all three
+  preconditioners.
+* `device_assembly_rejects_bad_arguments`: index and length checks on both
+  backends; the f32 twins refuse to assemble.
+* Core: `sparse_spreading_equals_dense_spreading_bit_for_bit`,
+  `boundary_indices_are_the_boundary_nodes_in_order`; the levels test also
+  covers a grid too small to coarsen (`operator_to_host`).
+* The 13 fingerprint cases (energies, iterations and residuals as
+  `float.hex`, SHA-256 of maps and potentials, MM-PBSA species) are
+  bit-identical to the previous commit on CPU and CUDA.
+* The `cuda-12` build passes the GPU tests with NVRTC 12.9.
+* The 1YCR APBS comparison on CUDA passes with the same energies as before:
+  ΔG_polar −1221.2671 / −1233.9910 / −410.1701 kcal/mol for complex,
+  receptor and ligand, ΔΔG 422.8939 kcal/mol. The Born table is unchanged.
+
+**Time per ΔG_polar** on CUDA (s, A/B: the previous and the new build run
+alternately, best of 3; the RTX 2080 SUPER was shared with two GROMACS
+processes at 91–97 % utilisation):
+
+| System | Maps | Assembly | Setup | Solve | Total |
+|---|---|---|---|---|---|
+| 1YCR (1 670 atoms) | 0.107 → 0.063 | 0.081 → 0.022 | 0.138 → 0.088 | 0.295 → 0.288 | 0.713 → 0.539 (1.32×) |
+| 1TII (10 862 atoms) | 0.427 → 0.285 | 0.386 → 0.055 | 0.544 → 0.289 | 1.281 → 1.347 | 3.777 → 3.079 (1.23×) |
+| 5DK3 (20 179 atoms) | 0.878 → 0.609 | 0.981 → 0.150 | 1.401 → 0.745 | 3.228 → 3.219 | 10.29 → 8.38 (1.23×) |
+
+The maps column includes the SAS points (0.20 s for 5DK3, host). Marking
+the three face maps of one 5DK3 grid (19.4 M nodes, 19 772 solute and
+1 345 195 probe spheres) takes 0.22 s on the shared GPU and 0.37 s on the 18
+CPU threads; the first kernel version (one block per sphere, every node
+computing its own distances) took 0.80 s. The CPU backend runs the same
+pipeline and its times are unchanged within the noise between two builds
+(1YCR 2.25 → 2.29 s, 1TII 16.18 → 16.16 s, 5DK3 39.65 → 39.39 s, load 16–24
+from other jobs). In one process, the host-assembled system (`pcg`) and the
+backend-assembled one (`pcg_on`) solve equally fast on the CPU (1YCR fine
+grid, 6 repetitions: 0.588 and 0.594 s per solve, spread ±0.02 s).
+
+The largest stages on CUDA are now the `mdh` boundary (3.5 s for 5DK3,
+host; 0.55 s with `mdh-fast`) and the CG solve; the four potential downloads
+of a 5DK3 calculation take 0.3 s.
+
+**GPU memory** (peak above the baseline, 5DK3 by `polar_solvation_many`):
+
+| Workers | Previous | New |
+|---|---|---|
+| 1 | 2 464 MiB | 2 496 MiB |
+| 2 | 4 992 and 5 088 MiB (two runs) | 4 960 MiB (two runs) |
+
+Without the early f32 rounding of the inverse diagonal the new peak was
+2 560 MiB for one worker.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

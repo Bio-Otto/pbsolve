@@ -551,3 +551,162 @@ extern "C" __global__ void pb_gershgorin27(
     }
     block_max(m, partial);
 }
+
+// ---------------------------------------------------------------- assembly (double only)
+//
+// Coefficient maps, the 7-point operator and the right-hand side, as
+// `mark_map` (surface.rs), `StencilOperator::new` and `assemble_rhs`
+// (operator.rs) compute them on the host, expression for expression.
+
+extern "C" __global__ void pb_fill(const long long n, const double value, double* __restrict__ v)
+{
+    GRID_STRIDE_LOOP(c, n) { v[c] = value; }
+}
+
+// Sets `value` at every node within (<=) one of `count` spheres (x, y, z, r)
+// on the grid whose node (0, 0, 0) lies at (minx, miny, minz): APBS
+// markSphere with the node test of `mark_map`. One warp per sphere
+// (MARK_WARPS per block); a node inside several spheres receives the same
+// value from each, so the order of the writes does not matter. The squared
+// axis distances dx², dy², dz² are computed once per sphere (same
+// expressions as the host) and kept in shared memory; boxes longer than
+// MARK_AXIS nodes along an axis compute them per node.
+#define MARK_WARPS 4
+#define MARK_AXIS 64
+extern "C" __global__ void pb_mark_spheres(
+    const int nx, const int ny, const int nz, const double hx, const double hy, const double hz,
+    const double minx, const double miny, const double minz, const long long count,
+    const double* __restrict__ spheres, const double value, double* __restrict__ map)
+{
+    __shared__ double terms[MARK_WARPS][3][MARK_AXIS];
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    double* const tx = terms[warp][0];
+    double* const ty = terms[warp][1];
+    double* const tz = terms[warp][2];
+    for (long long s = (long long)blockIdx.x * MARK_WARPS + warp; s < count; s += (long long)gridDim.x * MARK_WARPS) {
+        const double posx = spheres[4 * s] - minx;
+        const double posy = spheres[4 * s + 1] - miny;
+        const double posz = spheres[4 * s + 2] - minz;
+        const double radius = spheres[4 * s + 3];
+        // `mark_range` of the three axes, one bound per lane (lanes 0-2 the
+        // lower, 3-5 the upper bounds of x, y, z), shared through shuffles.
+        double bound = 0.0;
+        if (lane < 6) {
+            const int a = lane % 3;
+            const double pos = a == 0 ? posx : (a == 1 ? posy : posz);
+            const double h = a == 0 ? hx : (a == 1 ? hy : hz);
+            const int n = a == 0 ? nx : (a == 1 ? ny : nz);
+            const double range = radius + 0.5 * h;
+            bound = lane < 3 ? fmax(ceil((pos - range) / h), 0.0) : fmin(floor((pos + range) / h), (double)(n - 1));
+        }
+        const double lx = __shfl_sync(0xffffffffu, bound, 0);
+        const double ly = __shfl_sync(0xffffffffu, bound, 1);
+        const double lz = __shfl_sync(0xffffffffu, bound, 2);
+        const double ux = __shfl_sync(0xffffffffu, bound, 3);
+        const double uy = __shfl_sync(0xffffffffu, bound, 4);
+        const double uz = __shfl_sync(0xffffffffu, bound, 5);
+        if (ux >= lx && uy >= ly && uz >= lz) {
+            const int i0 = (int)lx, i1 = (int)ux;
+            const int j0 = (int)ly, j1 = (int)uy;
+            const int k0 = (int)lz, k1 = (int)uz;
+            const double rtot2 = radius * radius;
+            const int ni = i1 - i0 + 1;
+            const int nj = j1 - j0 + 1;
+            const int nk = k1 - k0 + 1;
+            const bool cached = ni <= MARK_AXIS && nj <= MARK_AXIS && nk <= MARK_AXIS;
+            if (cached) {
+                for (int t = lane; t < ni; t += 32) {
+                    const double dx = posx - hx * (double)(i0 + t);
+                    tx[t] = dx * dx;
+                }
+                for (int t = lane; t < nj; t += 32) {
+                    const double dy = posy - hy * (double)(j0 + t);
+                    ty[t] = dy * dy;
+                }
+                for (int t = lane; t < nk; t += 32) {
+                    const double dz = posz - hz * (double)(k0 + t);
+                    tz[t] = dz * dz;
+                }
+            }
+            __syncwarp();
+            const int rows = nj * nk;
+            for (int r = lane; r < rows; r += 32) {
+                const int j = j0 + r % nj;
+                const int k = k0 + r / nj;
+                double dy2, dz2;
+                if (cached) {
+                    dy2 = ty[j - j0];
+                    dz2 = tz[k - k0];
+                } else {
+                    const double dy = posy - hy * (double)j;
+                    dy2 = dy * dy;
+                    const double dz = posz - hz * (double)k;
+                    dz2 = dz * dz;
+                }
+                // The host tests (dz² + dy²) + dx² <= r² after skipping nodes
+                // with dx² + dy² > r². Rounding is monotone and dx², dz² >= 0, so
+                // a node that skip rejects also fails the test, and so does every
+                // node of a row with dz² + dy² > r²: testing only the sum gives
+                // the same marks.
+                const double dzy = dz2 + dy2;
+                if (dzy > rtot2) {
+                    continue;
+                }
+                double* const row = map + (long long)nx * (j + (long long)ny * k);
+                for (int i = i0; i <= i1; ++i) {
+                    double dx2;
+                    if (cached) {
+                        dx2 = tx[i - i0];
+                    } else {
+                        const double dx = posx - hx * (double)i;
+                        dx2 = dx * dx;
+                    }
+                    if (dzy + dx2 <= rtot2) {
+                        row[i] = value;
+                    }
+                }
+            }
+            // The next sphere overwrites the terms only after every lane is done.
+            __syncwarp();
+        }
+    }
+}
+
+// kvol = kappa_sq * vol (in place) and the inverse diagonal (0 on boundary nodes).
+extern "C" __global__ void pb_operator7(
+    const int nx, const int ny, const int nz, const double cx, const double cy, const double cz, const double vol,
+    const double* __restrict__ ex, const double* __restrict__ ey, const double* __restrict__ ez,
+    double* __restrict__ kvol, double* __restrict__ inv)
+{
+    const long long n = (long long)nx * ny * nz;
+    const long long sy = nx;
+    const long long sz = (long long)nx * ny;
+    GRID_STRIDE_LOOP(c, n) {
+        const double kv = kvol[c] * vol;
+        kvol[c] = kv;
+        const int i = (int)(c % nx);
+        const int j = (int)((c / nx) % ny);
+        const int k = (int)(c / sz);
+        if (!interior3(i, j, k, nx, ny, nz)) {
+            inv[c] = 0.0;
+            continue;
+        }
+        const double diag = cx * (ex[c - 1] + ex[c]) + cy * (ey[c - sy] + ey[c]) + cz * (ez[c - sz] + ez[c]) + kv;
+        inv[c] = 1.0 / diag;
+    }
+}
+
+// y = (d == 0) ? 0 : src * q - y   (y = A g on entry: the right-hand side)
+extern "C" __global__ void pb_source_rhs(const long long n, const double src, const double* __restrict__ q,
+                                         const double* __restrict__ d, double* __restrict__ y)
+{
+    GRID_STRIDE_LOOP(c, n) { y[c] = d[c] == 0.0 ? 0.0 : src * q[c] - y[c]; }
+}
+
+// out[idx[m]] = values[m] (distinct indices)
+extern "C" __global__ void pb_scatter(const long long m, const unsigned int* __restrict__ idx,
+                                      const double* __restrict__ values, double* __restrict__ out)
+{
+    GRID_STRIDE_LOOP(c, m) { out[idx[c]] = values[c]; }
+}
