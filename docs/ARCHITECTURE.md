@@ -83,14 +83,23 @@ A backend provides:
 * the element-wise updates `axpy`, `xpay`, `axpby`, `scale` (diagonal
   scaling) and `copy`;
 * a single-precision twin (`type Single`, `single()`) on the same device and
-  stream, with `demote`/`promote` to convert vectors.
+  stream, with `demote`/`promote` to convert vectors;
+* the multigrid setup (f64 backends only): `galerkin` (Galerkin operator and
+  inverse diagonal of the next level), `gershgorin_lmax`, `coarse_to_host`
+  (for the coarsest factorisation), and `demote_operator`/`demote_coarse`
+  (f32 copies for the twin).
 
 The kernels are written once, generic over `Real` (`f64`, `f32`; `real.rs`).
-CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`. That is the entire surface a new
-accelerator (HIP, Metal, SYCL) must implement; the multigrid setup (Galerkin
-products, smoother bounds, coarsest factorisation) runs once on the host and
-is shared. The CUDA kernels are written in the same operation order as the
-CPU ones and compiled with `--fmad=false`, so only the reduction order differs.
+CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`; the setup kernels
+exist in f64 only. That is the entire surface a new accelerator (HIP, Metal,
+SYCL) must implement. `Hierarchy::build` is the host reference of the setup;
+`Levels::build` runs the same steps through the backend, so the CUDA backend
+builds the coarse operators in device memory and only the coarsest level
+(≤ 1000 unknowns) is factorised on the host. Each Galerkin row is accumulated
+by one thread in the host's loop order. The CUDA kernels are written in the
+same operation order as the CPU ones and compiled with `--fmad=false`, so the
+setup is bit-identical to the host and only the dot-product reduction order
+differs.
 
 ## Concurrent calculations (trajectories, MM-PBSA)
 
@@ -98,8 +107,8 @@ CPU ones and compiled with `--fmad=false`, so only the reduction order differs.
 Each worker has its own backend and a private rayon pool holding an equal
 share of the threads. A CUDA backend owns a non-blocking stream; buffers never
 cross streams, so cudarc's event tracking is switched off. While one worker
-builds surfaces, boundary values and the multigrid hierarchy on the host,
-another one's kernels run. Jobs are handed out dynamically; results are
+builds surfaces, maps and boundary values on the host, another one's kernels
+run. Jobs are handed out dynamically; results are
 returned in job order, so they are identical to sequential calls bit for bit.
 The Python `Solver` keeps the extra backends in a pool, created on first use:
 

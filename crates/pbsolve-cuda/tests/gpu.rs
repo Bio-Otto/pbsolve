@@ -263,3 +263,166 @@ fn single_precision_kernels_match_the_cpu_bit_for_bit() {
     cpu.axpby(0.7, &xc, -1.3, &mut yc).unwrap();
     assert_eq!(gpu.download(&yg).unwrap(), cpu.download(&yc).unwrap());
 }
+
+fn bits(v: &[f64]) -> Vec<u64> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// An LPBE operator with a few atoms on a grid of the given node counts.
+fn operator(dims: [usize; 3], spacing: f64, salt: f64) -> Arc<StencilOperator> {
+    let len = dims.map(|n| (n - 1) as f64 * spacing);
+    let grid = Grid::centered([0.3, -0.2, 0.1], len, dims).unwrap();
+    let atoms: Vec<Atom> = [
+        ([0.0, 0.0, 0.0], 1.0, 1.9),
+        ([1.6, 0.4, -0.3], -0.6, 1.5),
+        ([-1.2, 1.1, 0.8], 0.3, 1.7),
+        ([0.4, -1.5, 1.2], -0.7, 1.2),
+        ([-0.5, -0.4, -1.6], 0.0, 0.0),
+    ]
+    .into_iter()
+    .map(|(position, charge, radius)| Atom {
+        position,
+        charge,
+        radius,
+    })
+    .collect();
+    let params = PbParams {
+        pdie: 2.0,
+        ..PbParams::default()
+    }
+    .with_salt(salt, 2.0);
+    Arc::new(StencilOperator::new(
+        &grid,
+        CoefficientMaps::solvated(&grid, &atoms, &params),
+    ))
+}
+
+/// The multigrid hierarchy built on the GPU (Galerkin products,
+/// symmetrisation, inverse diagonals, Gershgorin bounds) equals the host
+/// hierarchy bit for bit, and so do its f32 copies.
+#[test]
+fn device_multigrid_setup_equals_the_host_bit_for_bit() {
+    use pbsolve_core::multigrid::{Chebyshev, Hierarchy, Levels};
+    if !gpu_present("device_multigrid_setup_equals_the_host_bit_for_bit") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let single = gpu.single().unwrap();
+    let cases = [
+        (system().0, "random atoms, 49³"),
+        (operator([66, 41, 6], 0.35, 0.15), "semi-coarsening"),
+        (operator([50, 37, 29], 0.3, 0.0), "even and odd sizes, no salt"),
+        (operator([97, 97, 97], 0.25, 1.0), "97³, 1 M"),
+    ];
+    for (op, what) in cases {
+        let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+        let dev = gpu.prepare(op.clone()).unwrap();
+        let l = Levels::build(&gpu, &op, &dev, Chebyshev::default()).unwrap().unwrap();
+        assert_eq!(l.levels(), h.levels(), "{what}");
+        assert_eq!(l.transfers, h.transfers, "{what}");
+        assert_eq!(bits(&l.lmax), bits(&h.lmax), "{what}: Gershgorin bounds");
+        assert_eq!(l.coarsest, h.coarsest, "{what}: coarsest factor");
+        for (lev, s) in h.coarse.iter().enumerate() {
+            let c = gpu.coarse_to_host(&l.coarse[lev]).unwrap();
+            assert_eq!(bits(&c.coef), bits(&s.coef), "{what}: level {} operator", lev + 1);
+            assert_eq!(
+                bits(&gpu.download(&l.inv_diag[lev]).unwrap()),
+                bits(&s.inv_diag),
+                "{what}: level {} 1/diag",
+                lev + 1
+            );
+        }
+        // f32 copies: rounded on the device as the twin's upload rounds them.
+        let up = Levels::upload(&single, h).unwrap();
+        let down = l.demote(&gpu, &single).unwrap();
+        for (lev, (a, b)) in up.coarse.iter().zip(&down.coarse).enumerate() {
+            let (a, b) = (single.coarse_to_host(a).unwrap(), single.coarse_to_host(b).unwrap());
+            assert_eq!(bits(&a.coef), bits(&b.coef), "{what}: f32 level {}", lev + 1);
+        }
+        for (a, b) in up.inv_diag.iter().zip(&down.inv_diag) {
+            assert_eq!(bits(&single.download(a).unwrap()), bits(&single.download(b).unwrap()));
+        }
+        let (o32, d32) = (single.prepare(op.clone()).unwrap(), gpu.demote_operator(&dev).unwrap());
+        let x = single.upload(&system_like(op.len())).unwrap();
+        let (mut y1, mut y2) = (single.zeros(x.len()).unwrap(), single.zeros(x.len()).unwrap());
+        single.apply(&o32, &x, &mut y1).unwrap();
+        single.apply(&d32, &x, &mut y2).unwrap();
+        assert_eq!(
+            single.download(&y1).unwrap(),
+            single.download(&y2).unwrap(),
+            "{what}: f32 operator"
+        );
+    }
+}
+
+/// Deterministic test vector.
+fn system_like(n: usize) -> Vec<f64> {
+    (0..n).map(|i| ((i * 7919) % 1013) as f64 / 1013.0 - 0.5).collect()
+}
+
+/// A V-cycle built from device levels is the V-cycle of the host hierarchy
+/// (both precisions), so solver results do not change.
+#[test]
+fn vcycle_of_device_levels_equals_the_host_vcycle() {
+    use pbsolve_core::multigrid::{Chebyshev, Hierarchy, Levels, MultigridPreconditioner};
+    if !gpu_present("vcycle_of_device_levels_equals_the_host_vcycle") {
+        return;
+    }
+    let (op, b) = system();
+    let gpu = CudaBackend::new(0).unwrap();
+    let dev = gpu.prepare(op.clone()).unwrap();
+    let r = gpu.upload(&b).unwrap();
+    let mut host =
+        MultigridPreconditioner::new(&gpu, &op, Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap()).unwrap();
+    let levels = Levels::build(&gpu, &op, &dev, Chebyshev::default()).unwrap().unwrap();
+    let mut device = MultigridPreconditioner::from_levels(&gpu, &op, levels).unwrap();
+    let (mut z1, mut z2) = (gpu.zeros(b.len()).unwrap(), gpu.zeros(b.len()).unwrap());
+    host.apply(&gpu, &dev, &r, &mut z1).unwrap();
+    device.apply(&gpu, &dev, &r, &mut z2).unwrap();
+    assert_eq!(bits(&gpu.download(&z1).unwrap()), bits(&gpu.download(&z2).unwrap()));
+
+    let single = gpu.single().unwrap();
+    let op32 = single.prepare(op.clone()).unwrap();
+    let r32 = single.upload(&b).unwrap();
+    let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+    let mut host = MultigridPreconditioner::new(&single, &op, h).unwrap();
+    let levels = Levels::build(&gpu, &op, &dev, Chebyshev::default()).unwrap().unwrap();
+    let mut device = MultigridPreconditioner::from_levels(&single, &op, levels.demote(&gpu, &single).unwrap()).unwrap();
+    let (mut z1, mut z2) = (single.zeros(b.len()).unwrap(), single.zeros(b.len()).unwrap());
+    host.apply(&single, &op32, &r32, &mut z1).unwrap();
+    device
+        .apply(&single, &gpu.demote_operator(&dev).unwrap(), &r32, &mut z2)
+        .unwrap();
+    assert_eq!(
+        bits(&single.download(&z1).unwrap()),
+        bits(&single.download(&z2).unwrap())
+    );
+}
+
+#[test]
+fn device_setup_reports_a_negative_diagonal_like_the_host() {
+    use pbsolve_core::multigrid::{Chebyshev, Hierarchy, LevelOp, Levels, Transfer};
+    if !gpu_present("device_setup_reports_a_negative_diagonal_like_the_host") {
+        return;
+    }
+    let mut op = (*operator([33, 33, 33], 0.4, 0.15)).clone();
+    for c in [16 + 33 * (16 + 33 * 16), 17 + 33 * (16 + 33 * 16)] {
+        op.kvol[c] = -1e6;
+    }
+    let op = Arc::new(op);
+    let host = Hierarchy::build(&op, Chebyshev::default()).unwrap_err().to_string();
+    let gpu = CudaBackend::new(0).unwrap();
+    let dev = gpu.prepare(op.clone()).unwrap();
+    let device = Levels::build(&gpu, &op, &dev, Chebyshev::default())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(host.contains("non-positive Galerkin diagonal"), "{host}");
+    assert_eq!(host, device);
+    // The f32 twin does not build hierarchies.
+    let single = gpu.single().unwrap();
+    let d32 = single.prepare(op.clone()).unwrap();
+    let t = Transfer::new(op.dims).unwrap();
+    assert!(single.galerkin(&t, LevelOp::Fine(&d32)).is_err());
+    assert!(single.gershgorin_lmax(LevelOp::Fine(&d32)).is_err());
+}

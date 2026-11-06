@@ -4,7 +4,7 @@ use cudarc::driver::{
     ValidAsZeroBits,
 };
 use cudarc::nvrtc::Ptx;
-use pbsolve_core::multigrid::{Stencil27, Transfer};
+use pbsolve_core::multigrid::{LevelOp, Stencil27, Transfer};
 use pbsolve_core::operator::StencilOperator;
 use pbsolve_core::real::{convert, Real};
 use pbsolve_core::{Backend, PbError, Result};
@@ -152,6 +152,30 @@ struct Kernels {
     promote: CudaFunction,
 }
 
+/// Multigrid setup kernels (f64 only).
+struct Setup {
+    galerkin7: CudaFunction,
+    galerkin27: CudaFunction,
+    symmetrise: CudaFunction,
+    diagonal: CudaFunction,
+    gershgorin7: CudaFunction,
+    gershgorin27: CudaFunction,
+}
+
+impl Setup {
+    fn load(module: &Arc<CudaModule>) -> Result<Self> {
+        let f = |name: &str| module.load_function(name).map_err(cuda_err("function lookup"));
+        Ok(Self {
+            galerkin7: f("pb_galerkin7")?,
+            galerkin27: f("pb_galerkin27")?,
+            symmetrise: f("pb_symmetrise27")?,
+            diagonal: f("pb_diagonal27")?,
+            gershgorin7: f("pb_gershgorin7")?,
+            gershgorin27: f("pb_gershgorin27")?,
+        })
+    }
+}
+
 impl Kernels {
     fn load(module: &Arc<CudaModule>, s: &str) -> Result<Self> {
         let f = |name: String| module.load_function(&name).map_err(cuda_err("function lookup"));
@@ -176,6 +200,8 @@ impl Kernels {
 pub struct Dev<T: CudaReal> {
     shared: Arc<Shared>,
     k: Kernels,
+    /// Present on the f64 backend only.
+    setup: Option<Setup>,
     partials: Mutex<CudaSlice<f64>>,
     _t: PhantomData<fn() -> T>,
 }
@@ -251,6 +277,11 @@ impl CudaBackend {
 impl<T: CudaReal> Dev<T> {
     fn from_shared(shared: Arc<Shared>) -> Result<Self> {
         let k = Kernels::load(&shared.module, T::NAME)?;
+        let setup = if T::NAME == "f64" {
+            Some(Setup::load(&shared.module)?)
+        } else {
+            None
+        };
         let partials = shared
             .stream
             .alloc_zeros::<f64>(2 * MAX_REDUCTION_BLOCKS as usize)
@@ -258,6 +289,7 @@ impl<T: CudaReal> Dev<T> {
         Ok(Self {
             shared,
             k,
+            setup,
             partials: Mutex::new(partials),
             _t: PhantomData,
         })
@@ -308,6 +340,22 @@ impl<T: CudaReal> Dev<T> {
         // SAFETY: pb_convert_* (n, const S*, D*); both buffers have length n.
         unsafe { b.launch(Self::grid_for(x.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_convert"))?;
         Ok(())
+    }
+
+    fn setup(&self) -> Result<&Setup> {
+        self.setup
+            .as_ref()
+            .ok_or_else(|| PbError::Backend("multigrid setup needs the f64 backend".into()))
+    }
+
+    /// A vector of this precision rounded to f32 (a new device buffer).
+    fn to_f32(&self, x: &CudaSlice<T>) -> Result<CudaSlice<f32>> {
+        let mut y = self
+            .stream()
+            .alloc_zeros::<f32>(x.len())
+            .map_err(cuda_err("allocation"))?;
+        self.convert(&self.k.demote, x, &mut y)?;
+        Ok(y)
     }
 }
 
@@ -513,5 +561,134 @@ impl<T: CudaReal> Backend for Dev<T> {
         // SAFETY: argument list matches the kernel signature.
         unsafe { b.launch(Self::grid_for(x.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_xpay"))?;
         Ok(())
+    }
+
+    fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)> {
+        let setup = self.setup()?;
+        let a = Self::transfer_args(t);
+        let n: usize = t.coarse.iter().product();
+        let mut coef = self.stream().alloc_zeros::<T>(27 * n).map_err(cuda_err("allocation"))?;
+        let cfg = Self::grid_for(n, MAX_GRID_BLOCKS);
+        match fine {
+            LevelOp::Fine(op) => {
+                let mut b = self.stream().launch_builder(&setup.galerkin7);
+                for v in &a {
+                    b.arg(v);
+                }
+                let [cx, cy, cz] = &op.coef;
+                b.arg(cx).arg(cy).arg(cz);
+                b.arg(&op.eps_x)
+                    .arg(&op.eps_y)
+                    .arg(&op.eps_z)
+                    .arg(&op.kvol)
+                    .arg(&mut coef);
+                // SAFETY: argument list matches pb_galerkin7; coef holds 27 n values.
+                unsafe { b.launch(cfg) }.map_err(cuda_err("pb_galerkin7"))?;
+            }
+            LevelOp::Coarse(op) => {
+                let mut b = self.stream().launch_builder(&setup.galerkin27);
+                for v in &a {
+                    b.arg(v);
+                }
+                b.arg(&op.coef).arg(&mut coef);
+                // SAFETY: argument list matches pb_galerkin27; coef holds 27 n values.
+                unsafe { b.launch(cfg) }.map_err(cuda_err("pb_galerkin27"))?;
+            }
+        }
+        let [mx, my, mz] = [a[3], a[4], a[5]];
+        {
+            let mut b = self.stream().launch_builder(&setup.symmetrise);
+            b.arg(&mx).arg(&my).arg(&mz).arg(&mut coef);
+            // SAFETY: argument list matches pb_symmetrise27 (13 n pairs).
+            unsafe { b.launch(Self::grid_for(13 * n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_symmetrise27"))?;
+        }
+        let mut inv_diag = self.zeros(n)?;
+        let mut bad = self.stream().alloc_zeros::<i32>(1).map_err(cuda_err("allocation"))?;
+        {
+            let n64 = n as i64;
+            let mut b = self.stream().launch_builder(&setup.diagonal);
+            b.arg(&n64).arg(&mut coef).arg(&mut inv_diag).arg(&mut bad);
+            // SAFETY: argument list matches pb_diagonal27.
+            unsafe { b.launch(cfg) }.map_err(cuda_err("pb_diagonal27"))?;
+        }
+        let flag = self.stream().clone_dtoh(&bad).map_err(cuda_err("download"))?;
+        self.stream().synchronize().map_err(cuda_err("synchronize"))?;
+        let coarse = CudaCoarse {
+            dims: t.coarse.map(|d| d as i32),
+            n,
+            coef,
+        };
+        if flag[0] != 0 {
+            // Report the first bad diagonal in node order, as the host does.
+            let host = self.coarse_to_host(&coarse).err();
+            return Err(host.unwrap_or_else(|| PbError::Backend("multigrid: non-positive Galerkin diagonal".into())));
+        }
+        Ok((coarse, inv_diag))
+    }
+
+    fn gershgorin_lmax(&self, level: LevelOp<'_, Self>) -> Result<f64> {
+        let setup = self.setup()?;
+        let n = match &level {
+            LevelOp::Fine(op) => op.n,
+            LevelOp::Coarse(op) => op.n,
+        };
+        let cfg = Self::grid_for(n, MAX_REDUCTION_BLOCKS);
+        let blocks = cfg.grid_dim.0 as usize;
+        let mut partials = self
+            .partials
+            .lock()
+            .map_err(|_| PbError::Backend("poisoned lock".into()))?;
+        match level {
+            LevelOp::Fine(op) => {
+                let [nx, ny, nz] = op.dims;
+                let [cx, cy, cz] = op.coef;
+                let mut b = self.stream().launch_builder(&setup.gershgorin7);
+                b.arg(&nx).arg(&ny).arg(&nz).arg(&cx).arg(&cy).arg(&cz);
+                b.arg(&op.eps_x)
+                    .arg(&op.eps_y)
+                    .arg(&op.eps_z)
+                    .arg(&op.kvol)
+                    .arg(&mut *partials);
+                // SAFETY: argument list matches pb_gershgorin7; partials holds MAX_REDUCTION_BLOCKS values.
+                unsafe { b.launch(cfg) }.map_err(cuda_err("pb_gershgorin7"))?;
+            }
+            LevelOp::Coarse(op) => {
+                let [nx, ny, nz] = op.dims;
+                let mut b = self.stream().launch_builder(&setup.gershgorin27);
+                b.arg(&nx).arg(&ny).arg(&nz).arg(&op.coef).arg(&mut *partials);
+                // SAFETY: argument list matches pb_gershgorin27; partials holds MAX_REDUCTION_BLOCKS values.
+                unsafe { b.launch(cfg) }.map_err(cuda_err("pb_gershgorin27"))?;
+            }
+        }
+        let host = self.stream().clone_dtoh(&*partials).map_err(cuda_err("download"))?;
+        self.stream().synchronize().map_err(cuda_err("synchronize"))?;
+        // Per-block maxima (identity 0); max is exact in any order.
+        Ok(host[..blocks].iter().fold(0.0, |m, &v| f64::max(m, v)))
+    }
+
+    fn coarse_to_host(&self, op: &Self::Coarse) -> Result<Stencil27> {
+        let mut coef = vec![0.0; op.coef.len()];
+        T::read(self.stream(), &op.coef, &mut coef)?;
+        Stencil27::from_coef(op.dims.map(|d| d as usize), coef)
+    }
+
+    fn demote_operator(&self, op: &Self::Operator) -> Result<CudaOperator<f32>> {
+        Ok(CudaOperator {
+            dims: op.dims,
+            coef: op.coef.map(|c| f32::from_f64(c.to_f64())),
+            n: op.n,
+            eps_x: self.to_f32(&op.eps_x)?,
+            eps_y: self.to_f32(&op.eps_y)?,
+            eps_z: self.to_f32(&op.eps_z)?,
+            kvol: self.to_f32(&op.kvol)?,
+        })
+    }
+
+    fn demote_coarse(&self, op: &Self::Coarse) -> Result<CudaCoarse<f32>> {
+        Ok(CudaCoarse {
+            dims: op.dims,
+            n: op.n,
+            coef: self.to_f32(&op.coef)?,
+        })
     }
 }

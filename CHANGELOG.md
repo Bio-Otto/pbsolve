@@ -44,6 +44,11 @@
   5DK3 (20 179 atoms) takes 3.4 → 0.55 s, and a CUDA calculation 1.36× less.
   `mdh` stays the default and still follows APBS; APBS inputs written from
   `mdh-fast` use `mdh`.
+- Multigrid setup on any backend: `multigrid::Levels` (a hierarchy held by a
+  backend, built by `Levels::build`), `MultigridPreconditioner::from_levels`,
+  `Stencil27::from_coef`, and the `Backend` methods `galerkin`,
+  `gershgorin_lmax`, `coarse_to_host`, `demote_operator` and
+  `demote_coarse`. `Hierarchy::build` stays the host reference.
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
@@ -68,6 +73,12 @@
 
   Gains: 1.06–1.26× per calculation on the CPU and 1.03–1.19× on CUDA.
   Energies, iterations, maps and potentials are identical bit for bit.
+- The CUDA backend builds the multigrid hierarchy on the GPU: Galerkin
+  operators, inverse diagonals, Gershgorin bounds and the f32 copies used by
+  `multigrid-f32` are computed in device memory in the host's operation
+  order. Results are identical bit for bit. On a shared RTX 2080 SUPER the
+  setup stage is 2.2–3.1× faster and a calculation 1.2–1.3× faster (5DK3:
+  13.5 → 10.5 s). The CPU path is unchanged.
 
 ### Fixed
 

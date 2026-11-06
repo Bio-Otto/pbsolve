@@ -6,7 +6,7 @@
 
 use crate::backend::Backend;
 use crate::error::{PbError, Result};
-use crate::multigrid::{Chebyshev, Hierarchy, MultigridPreconditioner};
+use crate::multigrid::{Chebyshev, Levels, MultigridPreconditioner};
 use crate::operator::StencilOperator;
 use crate::params::Preconditioner;
 use std::sync::Arc;
@@ -62,21 +62,25 @@ enum Precond<B: Backend> {
 }
 
 impl<B: Backend> Precond<B> {
-    fn build(be: &B, op: &Arc<StencilOperator>, kind: Preconditioner) -> Result<Self> {
+    /// `dev` is `op` prepared on `be`; the hierarchy is built on the backend.
+    fn build(be: &B, op: &Arc<StencilOperator>, dev: &B::Operator, kind: Preconditioner) -> Result<Self> {
         match kind {
             Preconditioner::Jacobi => {}
             Preconditioner::Multigrid => {
-                if let Some(h) = Hierarchy::build(op, Chebyshev::default())? {
-                    return Ok(Self::Multigrid(Box::new(MultigridPreconditioner::new(be, op, h)?)));
+                if let Some(l) = Levels::build(be, op, dev, Chebyshev::default())? {
+                    return Ok(Self::Multigrid(Box::new(MultigridPreconditioner::from_levels(
+                        be, op, l,
+                    )?)));
                 }
             }
             Preconditioner::MultigridF32 => {
-                if let Some(h) = Hierarchy::build(op, Chebyshev::default())? {
+                if let Some(l) = Levels::build(be, op, dev, Chebyshev::default())? {
                     let single = be.single()?;
-                    let mg = MultigridPreconditioner::new(&single, op, h)?;
+                    let l = l.demote(be, &single)?;
+                    let mg = MultigridPreconditioner::from_levels(&single, op, l)?;
                     let n = op.len();
                     return Ok(Self::Mixed(Box::new(Mixed {
-                        op: single.prepare(op.clone())?,
+                        op: be.demote_operator(dev)?,
                         r: single.zeros(n)?,
                         z: single.zeros(n)?,
                         mg,
@@ -139,10 +143,13 @@ pub fn pcg<B: Backend>(
             },
         ));
     }
-    let mut pre = Precond::build(be, &op, opts.preconditioner)?;
+    let dop = be.prepare(op.clone())?;
+    let mut pre = Precond::build(be, &op, &dop, opts.preconditioner)?;
+    // Release the host operator now (device backends hold their own copy),
+    // not after the solve.
+    drop(op);
     let flexible = pre.is_flexible();
     let (preconditioner, levels) = pre.kind();
-    let dop = be.prepare(op)?;
     let setup_seconds = start.elapsed().as_secs_f64();
     let iterating = Instant::now();
 

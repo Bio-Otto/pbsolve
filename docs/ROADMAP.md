@@ -151,9 +151,15 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   * `mdh` stays the APBS-compatible default.
 * An order-preserving rewrite of the Galerkin product brought nothing: it is
   arithmetic-bound, as measured in `docs/VALIDATION.md`.
-* *Next:* GPU-resident setup. The Galerkin products, maps and right-hand side
-  would be built on the device; the same operation order keeps the results
-  bit-identical to the CPU.
+* Multigrid setup on the GPU (done): Galerkin operators, inverse diagonals,
+  Gershgorin bounds and f32 copies are built in device memory, bit-identical
+  to the host. CUDA setup 2.2–3.1× faster, a calculation 1.2–1.3× faster.
+* *Next:*
+  * build the coefficient maps and the right-hand side on the device and
+    upload less (the f64 operator upload is now the largest setup item);
+  * choose the number of concurrent CUDA workers from the free device
+    memory. Three concurrent 5DK3 calculations need about 7 GB and can run
+    out of memory on an 8 GB card, before and after this change.
 
 ### v0.2 — Accuracy
 

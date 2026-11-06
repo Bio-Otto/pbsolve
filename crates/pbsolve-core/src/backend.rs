@@ -8,7 +8,7 @@
 //! all backends round identically.
 
 use crate::error::Result;
-use crate::multigrid::{Stencil27, Transfer};
+use crate::multigrid::{LevelOp, Stencil27, Transfer};
 use crate::operator::StencilOperator;
 use std::sync::Arc;
 
@@ -73,4 +73,26 @@ pub trait Backend {
     fn restrict(&self, t: &Transfer, fine: &Self::Vector, coarse: &mut Self::Vector) -> Result<()>;
     /// fine ← fine + P coarse ([`crate::multigrid::prolong_add`]).
     fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()>;
+
+    // Multigrid setup ([`crate::multigrid::Levels::build`]). Only f64
+    // backends build hierarchies; their twins return an error.
+
+    /// The Galerkin operator Pᵀ A P of a level and its inverse diagonal,
+    /// bit-identical to [`crate::multigrid::galerkin`] (same operation order).
+    fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)>
+    where
+        Self: Sized;
+    /// Gershgorin bound λmax(D⁻¹A) of a level, equal to
+    /// [`crate::multigrid::LevelMatrix::gershgorin_lmax`].
+    fn gershgorin_lmax(&self, level: LevelOp<'_, Self>) -> Result<f64>
+    where
+        Self: Sized;
+    /// A host copy of a coarse operator (for the coarsest-level factorisation).
+    fn coarse_to_host(&self, op: &Self::Coarse) -> Result<Stencil27>;
+    /// The fine operator rounded to f32 for the twin, as the twin's
+    /// [`prepare`](Self::prepare) of the host operator would round it.
+    fn demote_operator(&self, op: &Self::Operator) -> Result<<Self::Single as Backend>::Operator>;
+    /// A coarse operator rounded to f32 for the twin, as the twin's
+    /// [`prepare_coarse`](Self::prepare_coarse) would round it.
+    fn demote_coarse(&self, op: &Self::Coarse) -> Result<<Self::Single as Backend>::Coarse>;
 }

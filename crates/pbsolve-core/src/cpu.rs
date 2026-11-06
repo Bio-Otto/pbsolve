@@ -7,8 +7,8 @@
 //! original f64-only code.
 
 use crate::backend::Backend;
-use crate::error::Result;
-use crate::multigrid::{self, Coarse27, Stencil27, Transfer};
+use crate::error::{PbError, Result};
+use crate::multigrid::{self, Coarse27, LevelMatrix, LevelOp, Stencil27, Transfer};
 use crate::operator::{Stencil7, StencilOperator};
 use crate::real::Real;
 use rayon::prelude::*;
@@ -27,6 +27,13 @@ pub trait CpuReal: Real {
     fn prepare_coarse(op: Arc<Stencil27>) -> Self::Coarse;
     fn apply(op: &Self::Op, x: &[Self], y: &mut [Self]);
     fn apply_coarse(op: &Self::Coarse, x: &[Self], y: &mut [Self]);
+    /// The f64 matrices behind the operators (multigrid setup); `None` for
+    /// rounded copies.
+    fn fine_matrix(op: &Self::Op) -> Option<&StencilOperator>;
+    fn coarse_matrix(op: &Self::Coarse) -> Option<&Stencil27>;
+    /// f32 copies for the twin.
+    fn demote_op(op: &Self::Op) -> Arc<Stencil7<f32>>;
+    fn demote_coarse(op: &Self::Coarse) -> Arc<Coarse27<f32>>;
 }
 
 impl CpuReal for f64 {
@@ -43,6 +50,18 @@ impl CpuReal for f64 {
     }
     fn apply_coarse(op: &Self::Coarse, x: &[f64], y: &mut [f64]) {
         op.apply(x, y)
+    }
+    fn fine_matrix(op: &Self::Op) -> Option<&StencilOperator> {
+        Some(op)
+    }
+    fn coarse_matrix(op: &Self::Coarse) -> Option<&Stencil27> {
+        Some(op)
+    }
+    fn demote_op(op: &Self::Op) -> Arc<Stencil7<f32>> {
+        Arc::new(Stencil7::from_operator(op))
+    }
+    fn demote_coarse(op: &Self::Coarse) -> Arc<Coarse27<f32>> {
+        Arc::new(Coarse27::from_stencil(op))
     }
 }
 
@@ -61,6 +80,27 @@ impl CpuReal for f32 {
     fn apply_coarse(op: &Self::Coarse, x: &[f32], y: &mut [f32]) {
         op.apply(x, y)
     }
+    fn fine_matrix(_: &Self::Op) -> Option<&StencilOperator> {
+        None
+    }
+    fn coarse_matrix(_: &Self::Coarse) -> Option<&Stencil27> {
+        None
+    }
+    fn demote_op(op: &Self::Op) -> Arc<Stencil7<f32>> {
+        op.clone()
+    }
+    fn demote_coarse(op: &Self::Coarse) -> Arc<Coarse27<f32>> {
+        op.clone()
+    }
+}
+
+/// The f64 matrix of a level (multigrid setup runs in f64 only).
+fn level_matrix<T: CpuReal>(level: LevelOp<'_, Cpu<T>>) -> Result<LevelMatrix<'_>> {
+    let m = match level {
+        LevelOp::Fine(op) => T::fine_matrix(op).map(LevelMatrix::Seven),
+        LevelOp::Coarse(op) => T::coarse_matrix(op).map(LevelMatrix::TwentySeven),
+    };
+    m.ok_or_else(|| PbError::Backend("multigrid setup needs the f64 backend".into()))
 }
 
 /// CPU backend computing in `T`.
@@ -225,5 +265,29 @@ impl<T: CpuReal> Backend for Cpu<T> {
     fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()> {
         multigrid::prolong_add(t, coarse, fine);
         Ok(())
+    }
+
+    fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)> {
+        let s = multigrid::galerkin(t, level_matrix(fine)?)?;
+        let inv_diag = self.upload(&s.inv_diag)?;
+        Ok((T::prepare_coarse(Arc::new(s)), inv_diag))
+    }
+
+    fn gershgorin_lmax(&self, level: LevelOp<'_, Self>) -> Result<f64> {
+        Ok(level_matrix(level)?.gershgorin_lmax())
+    }
+
+    fn coarse_to_host(&self, op: &Self::Coarse) -> Result<Stencil27> {
+        T::coarse_matrix(op)
+            .cloned()
+            .ok_or_else(|| PbError::Backend("multigrid setup needs the f64 backend".into()))
+    }
+
+    fn demote_operator(&self, op: &Self::Operator) -> Result<Arc<Stencil7<f32>>> {
+        Ok(T::demote_op(op))
+    }
+
+    fn demote_coarse(&self, op: &Self::Coarse) -> Result<Arc<Coarse27<f32>>> {
+        Ok(T::demote_coarse(op))
     }
 }

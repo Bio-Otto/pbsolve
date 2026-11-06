@@ -20,9 +20,12 @@
 //! The V-cycle is therefore a fixed symmetric positive definite operator and
 //! is used as the preconditioner of CG (MGCG, [Tatebe 1993]).
 //!
-//! Host-side setup (transfer, Galerkin products, factorisation) lives here
-//! and is shared by all backends; the cycle itself is written once against
-//! [`Backend`].
+//! The setup is defined here on the host ([`Hierarchy::build`], the
+//! reference). [`Levels::build`] runs the same steps through the backend's
+//! setup methods, so a GPU builds the Galerkin operators, inverse diagonals
+//! and Gershgorin bounds in device memory, bit-identical to the host; only
+//! the small coarsest level is factorised on the host. The cycle itself is
+//! written once against [`Backend`].
 
 use crate::backend::Backend;
 use crate::error::{PbError, Result};
@@ -400,30 +403,41 @@ pub fn galerkin(t: &Transfer, fine: LevelMatrix<'_>) -> Result<Stencil27> {
             *v = 0.5 * (rows[c][o] + rows[partner][26 - o]);
         }
     });
-    let mut inv_diag = vec![0.0; n];
-    for (c, d) in inv_diag.iter_mut().enumerate() {
-        let diag = coef[13 * n + c];
-        if diag != 0.0 {
-            if diag.is_nan() || diag < 0.0 {
-                return Err(PbError::Backend(format!(
-                    "multigrid: non-positive Galerkin diagonal {diag:.3e} on grid {cd:?}"
-                )));
+    Stencil27::from_coef(cd, coef)
+}
+
+impl Stencil27 {
+    /// A Galerkin operator from its symmetrised coefficients: computes the
+    /// inverse diagonal and rejects a NaN or negative diagonal (the first one
+    /// in node order is reported).
+    pub fn from_coef(dims: [usize; 3], coef: Vec<f64>) -> Result<Self> {
+        let n = dims[0] * dims[1] * dims[2];
+        let mut inv_diag = vec![0.0; n];
+        for (c, d) in inv_diag.iter_mut().enumerate() {
+            let diag = coef[13 * n + c];
+            if diag != 0.0 {
+                if diag.is_nan() || diag < 0.0 {
+                    return Err(non_positive_diagonal(diag, dims));
+                }
+                *d = 1.0 / diag;
             }
-            *d = 1.0 / diag;
         }
+        Ok(Self { dims, coef, inv_diag })
     }
-    Ok(Stencil27 {
-        dims: cd,
-        coef,
-        inv_diag,
-    })
+}
+
+/// The error of a Galerkin operator with diagonal `diag` (NaN or negative).
+fn non_positive_diagonal(diag: f64, dims: [usize; 3]) -> PbError {
+    PbError::Backend(format!(
+        "multigrid: non-positive Galerkin diagonal {diag:.3e} on grid {dims:?}"
+    ))
 }
 
 // ------------------------------------------------------------------ coarsest level
 
 /// Banded Cholesky factor of a level matrix restricted to interior nodes
 /// (natural x-fastest ordering), used as the exact coarsest-level solver.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BandedCholesky {
     dims: [usize; 3],
     n: usize,
@@ -596,6 +610,111 @@ impl Hierarchy {
     }
 }
 
+/// The coarse levels of a multigrid hierarchy held by a backend: everything
+/// the V-cycle needs besides the fine operator.
+pub struct Levels<B: Backend> {
+    /// `transfers[l]` maps level `l` to level `l + 1` (level 0 = fine grid).
+    pub transfers: Vec<Transfer>,
+    /// Galerkin operators of levels 1..
+    pub coarse: Vec<B::Coarse>,
+    /// 1/diag of levels 1.. (0 on boundary nodes).
+    pub inv_diag: Vec<B::Vector>,
+    /// Gershgorin bounds λmax(D⁻¹A) of every level (fine first).
+    pub lmax: Vec<f64>,
+    pub coarsest: BandedCholesky,
+    pub smoother: Chebyshev,
+}
+
+impl<B: Backend> Levels<B> {
+    /// Builds the hierarchy of `fine` with the backend's own setup kernels
+    /// (`dev` is `fine` prepared on `be`, which must compute in f64). The
+    /// steps and every operator are those of [`Hierarchy::build`], bit for
+    /// bit; only the coarsest level is factorised on the host. Returns `None`
+    /// where [`Hierarchy::build`] does.
+    pub fn build(be: &B, fine: &StencilOperator, dev: &B::Operator, smoother: Chebyshev) -> Result<Option<Self>> {
+        let mut transfers = Vec::new();
+        let mut coarse: Vec<B::Coarse> = Vec::new();
+        let mut inv_diag = Vec::new();
+        let mut lmax = vec![be.gershgorin_lmax(LevelOp::Fine(dev))?];
+        let mut dims = fine.dims;
+        while interior_count(dims) > COARSEST_MAX_UNKNOWNS {
+            let Some(t) = Transfer::new(dims) else { break };
+            let (next, inv) = {
+                let m = match coarse.last() {
+                    Some(s) => LevelOp::Coarse(s),
+                    None => LevelOp::Fine(dev),
+                };
+                be.galerkin(&t, m)?
+            };
+            lmax.push(be.gershgorin_lmax(LevelOp::Coarse(&next))?);
+            transfers.push(t);
+            coarse.push(next);
+            inv_diag.push(inv);
+            dims = t.coarse;
+        }
+        if BandedCholesky::storage(dims) > MAX_BAND_VALUES {
+            return Ok(None);
+        }
+        let coarsest = match coarse.last() {
+            Some(s) => BandedCholesky::factor(LevelMatrix::TwentySeven(&be.coarse_to_host(s)?))?,
+            None => BandedCholesky::factor(LevelMatrix::Seven(fine))?,
+        };
+        Ok(Some(Self {
+            transfers,
+            coarse,
+            inv_diag,
+            lmax,
+            coarsest,
+            smoother,
+        }))
+    }
+
+    /// Puts a host hierarchy on the backend.
+    pub fn upload(be: &B, h: Hierarchy) -> Result<Self> {
+        let mut coarse = Vec::with_capacity(h.coarse.len());
+        let mut inv_diag = Vec::with_capacity(h.coarse.len());
+        for s in h.coarse {
+            inv_diag.push(be.upload(&s.inv_diag)?);
+            coarse.push(be.prepare_coarse(s)?);
+        }
+        Ok(Self {
+            transfers: h.transfers,
+            coarse,
+            inv_diag,
+            lmax: h.lmax,
+            coarsest: h.coarsest,
+            smoother: h.smoother,
+        })
+    }
+
+    /// The same levels on `single`, the twin of `be`: coefficients and inverse
+    /// diagonals rounded to f32 on the device, as uploading the host
+    /// hierarchy to the twin would round them.
+    pub fn demote(self, be: &B, single: &B::Single) -> Result<Levels<B::Single>> {
+        let mut coarse = Vec::with_capacity(self.coarse.len());
+        let mut inv_diag = Vec::with_capacity(self.coarse.len());
+        for (c, d) in self.coarse.iter().zip(&self.inv_diag) {
+            coarse.push(be.demote_coarse(c)?);
+            let mut d32 = single.zeros(self.transfers[inv_diag.len()].coarse.iter().product())?;
+            be.demote(d, &mut d32)?;
+            inv_diag.push(d32);
+        }
+        Ok(Levels {
+            transfers: self.transfers,
+            coarse,
+            inv_diag,
+            lmax: self.lmax,
+            coarsest: self.coarsest,
+            smoother: self.smoother,
+        })
+    }
+
+    /// Number of levels including the fine grid.
+    pub fn levels(&self) -> usize {
+        self.coarse.len() + 1
+    }
+}
+
 // ------------------------------------------------------------------ V-cycle (any backend)
 
 /// The operator of one level as prepared on a backend.
@@ -622,10 +741,9 @@ struct Work<B: Backend> {
 }
 
 impl<B: Backend> Work<B> {
-    fn new(be: &B, inv_diag: &[f64], lmax: f64) -> Result<Self> {
-        let n = inv_diag.len();
+    fn new(be: &B, inv_diag: B::Vector, n: usize, lmax: f64) -> Result<Self> {
         Ok(Self {
-            inv_diag: be.upload(inv_diag)?,
+            inv_diag,
             lmax,
             r: be.zeros(n)?,
             d: be.zeros(n)?,
@@ -653,26 +771,31 @@ pub struct MultigridPreconditioner<B: Backend> {
 }
 
 impl<B: Backend> MultigridPreconditioner<B> {
+    /// The V-cycle of a host hierarchy, uploaded to `be`.
     pub fn new(be: &B, fine: &StencilOperator, h: Hierarchy) -> Result<Self> {
-        let mut levels = Vec::with_capacity(h.coarse.len());
-        for (l, s) in h.coarse.iter().enumerate() {
+        Self::from_levels(be, fine, Levels::upload(be, h)?)
+    }
+
+    /// The V-cycle of levels already on `be` (the fine inverse diagonal is
+    /// uploaded from `fine`).
+    pub fn from_levels(be: &B, fine: &StencilOperator, l: Levels<B>) -> Result<Self> {
+        let mut levels = Vec::with_capacity(l.coarse.len());
+        let mut nc = fine.len();
+        for (lev, (op, inv_diag)) in l.coarse.into_iter().zip(l.inv_diag).enumerate() {
+            nc = l.transfers[lev].coarse.iter().product();
             levels.push(CoarseLevel {
-                op: be.prepare_coarse(s.clone())?,
-                work: Work::new(be, &s.inv_diag, h.lmax[l + 1])?,
-                x: be.zeros(s.len())?,
-                b: be.zeros(s.len())?,
+                op,
+                work: Work::new(be, inv_diag, nc, l.lmax[lev + 1])?,
+                x: be.zeros(nc)?,
+                b: be.zeros(nc)?,
             });
         }
-        let nc = match h.coarse.last() {
-            Some(s) => s.len(),
-            None => fine.len(),
-        };
         Ok(Self {
-            fine: Work::new(be, &fine.inv_diag, h.lmax[0])?,
+            fine: Work::new(be, be.upload(&fine.inv_diag)?, fine.len(), l.lmax[0])?,
             levels,
-            transfers: h.transfers,
-            coarsest: h.coarsest,
-            smoother: h.smoother,
+            transfers: l.transfers,
+            coarsest: l.coarsest,
+            smoother: l.smoother,
             host_b: vec![0.0; nc],
             host_x: vec![0.0; nc],
         })
@@ -1222,5 +1345,80 @@ mod tests {
             dot(&r, &sp.download(&w32).unwrap()),
         );
         assert!(((a - b) / a).abs() < 1e-5, "sᵀMr = {a}, rᵀMs = {b}");
+    }
+
+    fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// Levels built through the backend interface equal the host hierarchy
+    /// bit for bit, in f64 and after rounding to the f32 twin.
+    #[test]
+    fn levels_built_on_the_cpu_backend_equal_the_host_hierarchy() {
+        use crate::cpu::CpuSingle;
+        for dims in [[41, 41, 41], [66, 41, 6], [50, 37, 29]] {
+            let op = Arc::new(molecule_operator(dims, 0.35));
+            let be = CpuBackend::new();
+            let dev = be.prepare(op.clone()).unwrap();
+            let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+            let l = Levels::build(&be, &op, &dev, Chebyshev::default()).unwrap().unwrap();
+            assert_eq!(l.levels(), h.levels(), "{dims:?}");
+            assert_eq!(l.transfers, h.transfers);
+            assert_eq!(bits(&l.lmax), bits(&h.lmax));
+            assert_eq!(l.coarsest, h.coarsest);
+            for (lev, s) in h.coarse.iter().enumerate() {
+                assert_eq!(bits(&l.coarse[lev].coef), bits(&s.coef), "{dims:?} level {}", lev + 1);
+                assert_eq!(bits(&l.inv_diag[lev]), bits(&s.inv_diag));
+            }
+            // Semi-coarsening: the last axis stops coarsening below 5 nodes.
+            if dims == [66, 41, 6] {
+                assert!(h.transfers.iter().any(|t| !t.coarsen[2]));
+            }
+            let sp = CpuSingle::new();
+            let up = Levels::upload(&sp, h.clone()).unwrap();
+            let down = l.demote(&be, &sp).unwrap();
+            for (a, b) in up.coarse.iter().zip(&down.coarse) {
+                assert_eq!(a.coef, b.coef);
+            }
+            assert_eq!(up.inv_diag, down.inv_diag);
+            let (o32, d32) = (sp.prepare(op.clone()).unwrap(), be.demote_operator(&dev).unwrap());
+            let x = sp.upload(&interior_random(dims, 3)).unwrap();
+            let (mut y1, mut y2) = (sp.zeros(x.len()).unwrap(), sp.zeros(x.len()).unwrap());
+            sp.apply(&o32, &x, &mut y1).unwrap();
+            sp.apply(&d32, &x, &mut y2).unwrap();
+            assert_eq!(y1, y2);
+        }
+    }
+
+    #[test]
+    fn a_negative_galerkin_diagonal_is_reported_the_same_way() {
+        let dims = [33, 33, 33];
+        let mut op = molecule_operator(dims, 0.4);
+        // A strongly negative κ²V block makes the coarse diagonal negative.
+        for c in [16 + 33 * (16 + 33 * 16), 17 + 33 * (16 + 33 * 16)] {
+            op.kvol[c] = -1e6;
+        }
+        let op = Arc::new(op);
+        let host = Hierarchy::build(&op, Chebyshev::default()).unwrap_err().to_string();
+        let be = CpuBackend::new();
+        let dev = be.prepare(op.clone()).unwrap();
+        let levels = Levels::build(&be, &op, &dev, Chebyshev::default())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(host.contains("non-positive Galerkin diagonal"), "{host}");
+        assert_eq!(host, levels);
+    }
+
+    #[test]
+    fn single_precision_backends_do_not_build_hierarchies() {
+        use crate::cpu::CpuSingle;
+        let op = Arc::new(molecule_operator([17, 17, 17], 0.5));
+        let sp = CpuSingle::new();
+        let dev = sp.prepare(op.clone()).unwrap();
+        let t = Transfer::new(op.dims).unwrap();
+        let err = sp.galerkin(&t, LevelOp::Fine(&dev)).err().unwrap().to_string();
+        assert!(err.contains("f64"), "{err}");
+        assert!(sp.gershgorin_lmax(LevelOp::Fine(&dev)).is_err());
     }
 }

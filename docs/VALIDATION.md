@@ -53,6 +53,7 @@ should update the status table below.
 | Mixed precision (unreleased, the default) | `multigrid-f32`: ΔG_polar within 7.9e-13 of f64 (Born, 1YCR), equal iteration counts; 1YCR 1.42–1.55× faster on the CPU, 1.03–1.12× on the shared GPU (V-cycle 2× on the device). Default after a sweep of 28 cases (5 systems up to 20 179 atoms, 14 parameter variants, CPU and CUDA): ≤ 4.2e-13, identical iterations, CPU 1.4–1.7× on proteins; Born table and 1YCR APBS comparison unchanged; see *Mixed precision* |
 | Host stages (unreleased) | Faster maps, `mdh` boundary, operator setup and host transfers; every energy, iteration count, residual, map and potential bit-identical to the previous commit on CPU and CUDA (13 cases + MM-PBSA species); 1.06–1.26× (CPU), 1.03–1.19× (CUDA) per calculation; see *Host stages* |
 | `bcfl="mdh-fast"` (unreleased, opt-in) | Interpolated `mdh`: ΔG_polar within 1.1e-13 of `mdh` (Born, 1YCR ×4, 1HPV, 1TII, 5DK3; CPU and CUDA), equal iterations; boundary 5DK3 3.39 → 0.55 s; 1YCR APBS comparison prints identical energies; see *mdh-fast* |
+| Multigrid setup on the GPU (unreleased) | Galerkin operators, 1/diag, Gershgorin bounds and f32 copies built on the device: bit-identical to the host hierarchy (4 operators incl. semi-coarsening, all levels) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA setup 2.2–3.1×, calculation 1.2–1.3× faster on a shared GPU; see *Multigrid setup on the GPU* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -512,6 +513,96 @@ patch relative to the patch scale):
 * `tests/test_boundary.py`: energies and potentials against `mdh`, the
   option, the CLI, and the APBS input mapping.
 * `tests/test_apbs_parity.py`: `mdh-fast` against APBS `mdh`.
+
+## Multigrid setup on the GPU
+
+**Problem.** On the CUDA platform the host built the multigrid hierarchy:
+the Galerkin products (0.74 s per 5DK3 solve), the Gershgorin bounds, and
+the f32 copies of `multigrid-f32`, converted on the host and uploaded. The
+setup was the largest host stage (4.5 of 13.5 s for a 5DK3 ΔG_polar on a
+shared GPU).
+
+**Change.** `Levels::build` runs the steps of `Hierarchy::build` through new
+`Backend` methods; on the CUDA backend they are f64 kernels:
+* `pb_galerkin7` and `pb_galerkin27`: one thread per coarse row, which
+  accumulates in the host's loop order (fine rows, stencil entries,
+  interpolation targets);
+* `pb_symmetrise27`: symmetrisation in place, one thread per off-diagonal
+  pair; 0.5 (a + b) equals the host's 0.5 (b + a) exactly;
+* `pb_diagonal27`: diagonal, inverse diagonal and a flag for a NaN or
+  negative diagonal. The host then reports the first one with the same
+  message as `galerkin`;
+* `pb_gershgorin7` and `pb_gershgorin27`: block maxima of Σ|a|/a_diag; a
+  maximum is exact in any order.
+
+The coarsest level (≤ 1000 unknowns) is downloaded and factorised on the
+host. The f32 copies are rounded on the device (`demote_coarse`,
+`demote_operator`) as the host conversion rounds them. `pcg` now releases the
+host operator right after the setup; it used to be released inside the
+upload.
+
+**Checks.**
+* `device_multigrid_setup_equals_the_host_bit_for_bit` (CUDA): every coarse
+  operator, inverse diagonal and Gershgorin bound, the coarsest factor and
+  all f32 copies equal the host hierarchy bit for bit. Operators: 60 random
+  atoms on 49³; 66×41×6 (semi-coarsening); 50×37×29 without salt; 97³ at
+  1 M.
+* `vcycle_of_device_levels_equals_the_host_vcycle`: the V-cycle output is
+  identical in f64 and f32.
+* `device_setup_reports_a_negative_diagonal_like_the_host`: the same error
+  message; the f32 twin refuses to build a hierarchy.
+* Core tests: the levels built through the CPU backend equal
+  `Hierarchy::build` (3 grids, f64 and f32), the same negative-diagonal
+  error, and the f32 twin refuses.
+* The 13 fingerprint cases of *Host stages* (energies, iterations and
+  residuals as `float.hex`, SHA-256 of maps and potentials, MM-PBSA species)
+  are bit-identical to commit 7f2f939 on CPU and CUDA.
+* The `cuda-12` build passes the GPU tests with NVRTC 12.9.
+* The 1YCR APBS comparison on CUDA (with map injection) passes with the
+  same energies as before: ΔG_polar −1221.2671 / −1233.9910 / −410.1701
+  kcal/mol for complex, receptor and ligand, ΔΔG 422.8939 kcal/mol.
+
+**Time per ΔG_polar** on CUDA (s, A/B: the previous and the new build run
+alternately, best of 3). The RTX 2080 SUPER was shared with two GROMACS
+processes (96–97 % utilisation), so the solve stage is about twice as slow
+as on an idle GPU; the setup gain does not depend on that.
+
+| System | Setup | Solve | Assembly | Total |
+|---|---|---|---|---|
+| 1YCR (1 670 atoms) | 0.353 → 0.163 | 0.318 → 0.334 | 0.083 → 0.079 | 0.926 → 0.772 (1.20×) |
+| 1TII (10 862 atoms) | 1.645 → 0.577 | 1.393 → 1.353 | 0.396 → 0.400 | 4.918 → 3.784 (1.30×) |
+| 5DK3 (20 179 atoms) | 4.495 → 1.470 | 3.389 → 3.415 | 1.039 → 1.037 | 13.49 → 10.48 (1.29×) |
+
+On the CPU the times are unchanged (1YCR 2.21 → 2.27 s, 1TII 15.83 →
+15.87 s under a load of 14–22 from other jobs). One 5DK3 setup on the GPU
+now takes 0.31 s instead of 1.00 s (0.08 s upload, 0.74 s host hierarchy,
+0.18 s f32 conversions and uploads):
+
+| Step | Seconds |
+|---|---|
+| upload of the f64 operator | 0.080 |
+| `Levels::build` on the device (incl. coarsest factorisation) | 0.169 |
+| f32 copies of the levels | 0.018 |
+| fine inverse diagonal (host → f32) | 0.024 |
+| f32 copy of the fine operator | 0.005 |
+
+The f64 operator upload is now the largest item; building the maps and the
+right-hand side on the device would remove most of it.
+
+**GPU memory** (peak above the baseline, 5DK3 solved by
+`polar_solvation_many` with 1–3 workers; ~1 GB of the 8 GB card was in use by
+other processes):
+
+| Workers | Previous | New |
+|---|---|---|
+| 1 | 2 378 MiB | 2 458 MiB |
+| 2 | 4 832 MiB | 5 024 MiB |
+| 3 | out of memory in this run | out of memory in one run, 5 856 MiB in another |
+
+The f64 copy of the first coarse level exists briefly during the setup
+(+80 MiB per calculation for 5DK3). Three concurrent 5DK3 calculations were
+already at the limit of an 8 GB card before this change. The number of
+CUDA workers should follow the free device memory (see `docs/ROADMAP.md`).
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

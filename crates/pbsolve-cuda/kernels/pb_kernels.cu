@@ -292,3 +292,262 @@ PB_KERNELS(float, f32)
 PB_CONVERT(double, float, f64, f32)
 PB_CONVERT(float, double, f32, f64)
 PB_CONVERT(float, float, f32, f32)
+
+// ---------------------------------------------------------------- multigrid setup (double only)
+//
+// Galerkin coarse operators Pᵀ A P, their symmetrisation, inverse diagonals
+// and Gershgorin bounds, as `galerkin` and `gershgorin_lmax` in multigrid.rs
+// compute them. Each coarse row is accumulated by one thread in exactly the
+// CPU's loop order (fine rows, then stencil entries, then interpolation
+// targets), so with --fmad=false the operators are bit-identical to the host.
+// Coarsening flags are kx, ky, kz; the 7-point coefficients are cx, cy, cz.
+
+__device__ __forceinline__ bool interior3(const int i, const int j, const int k, const int nx, const int ny, const int nz)
+{
+    return i > 0 && j > 0 && k > 0 && i + 1 < nx && j + 1 < ny && k + 1 < nz;
+}
+
+// Adds fine-matrix entry `val` (offset dx, dy, dz of fine row fi, fj, fk,
+// restriction weight wf) to coarse row (ic, jc, kc). The coarse offsets are
+// in {-1, 0, 1}³ by construction.
+__device__ __forceinline__ void galerkin_entry(
+    double* acc, const double wf, const double val, const int dx, const int dy, const int dz,
+    const int fi, const int fj, const int fk, const int nx, const int ny, const int nz,
+    const int mx, const int my, const int mz, const int kx, const int ky, const int kz,
+    const int ic, const int jc, const int kc)
+{
+    if (val == 0.0) {
+        return;
+    }
+    const int gi = fi + dx, gj = fj + dy, gk = fk + dz;
+    if (!interior3(gi, gj, gk, nx, ny, nz)) {
+        return;
+    }
+    int px[2], py[2], pz[2];
+    double wx[2], wy[2], wz[2];
+    const int ax = prolong_axis<double>(gi, kx, px, wx);
+    const int ay = prolong_axis<double>(gj, ky, py, wy);
+    const int az = prolong_axis<double>(gk, kz, pz, wz);
+    for (int r = 0; r < az; ++r) {
+        for (int q = 0; q < ay; ++q) {
+            for (int p = 0; p < ax; ++p) {
+                if (!interior3(px[p], py[q], pz[r], mx, my, mz)) {
+                    continue;
+                }
+                const double w = wx[p] * wy[q] * wz[r];
+                const int o = (px[p] - ic + 1) + 3 * ((py[q] - jc + 1) + 3 * (pz[r] - kc + 1));
+                acc[o] += wf * val * w;
+            }
+        }
+    }
+}
+
+// Unsymmetrised Galerkin rows of a 7-point fine operator: rows[o*n_c + c].
+extern "C" __global__ void pb_galerkin7(
+    const int nx, const int ny, const int nz, const int mx, const int my, const int mz,
+    const int kx, const int ky, const int kz, const double cx, const double cy, const double cz,
+    const double* __restrict__ ex, const double* __restrict__ ey, const double* __restrict__ ez,
+    const double* __restrict__ kvol, double* __restrict__ rows)
+{
+    const long long nc = (long long)mx * my * mz;
+    const long long sy = nx;
+    const long long sz = (long long)nx * ny;
+    GRID_STRIDE_LOOP(c, nc) {
+        const int ic = (int)(c % mx);
+        const int jc = (int)((c / mx) % my);
+        const int kc = (int)(c / ((long long)mx * my));
+        double acc[27];
+        for (int o = 0; o < 27; ++o) {
+            acc[o] = 0.0;
+        }
+        if (interior3(ic, jc, kc, mx, my, mz)) {
+            int fx[3], fy[3], fz[3];
+            double wx[3], wy[3], wz[3];
+            const int ax = restrict_axis<double>(ic, kx, nx, fx, wx);
+            const int ay = restrict_axis<double>(jc, ky, ny, fy, wy);
+            const int az = restrict_axis<double>(kc, kz, nz, fz, wz);
+            for (int q = 0; q < az; ++q) {
+                for (int b = 0; b < ay; ++b) {
+                    for (int a = 0; a < ax; ++a) {
+                        const double wf = wx[a] * wy[b] * wz[q];
+                        const int fi = fx[a], fj = fy[b], fk = fz[q];
+                        const long long f = fi + (long long)nx * (fj + (long long)ny * fk);
+                        const double exm = ex[f - 1], exp = ex[f];
+                        const double eym = ey[f - sy], eyp = ey[f];
+                        const double ezm = ez[f - sz], ezp = ez[f];
+                        const double diag = cx * (exm + exp) + cy * (eym + eyp) + cz * (ezm + ezp) + kvol[f];
+                        // Entry order of LevelMatrix::for_each_entry (Seven).
+                        galerkin_entry(acc, wf, -cz * ezm, 0, 0, -1, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        galerkin_entry(acc, wf, -cy * eym, 0, -1, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        galerkin_entry(acc, wf, -cx * exm, -1, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        galerkin_entry(acc, wf, diag, 0, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        galerkin_entry(acc, wf, -cx * exp, 1, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        galerkin_entry(acc, wf, -cy * eyp, 0, 1, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        galerkin_entry(acc, wf, -cz * ezp, 0, 0, 1, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                    }
+                }
+            }
+        }
+        for (int o = 0; o < 27; ++o) {
+            rows[o * nc + c] = acc[o];
+        }
+    }
+}
+
+// Unsymmetrised Galerkin rows of a 27-point fine operator (coef[o*n_f + f]).
+extern "C" __global__ void pb_galerkin27(
+    const int nx, const int ny, const int nz, const int mx, const int my, const int mz,
+    const int kx, const int ky, const int kz, const double* __restrict__ fine, double* __restrict__ rows)
+{
+    const long long nc = (long long)mx * my * mz;
+    const long long nf = (long long)nx * ny * nz;
+    GRID_STRIDE_LOOP(c, nc) {
+        const int ic = (int)(c % mx);
+        const int jc = (int)((c / mx) % my);
+        const int kc = (int)(c / ((long long)mx * my));
+        double acc[27];
+        for (int o = 0; o < 27; ++o) {
+            acc[o] = 0.0;
+        }
+        if (interior3(ic, jc, kc, mx, my, mz)) {
+            int fx[3], fy[3], fz[3];
+            double wx[3], wy[3], wz[3];
+            const int ax = restrict_axis<double>(ic, kx, nx, fx, wx);
+            const int ay = restrict_axis<double>(jc, ky, ny, fy, wy);
+            const int az = restrict_axis<double>(kc, kz, nz, fz, wz);
+            for (int q = 0; q < az; ++q) {
+                for (int b = 0; b < ay; ++b) {
+                    for (int a = 0; a < ax; ++a) {
+                        const double wf = wx[a] * wy[b] * wz[q];
+                        const int fi = fx[a], fj = fy[b], fk = fz[q];
+                        const long long f = fi + (long long)nx * (fj + (long long)ny * fk);
+                        for (int o = 0; o < 27; ++o) {
+                            galerkin_entry(acc, wf, fine[o * nf + f], o % 3 - 1, (o / 3) % 3 - 1, o / 9 - 1,
+                                           fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        }
+                    }
+                }
+            }
+        }
+        for (int o = 0; o < 27; ++o) {
+            rows[o * nc + c] = acc[o];
+        }
+    }
+}
+
+// In-place symmetrisation of the off-diagonal entries: entries (c, o) and
+// (c + offset(o), 26 - o) both become 0.5 (a + b), and rows whose diagonal is
+// 0 (boundary rows) become 0, as on the CPU. One thread per pair (o < 13);
+// a pair whose row c lies on the grid boundary is already exactly 0.
+extern "C" __global__ void pb_symmetrise27(const int mx, const int my, const int mz, double* __restrict__ coef)
+{
+    const long long n = (long long)mx * my * mz;
+    const long long sy = mx;
+    const long long sz = (long long)mx * my;
+    GRID_STRIDE_LOOP(t, 13 * n) {
+        const int o = (int)(t / n);
+        const long long c = t % n;
+        const int i = (int)(c % mx);
+        const int j = (int)((c / mx) % my);
+        const int k = (int)(c / sz);
+        if (!interior3(i, j, k, mx, my, mz)) {
+            coef[o * n + c] = 0.0;
+            continue;
+        }
+        const long long p = c + (o % 3 - 1) + ((o / 3) % 3 - 1) * sy + (o / 9 - 1) * sz;
+        const double v = 0.5 * (coef[o * n + c] + coef[(26 - o) * n + p]);
+        coef[o * n + c] = coef[13 * n + c] != 0.0 ? v : 0.0;
+        coef[(26 - o) * n + p] = coef[13 * n + p] != 0.0 ? v : 0.0;
+    }
+}
+
+// Diagonal entries (pair with themselves) and the inverse diagonal; `bad` is
+// set if a non-zero diagonal is NaN or negative (the host reports the first).
+extern "C" __global__ void pb_diagonal27(const long long n, double* __restrict__ coef, double* __restrict__ inv,
+                                         int* __restrict__ bad)
+{
+    GRID_STRIDE_LOOP(c, n) {
+        const double d = coef[13 * n + c];
+        const double s = d != 0.0 ? 0.5 * (d + d) : 0.0;
+        coef[13 * n + c] = s;
+        if (s != 0.0) {
+            if (isnan(s) || s < 0.0) {
+                *bad = 1;
+            } else {
+                inv[c] = 1.0 / s;
+            }
+        }
+    }
+}
+
+// Block maxima of Σ_o |a_o| / a_diag over interior rows (identity 0), for the
+// Gershgorin bound λmax(D⁻¹A). Requires blockDim.x == BLOCK.
+__device__ __forceinline__ void block_max(double v, double* __restrict__ partial)
+{
+    __shared__ double s[BLOCK];
+    s[threadIdx.x] = v;
+    __syncthreads();
+    for (int w = BLOCK / 2; w > 0; w >>= 1) {
+        if (threadIdx.x < w) {
+            s[threadIdx.x] = fmax(s[threadIdx.x], s[threadIdx.x + w]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        partial[blockIdx.x] = s[0];
+    }
+}
+
+extern "C" __global__ void pb_gershgorin7(
+    const int nx, const int ny, const int nz, const double cx, const double cy, const double cz,
+    const double* __restrict__ ex, const double* __restrict__ ey, const double* __restrict__ ez,
+    const double* __restrict__ kvol, double* __restrict__ partial)
+{
+    const long long n = (long long)nx * ny * nz;
+    const long long sy = nx;
+    const long long sz = (long long)nx * ny;
+    double m = 0.0;
+    GRID_STRIDE_LOOP(c, n) {
+        const int i = (int)(c % nx);
+        const int j = (int)((c / nx) % ny);
+        const int k = (int)(c / sz);
+        if (!interior3(i, j, k, nx, ny, nz)) {
+            continue;
+        }
+        const double exm = ex[c - 1], exp = ex[c];
+        const double eym = ey[c - sy], eyp = ey[c];
+        const double ezm = ez[c - sz], ezp = ez[c];
+        const double diag = cx * (exm + exp) + cy * (eym + eyp) + cz * (ezm + ezp) + kvol[c];
+        double sum = 0.0;
+        sum += fabs(-cz * ezm);
+        sum += fabs(-cy * eym);
+        sum += fabs(-cx * exm);
+        sum += fabs(diag);
+        sum += fabs(-cx * exp);
+        sum += fabs(-cy * eyp);
+        sum += fabs(-cz * ezp);
+        m = fmax(m, sum / diag);
+    }
+    block_max(m, partial);
+}
+
+extern "C" __global__ void pb_gershgorin27(
+    const int nx, const int ny, const int nz, const double* __restrict__ coef, double* __restrict__ partial)
+{
+    const long long n = (long long)nx * ny * nz;
+    double m = 0.0;
+    GRID_STRIDE_LOOP(c, n) {
+        const int i = (int)(c % nx);
+        const int j = (int)((c / nx) % ny);
+        const int k = (int)(c / ((long long)nx * ny));
+        if (!interior3(i, j, k, nx, ny, nz)) {
+            continue;
+        }
+        double sum = 0.0;
+        for (int o = 0; o < 27; ++o) {
+            sum += fabs(coef[o * n + c]);
+        }
+        m = fmax(m, sum / coef[13 * n + c]);
+    }
+    block_max(m, partial);
+}
