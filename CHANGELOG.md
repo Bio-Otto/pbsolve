@@ -44,6 +44,11 @@
   5DK3 (20 179 atoms) takes 3.4 → 0.55 s, and a CUDA calculation 1.36× less.
   `mdh` stays the default and still follows APBS; APBS inputs written from
   `mdh-fast` use `mdh`.
+- `examples/pbsolve_tutorial.ipynb`: a tutorial from installation to MM-PBSA
+  and the comparison with APBS, stored with its outputs. A changelog at its
+  top and a date under every section show what changed;
+  `tests/test_tutorial.py` checks its structure and saved results and runs it
+  when Jupyter is installed.
 - Multigrid setup on any backend: `multigrid::Levels` (a hierarchy held by a
   backend, built by `Levels::build`), `MultigridPreconditioner::from_levels`,
   `Stencil27::from_coef`, and the `Backend` methods `galerkin`,

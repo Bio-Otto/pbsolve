@@ -104,6 +104,9 @@ Waters are dropped; nucleic acids are not implemented yet.
 
 ## Python API
 
+A step-by-step tutorial, from installation to MM-PBSA and the comparison
+with APBS, is in `examples/pbsolve_tutorial.ipynb`.
+
 ```python
 import numpy as np
 import pbsolve
@@ -166,6 +169,7 @@ crates/pbsolve-py     PyO3 bindings -> pbsolve._core
 python/pbsolve        Python API, structure preparation, MM-PBSA helpers, OpenMM bridge, CLI
 recipe/               conda recipe (CPU + CUDA 12/13 variants)
 scripts/              validation and maintenance scripts
+examples/             tutorial notebook, OpenMM MM-PBSA example
 tests/                pytest suite;  `cargo test -p pbsolve-core` for Rust tests
 ```
 
