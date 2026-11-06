@@ -37,6 +37,13 @@
   `demote`, `promote`) and a fused `dot2`; CPU and CUDA kernels are generic
   over `Real` (f64/f32). `CpuSingle`, `CudaSingle`.
   `cargo run -p pbsolve-cuda --example precision` measures device throughput.
+- `bcfl="mdh-fast"` (`--bcfl mdh-fast`): the `mdh` boundary sum evaluated
+  exactly at Chebyshev points of patches of the box faces and interpolated in
+  between; error ≤ 1e-10 of the summed term magnitudes per patch, checked up
+  to κ = 0.6 Å⁻¹. Energies agree with `mdh` to ≤ 1.1e-13. The boundary of
+  5DK3 (20 179 atoms) takes 3.4 → 0.55 s, and a CUDA calculation 1.36× less.
+  `mdh` stays the default and still follows APBS; APBS inputs written from
+  `mdh-fast` use `mdh`.
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.

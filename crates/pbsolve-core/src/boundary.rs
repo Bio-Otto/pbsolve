@@ -14,6 +14,14 @@
 //!   quadrupole of the solute about its coordinate-box centre, each with the
 //!   exact exterior solution for a sphere (radius = max |r_i − c| + a_i,
 //!   dielectric ε_p) in a Debye–Hückel medium (ε_w, κ).
+//!
+//! `mdh-fast` (not in APBS) evaluates the `mdh` sum exactly only at the
+//! Chebyshev points of rectangular patches of the box faces and interpolates
+//! it to the other boundary nodes (tensor-product barycentric Lagrange
+//! interpolation, as in kernel-independent treecodes [Wang, Krasny &
+//! Tlupova 2020]). The potential is analytic on a patch away from the atoms;
+//! the degree follows from the patch size and its distance to the nearest
+//! atom, and patches near atoms are split or summed directly.
 
 use crate::error::{invalid, Result};
 use crate::grid::Grid;
@@ -209,28 +217,44 @@ impl Multipoles {
     }
 }
 
+/// Exact `mdh` sums at the given points, in parallel.
+fn mdh_at(src: &DhSources, m: &BoundaryMedium, points: &[[f64; 3]]) -> Vec<f64> {
+    let mut values = vec![0.0; points.len()];
+    values
+        .par_chunks_mut(NODES)
+        .zip(points.par_chunks(NODES))
+        .for_each(|(out, pts)| out.copy_from_slice(&mdh_chunk(src, m, pts)[..out.len()]));
+    values
+}
+
+/// Exact `mdh` sums at up to `NODES` points (a short chunk repeats its
+/// first point in the unused slots).
+#[inline]
+fn mdh_chunk(src: &DhSources, m: &BoundaryMedium, pts: &[[f64; 3]]) -> [f64; NODES] {
+    let p: [[f64; 3]; NODES] = std::array::from_fn(|l| pts[l.min(pts.len() - 1)]);
+    src.potentials(&p, m)
+}
+
 pub fn analytic_boundary(grid: &Grid, atoms: &[Atom], bc: BoundaryCondition, m: &BoundaryMedium) -> Vec<f64> {
     let mut g = vec![0.0; grid.len()];
+    if bc == BoundaryCondition::MdhFast {
+        mdh_fast(grid, &DhSources::new(atoms, m), m, MDH_FAST_TOLERANCE, &mut g);
+        return g;
+    }
     let bidx = grid.boundary_indices();
     let values: Vec<f64> = match bc {
         BoundaryCondition::Zero => return g,
         BoundaryCondition::Mdh => {
-            let src = DhSources::new(atoms, m);
-            let mut values = vec![0.0; bidx.len()];
-            values
-                .par_chunks_mut(NODES)
-                .zip(bidx.par_chunks(NODES))
-                .for_each(|(out, idx)| {
-                    // A short last chunk repeats its first node in the unused slots.
-                    let p: [[f64; 3]; NODES] = std::array::from_fn(|l| {
-                        let (i, j, k) = grid.ijk(idx[l.min(idx.len() - 1)]);
-                        grid.position(i, j, k)
-                    });
-                    let v = src.potentials(&p, m);
-                    out.copy_from_slice(&v[..out.len()]);
-                });
-            values
+            let points: Vec<[f64; 3]> = bidx
+                .iter()
+                .map(|&c| {
+                    let (i, j, k) = grid.ijk(c);
+                    grid.position(i, j, k)
+                })
+                .collect();
+            mdh_at(&DhSources::new(atoms, m), m, &points)
         }
+        BoundaryCondition::MdhFast => unreachable!(),
         BoundaryCondition::Sdh => {
             let mp = Multipoles::of(atoms);
             bidx.par_iter()
@@ -245,6 +269,297 @@ pub fn analytic_boundary(grid: &Grid, atoms: &[Atom], bc: BoundaryCondition, m: 
         g[c] = v;
     }
     g
+}
+
+// ------------------------------------------------------------------ mdh-fast
+
+/// Accuracy of `mdh-fast`: on every interpolated patch the error is at most
+/// this fraction of the largest Σ_i |dh_i| on the patch (the summed magnitudes
+/// of the atom terms, which bound the potential before cancellation between
+/// charges). Measured worst case: 1.8e-12, for κ up to 0.6 Å⁻¹ (tests).
+pub const MDH_FAST_TOLERANCE: f64 = 1e-10;
+/// Largest interpolation degree per patch axis; patches needing more are split.
+const MAX_DEGREE: usize = 32;
+/// Patches with at most this many nodes are summed directly.
+const MIN_PATCH: usize = 64;
+/// Weight of the screening term of the degree estimate. Calibrated on the
+/// test geometries for κ = 0.125–0.6 Å⁻¹: 0.5 keeps the error ≤ 1.8e-12
+/// (0.25 reached 2.9e-10 at κ = 0.6; the full bound, 1.0, was ~100× tighter
+/// than needed and summed up to 2× more points directly).
+const SCREENING: f64 = 0.5;
+/// Safety factor of the a-priori degree estimate (see [`degree`]). Measured
+/// on clusters centred and next to a face, with and without salt, the
+/// degree ln(1/tol)/ln ρ already reached the tolerance (the smallest
+/// sufficient degree was 0–2 lower); the factor 100 adds ~20 % to it.
+const DEGREE_SAFETY: f64 = 1e2;
+
+/// A rectangle of boundary nodes on one face: normal axis `axis` at node
+/// index `fixed`, node indices `lo..=hi` along the in-plane axes `[ua, va]`.
+#[derive(Clone, Copy, Debug)]
+struct Patch {
+    axis: usize,
+    fixed: usize,
+    ua: usize,
+    va: usize,
+    lo: [usize; 2],
+    hi: [usize; 2],
+}
+
+/// How a patch is evaluated: directly, or by interpolation of the given degrees.
+#[derive(Clone, Copy, Debug)]
+struct Leaf {
+    patch: Patch,
+    degree: Option<[usize; 2]>,
+}
+
+impl Patch {
+    /// The six faces, partitioning the boundary nodes: x faces whole, y faces
+    /// without the x-boundary nodes, z faces without the x- and y-boundary nodes.
+    fn faces(d: [usize; 3]) -> [Patch; 6] {
+        let [nx, ny, nz] = d;
+        let f = |axis, fixed, ua, va, lo, hi| Patch {
+            axis,
+            fixed,
+            ua,
+            va,
+            lo,
+            hi,
+        };
+        [
+            f(0, 0, 1, 2, [0, 0], [ny - 1, nz - 1]),
+            f(0, nx - 1, 1, 2, [0, 0], [ny - 1, nz - 1]),
+            f(1, 0, 0, 2, [1, 0], [nx - 2, nz - 1]),
+            f(1, ny - 1, 0, 2, [1, 0], [nx - 2, nz - 1]),
+            f(2, 0, 0, 1, [1, 1], [nx - 2, ny - 2]),
+            f(2, nz - 1, 0, 1, [1, 1], [nx - 2, ny - 2]),
+        ]
+    }
+
+    fn nodes(&self) -> usize {
+        (self.hi[0] - self.lo[0] + 1) * (self.hi[1] - self.lo[1] + 1)
+    }
+
+    /// Grid indices of in-plane node (u, v).
+    fn ijk(&self, u: usize, v: usize) -> (usize, usize, usize) {
+        let mut n = [0; 3];
+        n[self.axis] = self.fixed;
+        n[self.ua] = u;
+        n[self.va] = v;
+        (n[0], n[1], n[2])
+    }
+
+    /// Centre and half-length (Å) of the patch along in-plane axis `a` (0 or 1).
+    fn extent(&self, grid: &Grid, a: usize) -> (f64, f64) {
+        let ax = [self.ua, self.va][a];
+        let x = |i: usize| grid.origin[ax] + i as f64 * grid.spacing[ax];
+        let (x0, x1) = (x(self.lo[a]), x(self.hi[a]));
+        (0.5 * (x0 + x1), 0.5 * (x1 - x0))
+    }
+
+    /// Smallest distance (Å) from a source to the patch rectangle.
+    fn distance(&self, grid: &Grid, src: &DhSources) -> f64 {
+        let plane = grid.origin[self.axis] + self.fixed as f64 * grid.spacing[self.axis];
+        let (cu, lu) = self.extent(grid, 0);
+        let (cv, lv) = self.extent(grid, 1);
+        src.position
+            .iter()
+            .map(|r| {
+                let dn = r[self.axis] - plane;
+                let du = ((r[self.ua] - cu).abs() - lu).max(0.0);
+                let dv = ((r[self.va] - cv).abs() - lv).max(0.0);
+                dn * dn + du * du + dv * dv
+            })
+            .fold(f64::INFINITY, f64::min)
+            .sqrt()
+    }
+
+    /// The two halves along the longer in-plane side, if it has ≥ 2 nodes.
+    fn split(&self, grid: &Grid) -> Option<(Patch, Patch)> {
+        let a = if self.extent(grid, 0).1 >= self.extent(grid, 1).1 {
+            0
+        } else {
+            1
+        };
+        let a = if self.hi[a] > self.lo[a] { a } else { 1 - a };
+        if self.hi[a] == self.lo[a] {
+            return None;
+        }
+        let mid = (self.lo[a] + self.hi[a]) / 2;
+        let (mut p, mut q) = (*self, *self);
+        p.hi[a] = mid;
+        q.lo[a] = mid + 1;
+        Some((p, q))
+    }
+}
+
+/// Chebyshev degree that interpolates the potential of sources at distance
+/// ≥ `dist` along a segment of half-length `half` to accuracy `tol` relative
+/// to the largest term sum on the segment, in a medium with screening `kappa`.
+///
+/// A source at distance d from the segment is a singularity outside the
+/// Bernstein ellipse E_ρ with ρ = d/L + sqrt((d/L)² + 1), and the error of
+/// degree n decays like M(ρ') ρ'^(−n) for any ρ' < ρ, M being the largest
+/// value on E_ρ' [Trefethen, Approximation Theory and Approximation
+/// Practice, Thm 8.2]. Screening makes |e^(−κr)| grow by up to e^(κb') off
+/// the real axis (b' = L(ρ' − 1/ρ')/2, the semi-minor axis), so the degree is
+/// minimised over ρ' = ρ^t of (ln(S/tol) + κb') / ln ρ'. `DEGREE_SAFETY` (S)
+/// covers the remaining constants and the 2-D Lebesgue factor.
+fn degree(half: f64, dist: f64, kappa: f64, tol: f64) -> Option<usize> {
+    if half <= 0.0 {
+        return Some(0);
+    }
+    let r = dist / half;
+    let rho = r + (r * r + 1.0).sqrt();
+    if rho.is_nan() || rho <= 1.0 + 1e-9 {
+        return None;
+    }
+    let base = (DEGREE_SAFETY / tol).ln();
+    let n = (1..=20)
+        .map(|i| {
+            let rp = rho.powf(i as f64 / 20.0);
+            (base + SCREENING * kappa * half * 0.5 * (rp - 1.0 / rp)) / rp.ln()
+        })
+        .fold(f64::INFINITY, f64::min)
+        .ceil();
+    (n <= MAX_DEGREE as f64).then_some(n.max(1.0) as usize)
+}
+
+/// Splits a face into leaves (interpolated or direct).
+fn plan(p: Patch, grid: &Grid, src: &DhSources, kappa: f64, tol: f64) -> Vec<Leaf> {
+    let direct = vec![Leaf { patch: p, degree: None }];
+    if p.nodes() <= MIN_PATCH || src.position.is_empty() {
+        return direct;
+    }
+    let dist = p.distance(grid, src);
+    let deg = (
+        degree(p.extent(grid, 0).1, dist, kappa, tol),
+        degree(p.extent(grid, 1).1, dist, kappa, tol),
+    );
+    if let (Some(nu), Some(nv)) = deg {
+        // Interpolate only when it needs ≥ 2× fewer exact sums than the
+        // nodes; smaller patches would only need relatively more.
+        return if 2 * (nu + 1) * (nv + 1) <= p.nodes() {
+            vec![Leaf {
+                patch: p,
+                degree: Some([nu, nv]),
+            }]
+        } else {
+            direct
+        };
+    }
+    match p.split(grid) {
+        Some((a, b)) => {
+            let (mut x, y) = rayon::join(|| plan(a, grid, src, kappa, tol), || plan(b, grid, src, kappa, tol));
+            x.extend(y);
+            x
+        }
+        None => direct,
+    }
+}
+
+/// Chebyshev points of the second kind on [c − l, c + l] and their
+/// barycentric weights.
+fn chebyshev(c: f64, l: f64, n: usize) -> (Vec<f64>, Vec<f64>) {
+    if n == 0 {
+        return (vec![c], vec![1.0]);
+    }
+    let x = (0..=n)
+        .map(|k| c + l * (std::f64::consts::PI * k as f64 / n as f64).cos())
+        .collect();
+    let w = (0..=n)
+        .map(|k| {
+            let s = if k % 2 == 0 { 1.0 } else { -1.0 };
+            if k == 0 || k == n {
+                0.5 * s
+            } else {
+                s
+            }
+        })
+        .collect();
+    (x, w)
+}
+
+/// Normalised barycentric basis values at `x` (sum 1).
+fn basis(x: f64, nodes: &[f64], w: &[f64]) -> Vec<f64> {
+    if let Some(k) = nodes.iter().position(|&xk| xk == x) {
+        let mut e = vec![0.0; nodes.len()];
+        e[k] = 1.0;
+        return e;
+    }
+    let mut a: Vec<f64> = nodes.iter().zip(w).map(|(xk, wk)| wk / (x - xk)).collect();
+    let s: f64 = a.iter().sum();
+    a.iter_mut().for_each(|v| *v /= s);
+    a
+}
+
+/// Evaluates one leaf, returning (grid index, value) pairs.
+fn evaluate(leaf: &Leaf, grid: &Grid, src: &DhSources, m: &BoundaryMedium) -> Vec<(usize, f64)> {
+    let p = leaf.patch;
+    let us = p.lo[0]..=p.hi[0];
+    let vs = p.lo[1]..=p.hi[1];
+    let index = |u, v| {
+        let (i, j, k) = p.ijk(u, v);
+        grid.index(i, j, k)
+    };
+    let Some([nu, nv]) = leaf.degree else {
+        let ids: Vec<(usize, usize, usize)> = vs.flat_map(|v| us.clone().map(move |u| p.ijk(u, v))).collect();
+        let pts: Vec<[f64; 3]> = ids.iter().map(|&(i, j, k)| grid.position(i, j, k)).collect();
+        let mut out = Vec::with_capacity(ids.len());
+        for (c, chunk) in ids.chunks(NODES).zip(pts.chunks(NODES)) {
+            let v = mdh_chunk(src, m, chunk);
+            out.extend(c.iter().zip(v).map(|(&(i, j, k), v)| (grid.index(i, j, k), v)));
+        }
+        return out;
+    };
+    let plane = grid.origin[p.axis] + p.fixed as f64 * grid.spacing[p.axis];
+    let (cu, lu) = p.extent(grid, 0);
+    let (cv, lv) = p.extent(grid, 1);
+    let (xu, wu) = chebyshev(cu, lu, nu);
+    let (xv, wv) = chebyshev(cv, lv, nv);
+    // Exact sums at the (nu+1)(nv+1) points, u fastest.
+    let pts: Vec<[f64; 3]> = xv
+        .iter()
+        .flat_map(|&y| {
+            xu.iter().map(move |&x| {
+                let mut r = [0.0; 3];
+                r[p.axis] = plane;
+                r[p.ua] = x;
+                r[p.va] = y;
+                r
+            })
+        })
+        .collect();
+    let f: Vec<f64> = pts
+        .chunks(NODES)
+        .flat_map(|c| mdh_chunk(src, m, c)[..c.len()].to_vec())
+        .collect();
+    let coord = |a: usize, i: usize| grid.origin[a] + i as f64 * grid.spacing[a];
+    let bu: Vec<Vec<f64>> = us.clone().map(|u| basis(coord(p.ua, u), &xu, &wu)).collect();
+    let mut out = Vec::with_capacity(p.nodes());
+    for v in vs {
+        let bv = basis(coord(p.va, v), &xv, &wv);
+        // g_k = Σ_l bv_l f[l][k], then value = Σ_k bu_k g_k.
+        let g: Vec<f64> = (0..=nu)
+            .map(|k| bv.iter().enumerate().map(|(l, b)| b * f[l * (nu + 1) + k]).sum())
+            .collect();
+        for (u, b) in us.clone().zip(&bu) {
+            out.push((index(u, v), b.iter().zip(&g).map(|(x, y)| x * y).sum()));
+        }
+    }
+    out
+}
+
+/// `mdh` on the boundary of `grid` by patch-wise interpolation (see the
+/// module documentation); writes the boundary nodes of `g`.
+fn mdh_fast(grid: &Grid, src: &DhSources, m: &BoundaryMedium, tol: f64, g: &mut [f64]) {
+    let leaves: Vec<Leaf> = Patch::faces(grid.dims)
+        .into_par_iter()
+        .flat_map_iter(|f| plan(f, grid, src, m.kappa, tol))
+        .collect();
+    let values: Vec<Vec<(usize, f64)>> = leaves.par_iter().map(|l| evaluate(l, grid, src, m)).collect();
+    for (c, v) in values.into_iter().flatten() {
+        g[c] = v;
+    }
 }
 
 /// Boundary of a fine grid taken from a coarse solution (focusing).
@@ -323,6 +638,126 @@ mod tests {
                 assert_eq!(g[c].to_bits(), want.to_bits(), "node {c}, kappa {}", m.kappa);
             }
             assert!(g.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    fn cluster(n: usize, center: [f64; 3], size: f64, seed: u64) -> Vec<Atom> {
+        let mut s = seed;
+        let mut rnd = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        (0..n)
+            .map(|_| {
+                let p = [0, 1, 2].map(|a| center[a] + size * (rnd() - 0.5));
+                atom(p, rnd() - 0.5, 1.0 + rnd())
+            })
+            .collect()
+    }
+
+    /// For every interpolated patch: max |fast − exact| / (largest Σ_i |dh_i|
+    /// on the patch); and the fraction of boundary nodes summed exactly.
+    fn fast_error(grid: &Grid, atoms: &[Atom], m: &BoundaryMedium) -> (f64, f64) {
+        let src = DhSources::new(atoms, m);
+        let leaves: Vec<Leaf> = Patch::faces(grid.dims)
+            .into_iter()
+            .flat_map(|f| plan(f, grid, &src, m.kappa, MDH_FAST_TOLERANCE))
+            .collect();
+        let (mut worst, mut work) = (0.0f64, 0usize);
+        for leaf in &leaves {
+            let Some([nu, nv]) = leaf.degree else {
+                work += leaf.patch.nodes();
+                continue;
+            };
+            work += (nu + 1) * (nv + 1);
+            let exact = evaluate(&Leaf { degree: None, ..*leaf }, grid, &src, m);
+            let scale = exact
+                .iter()
+                .map(|&(c, _)| {
+                    let (i, j, k) = grid.ijk(c);
+                    let q = grid.position(i, j, k);
+                    atoms
+                        .iter()
+                        .filter(|a| a.charge != 0.0)
+                        .map(|a| dh(a.charge, a.radius, dist2(q, a.position).sqrt(), m).abs())
+                        .sum::<f64>()
+                })
+                .fold(0.0, f64::max);
+            for ((c, f), (d, e)) in evaluate(leaf, grid, &src, m).into_iter().zip(exact) {
+                assert_eq!(c, d);
+                worst = worst.max((f - e).abs() / scale);
+            }
+        }
+        // The assembled boundary is exactly the union of the leaves.
+        let g = analytic_boundary(grid, atoms, BoundaryCondition::MdhFast, m);
+        for leaf in &leaves {
+            for (c, v) in evaluate(leaf, grid, &src, m) {
+                assert_eq!(g[c].to_bits(), v.to_bits());
+            }
+        }
+        (worst, work as f64 / grid.boundary_indices().len() as f64)
+    }
+
+    /// Molecule-sized clusters in a small and a large box and a lone ion near
+    /// a corner, from no salt to κ = 0.6 Å⁻¹ (~3 M): the error stays below the
+    /// tolerance (measured worst case 1.8e-12), and interpolation replaces
+    /// most exact sums on the large box at physiological salt.
+    #[test]
+    fn mdh_fast_is_within_its_tolerance_of_mdh() {
+        let small = Grid::centered([0.0; 3], [80.0, 70.0, 75.0], [97, 81, 97]).unwrap();
+        let large = Grid::centered([0.0; 3], [170.0, 160.0, 165.0], [257, 241, 257]).unwrap();
+        let cases = [
+            ("small box", &small, cluster(400, [0.0; 3], 30.0, 3)),
+            ("near a face", &small, cluster(300, [27.0, 3.0, -2.0], 20.0, 5)),
+            ("corner ion", &small, vec![atom([36.0, 31.0, -33.0], 1.0, 2.0)]),
+            ("large box", &large, cluster(800, [0.0; 3], 90.0, 9)),
+        ];
+        for (name, grid, atoms) in &cases {
+            for kappa in [0.0, 0.125, 0.33, 0.6] {
+                let m = medium(78.54, 2.0, kappa);
+                let (err, work) = fast_error(grid, atoms, &m);
+                eprintln!(
+                    "{name}, kappa {kappa}: max error {err:.2e} of the patch scale, exact sums {:.1} %",
+                    100.0 * work
+                );
+                assert!(err <= MDH_FAST_TOLERANCE, "{name}, kappa {kappa}: {err:e}");
+                if *name == "large box" && kappa == 0.125 {
+                    assert!(work < 0.2, "{name}: interpolation saved too little ({work})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mdh_fast_does_not_depend_on_the_thread_count() {
+        let grid = Grid::centered([0.0; 3], [60.0, 50.0, 55.0], [65, 57, 61]).unwrap();
+        let atoms = cluster(200, [1.0, -2.0, 0.5], 20.0, 11);
+        let m = medium(78.54, 2.0, 0.1);
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            pool.install(|| analytic_boundary(&grid, &atoms, BoundaryCondition::MdhFast, &m))
+        };
+        let (a, b) = (run(1), run(5));
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()));
+    }
+
+    #[test]
+    fn mdh_fast_faces_partition_the_boundary() {
+        for dims in [[5, 5, 5], [9, 6, 7], [33, 17, 21]] {
+            let grid = Grid::centered([0.0; 3], [10.0, 9.0, 8.0], dims).unwrap();
+            let mut seen = vec![0u8; grid.len()];
+            for f in Patch::faces(dims) {
+                for v in f.lo[1]..=f.hi[1] {
+                    for u in f.lo[0]..=f.hi[0] {
+                        let (i, j, k) = f.ijk(u, v);
+                        seen[grid.index(i, j, k)] += 1;
+                    }
+                }
+            }
+            for (c, &n) in seen.iter().enumerate() {
+                let (i, j, k) = grid.ijk(c);
+                assert_eq!(n, u8::from(grid.is_boundary(i, j, k)), "{dims:?} node {c}");
+            }
         }
     }
 

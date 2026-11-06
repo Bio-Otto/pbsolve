@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(apbs.find_apbs() is None, reason="APBS executabl
 
 # Relative energy tolerances after the unit correction (see module docstring).
 SOLVATED_RTOL = 1e-7
-REFERENCE_RTOL = {"zero": 1e-7, "mdh": 5e-6, "sdh": 5e-6}
+REFERENCE_RTOL = {"zero": 1e-7, "mdh": 5e-6, "mdh-fast": 5e-6, "sdh": 5e-6}
 
 
 def _check(rep, bcfl):
@@ -45,6 +45,7 @@ def _check(rep, bcfl):
     "kw",
     [
         dict(ionic_strength=0.15, bcfl="mdh"),
+        dict(ionic_strength=0.15, bcfl="mdh-fast"),  # APBS runs mdh
         dict(ionic_strength=0.15, bcfl="sdh", pdie=2.0),
         dict(ionic_strength=0.0, bcfl="sdh"),
         dict(ionic_strength=0.05, bcfl="zero", surface="vdw"),

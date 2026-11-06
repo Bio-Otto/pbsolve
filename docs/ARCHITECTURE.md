@@ -44,6 +44,10 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   the atom radii; `sdh` uses charge + dipole + traceless quadrupole about the
   coordinate-box centre with the exact exterior solution of a sphere (ε_p
   inside, ε_w and κ outside); `zero`. Applied on the outermost grid only.
+  `mdh-fast` (pbsolve only) evaluates the `mdh` sum exactly at Chebyshev
+  points of face patches and interpolates between them. The degree comes from
+  each patch's distance to the atoms and κ, and the error is ≤ 1e-10 of the
+  summed term magnitudes. Patches near atoms are summed directly.
 * **Focusing** follows APBS `mg-auto`: two levels, or more when
   `h_fine/h_coarse < 0.25` (`ρ = (h_f/h_c)^{1/(n−1)}` per level); every level
   takes its boundary from the previous one by trilinear interpolation. Node

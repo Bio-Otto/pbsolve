@@ -92,6 +92,11 @@ pub enum BoundaryCondition {
     Sdh,
     /// Sum of Debye–Hückel spheres, one per atom (most accurate, default).
     Mdh,
+    /// `Mdh` evaluated exactly at Chebyshev points of patches of the box
+    /// faces and interpolated in between (error ≤ 1e-10 of the summed term
+    /// magnitudes, [`crate::boundary::MDH_FAST_TOLERANCE`]). Not an APBS
+    /// option; the closest APBS setting is `mdh`.
+    MdhFast,
 }
 
 impl BoundaryCondition {
@@ -100,8 +105,9 @@ impl BoundaryCondition {
             "zero" => Ok(Self::Zero),
             "sdh" => Ok(Self::Sdh),
             "mdh" => Ok(Self::Mdh),
+            "mdh-fast" => Ok(Self::MdhFast),
             other => invalid(format!(
-                "unknown boundary condition '{other}' (expected 'zero', 'sdh' or 'mdh')"
+                "unknown boundary condition '{other}' (expected 'zero', 'sdh', 'mdh' or 'mdh-fast')"
             )),
         }
     }
@@ -111,6 +117,7 @@ impl BoundaryCondition {
             Self::Zero => "zero",
             Self::Sdh => "sdh",
             Self::Mdh => "mdh",
+            Self::MdhFast => "mdh-fast",
         }
     }
 }

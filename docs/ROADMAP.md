@@ -142,6 +142,13 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
 **Host stages** (follow-up of 4.4). *Status: done (unreleased).*
 * Faster maps, `mdh` sums, operator setup and host transfers, with results
   identical bit for bit: 1.06–1.26× per calculation (CPU), 1.03–1.19× (CUDA).
+* Optional `bcfl="mdh-fast"`: the `mdh` sum is evaluated exactly at Chebyshev
+  points of face patches and interpolated in between, as in kernel-independent
+  treecodes [Wang, Krasny & Tlupova 2020; Trefethen 2019].
+  * Error ≤ 1e-10 of the summed term magnitudes, checked up to κ = 0.6 Å⁻¹.
+  * Energies within 1.1e-13 of `mdh`.
+  * The 5DK3 boundary is 6× faster.
+  * `mdh` stays the APBS-compatible default.
 * An order-preserving rewrite of the Galerkin product brought nothing: it is
   arithmetic-bound, as measured in `docs/VALIDATION.md`.
 * *Next:* GPU-resident setup. The Galerkin products, maps and right-hand side
@@ -401,11 +408,13 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Tamstorf R, Benzaken J, McCormick SF. Discretization-error-accurate mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S420 (2021b).
 * Tan C, Tan YH, Luo R. Implicit nonpolar solvent models. J. Phys. Chem. B 111, 12263 (2007).
 * Tatebe O. The multigrid preconditioned conjugate gradient method. Proc. 6th Copper Mountain Conference on Multigrid Methods, NASA CP-3224, 621 (1993).
+* Trefethen LN. Approximation Theory and Approximation Practice, extended edition. SIAM (2019).
 * Valdés-Tresanco MS, Valdés-Tresanco ME, Valiente PA, Moreno E. gmx_MMPBSA: a new tool to perform end-state free energy calculations with GROMACS. J. Chem. Theory Comput. 17, 6281 (2021).
 * Wagoner JA, Baker NA. Assessing implicit models for nonpolar mean solvation forces: the importance of dispersion and volume terms. Proc. Natl. Acad. Sci. USA 103, 8331 (2006).
 * Wang E, Sun H, Wang J, Wang Z, Liu H, Zhang JZH, Hou T. End-point binding free energy calculation with MM/PBSA and MM/GBSA: strategies and applications in drug design. Chem. Rev. 119, 9478 (2019).
 * Wang J, Cai Q, Li ZL, Zhao HK, Luo R. Achieving energy conservation in Poisson–Boltzmann molecular dynamics: accuracy and precision with finite-difference algorithms. Chem. Phys. Lett. 468, 112 (2009).
 * Wang L, Li L, Alexov E. pKa predictions for proteins, RNAs, and DNAs with the Gaussian dielectric function using DelPhi pKa. Proteins 83, 2186 (2015).
+* Wang L, Krasny R, Tlupova S. A kernel-independent treecode based on barycentric Lagrange interpolation. Commun. Comput. Phys. 28, 1415 (2020).
 * Wang T, Cooper CD, Betcke T, Barba LA. High-productivity, high-performance workflow for virus-scale electrostatic simulations with Bempp-Exafmm. arXiv:2103.01048 (2021).
 * Wang et al. MM/PB(GB)SA benchmarks on soluble proteins and membrane proteins. Front. Pharmacol. 13, 1018351 (2022).
 * Wei H, Luo A, Qiu T, Luo R, Qi R. Improved Poisson–Boltzmann methods for high-performance computing. J. Chem. Theory Comput. 15, 6190 (2019).

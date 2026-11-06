@@ -72,7 +72,7 @@ class Solver:
         srad: float = 1.4,
         sdens: float = 10.0,
         surface: str = "mol",
-        bcfl: str = "mdh",
+        bcfl: str = "mdh",  # "mdh-fast" (interpolated mdh, not in APBS), "sdh", "zero"
         cfac: float = 1.7,
         fadd: float = 20.0,
         tol: float = 1e-8,

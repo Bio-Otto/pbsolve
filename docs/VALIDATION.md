@@ -52,6 +52,7 @@ should update the status table below.
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
 | Mixed precision (unreleased, the default) | `multigrid-f32`: ΔG_polar within 7.9e-13 of f64 (Born, 1YCR), equal iteration counts; 1YCR 1.42–1.55× faster on the CPU, 1.03–1.12× on the shared GPU (V-cycle 2× on the device). Default after a sweep of 28 cases (5 systems up to 20 179 atoms, 14 parameter variants, CPU and CUDA): ≤ 4.2e-13, identical iterations, CPU 1.4–1.7× on proteins; Born table and 1YCR APBS comparison unchanged; see *Mixed precision* |
 | Host stages (unreleased) | Faster maps, `mdh` boundary, operator setup and host transfers; every energy, iteration count, residual, map and potential bit-identical to the previous commit on CPU and CUDA (13 cases + MM-PBSA species); 1.06–1.26× (CPU), 1.03–1.19× (CUDA) per calculation; see *Host stages* |
+| `bcfl="mdh-fast"` (unreleased, opt-in) | Interpolated `mdh`: ΔG_polar within 1.1e-13 of `mdh` (Born, 1YCR ×4, 1HPV, 1TII, 5DK3; CPU and CUDA), equal iterations; boundary 5DK3 3.39 → 0.55 s; 1YCR APBS comparison prints identical energies; see *mdh-fast* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -446,6 +447,71 @@ cannot change without changing the result. Re-associating the product axis by
 axis (sum factorisation) would save only 1.3–2× of these operations, so it
 was not done. The changes were reverted. Moving the product to the GPU, where
 it is cheap and can keep the same operation order, is the better route.
+
+## `mdh-fast`: interpolated Debye–Hückel boundary
+
+**Method.** `bcfl="mdh-fast"` (not an APBS option) evaluates the `mdh` sum
+exactly only at the Chebyshev points of rectangular patches of the box faces.
+The other boundary nodes get tensor-product barycentric Lagrange
+interpolation, as in kernel-independent treecodes (Wang, Krasny & Tlupova
+2020).
+* The six faces partition the boundary nodes. Each face is split recursively
+  into patches.
+* A patch is interpolated when an a-priori degree bound meets the tolerance
+  with at most half as many exact sums as it has nodes. Otherwise it is split
+  or summed exactly.
+* The bound uses the Bernstein ellipse of the nearest atom,
+  ρ = d/L + sqrt((d/L)² + 1), and the growth of e^(−κr) off the real axis.
+* Tolerance: the error on a patch is at most 1e-10 of the largest summed term
+  magnitude Σ_i |dh_i| on that patch. This is the scale of the potential
+  before charges cancel.
+* The default `mdh` is unchanged and still follows APBS operation for
+  operation. Inputs written for APBS with `mdh-fast` ask for `mdh`.
+
+**Calibration** (`mdh_fast_is_within_its_tolerance_of_mdh`, maximum error per
+patch relative to the patch scale):
+
+| Geometry | κ = 0 | 0.125 | 0.33 | 0.6 Å⁻¹ | Exact sums at 0.125 |
+|---|---|---|---|---|---|
+| 400 atoms centred, 80 Å box | 1.1e-15 | 1.2e-14 | 1.1e-13 | (all exact) | 51 % |
+| 300 atoms next to a face | 4.0e-15 | 7.8e-14 | 3.0e-13 | 2.0e-13 | 39 % |
+| one ion near a corner | 2.5e-14 | 2.6e-13 | 3.1e-13 | 6.2e-13 | 25 % |
+| 800 atoms, 170 Å box | 7.9e-16 | 9.7e-14 | 1.2e-12 | 1.8e-12 | 13 % |
+
+* The weight of the screening term, 0.5, is the smallest of 1, 0.5, 0.25 and
+  0.125 that keeps every case below 1e-10. With 0.25 the error reached
+  2.9e-10 at κ = 0.6.
+* Ignoring screening altogether gave errors of 1e-7 at κ = 0.6.
+
+**Energies** (ΔG_polar, `mdh-fast` against `mdh`, same grids):
+
+| System | Platform | Relative ΔG difference | Iterations | Boundary s | Total s |
+|---|---|---|---|---|---|
+| Born, h 0.35 | CPU / CUDA | 1.6e-14 / 1.3e-14 | equal | 0.001 → 0.001 | 0.06 → 0.07 |
+| 1YCR, 0.15 M | CPU / CUDA | 1.1e-13 / 7.0e-14 | equal | 0.062 → 0.042 | CUDA 0.65 → 0.64 |
+| 1YCR, no salt | CPU / CUDA | 5.6e-14 / 0 | equal | 0.037 → 0.027 | |
+| 1YCR, 1 M, pdie 4 | CPU / CUDA | 5.2e-14 / 2.2e-14 | equal | 0.064 → 0.042 | |
+| 1YCR, h 0.35 | CPU / CUDA | 0 / 2.9e-14 | equal | 0.149 → 0.071 | CUDA 1.80 → 1.71 |
+| 1HPV | CPU / CUDA | 3.6e-14 / 3.0e-14 | equal | 0.158 → 0.066 | CUDA 1.21 → 1.11 |
+| 1TII | CPU / CUDA | 7.5e-15 / 7.5e-15 | equal | 0.956 → 0.246 | CUDA 3.99 → 3.26 |
+| 5DK3 | CPU / CUDA | 3.1e-15 / 0 | equal | 3.38 → 0.55 | CUDA 10.94 → 8.05 |
+
+* Solvated and reference energies agree to ≤ 1.1e-15.
+* Coarse-grid boundary alone: 1YCR 1.6×, 1TII 4.1–4.6×, 5DK3 7.6×, with a
+  maximum error of 1.7e-13 of max |φ|.
+* The 1YCR APBS comparison with `--bcfl mdh-fast` prints the same energies as
+  with `mdh`, and all species and ΔΔG pass.
+* With step 1, a 5DK3 calculation on the GPU takes 12.89 → 8.05 s (1.6×).
+
+**Tests.**
+* `boundary.rs`:
+  * the tolerance over 4 geometries × 4 salt levels;
+  * the assembled boundary equals its patches;
+  * independence of the thread count;
+  * the faces partition the boundary.
+* `tests/test_boundary.py`: energies and potentials against `mdh`, the
+  option, the CLI, and the APBS input mapping.
+* `tests/test_apbs_parity.py`: `mdh-fast` against APBS `mdh`.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

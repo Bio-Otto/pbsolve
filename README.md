@@ -17,6 +17,10 @@ solution methods and integrations can be added.
   the V-cycle runs in single precision inside the double-precision CG
   (`preconditioner="multigrid-f32"`): same energies, ~1.5× faster on the CPU;
   `preconditioner="multigrid"` keeps the cycle in f64.
+* **APBS-compatible by default, faster on request** — `bcfl="mdh"` follows
+  APBS operation for operation. `bcfl="mdh-fast"` interpolates the same sum
+  (energies within ~1e-13) and makes the boundary of large proteins ~6×
+  cheaper.
 * **Automatic GPU** — the CUDA build loads the driver and NVRTC at runtime;
   without a GPU it transparently runs on the CPU (`platform="auto"`).
 * **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for

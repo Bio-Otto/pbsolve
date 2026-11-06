@@ -197,7 +197,8 @@ def elec_from_solver(
         ions=[] if reference else [tuple(i) for i in p["ions"]],
         srad=srad,
         sdens=p["sdens"],
-        bcfl=p["bcfl"],
+        # mdh-fast is pbsolve's interpolated evaluation of APBS' mdh.
+        bcfl="mdh" if p["bcfl"] == "mdh-fast" else p["bcfl"],
         method="mg-auto" if grid.is_focused else "mg-manual",
         etol=etol if etol is not None else p["tol"],
         writes=list(writes),
@@ -1089,7 +1090,12 @@ def _add_solver_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--srad", type=float, default=1.4)
     ap.add_argument("--sdens", type=float, default=10.0)
     ap.add_argument("--surface", default="mol", choices=["mol", "vdw"])
-    ap.add_argument("--bcfl", default="mdh", choices=["mdh", "sdh", "zero"])
+    ap.add_argument(
+        "--bcfl",
+        default="mdh",
+        choices=["mdh", "mdh-fast", "sdh", "zero"],
+        help="boundary condition (mdh-fast: pbsolve's interpolated mdh; APBS runs mdh)",
+    )
     ap.add_argument("--cfac", type=float, default=1.7)
     ap.add_argument("--fadd", type=float, default=20.0)
     ap.add_argument("--tol", type=float, default=1e-8, help="pbsolve tolerance; also written as APBS etol")

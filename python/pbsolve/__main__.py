@@ -47,7 +47,13 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
     p.add_argument("--ion-radius", type=float, default=2.0)
     p.add_argument("--srad", type=float, default=1.4)
     p.add_argument("--surface", default="mol", choices=["mol", "vdw", "harmonic"])
-    p.add_argument("--bcfl", default="mdh", choices=["mdh", "sdh", "zero"])
+    p.add_argument(
+        "--bcfl",
+        default="mdh",
+        choices=["mdh", "mdh-fast", "sdh", "zero"],
+        help="coarse-grid boundary condition (default mdh, as APBS; mdh-fast interpolates the same sum, "
+        "error <= 1e-10 of the summed terms, several times faster on large grids)",
+    )
     p.add_argument(
         "--dime-policy",
         default="pbsolve",
