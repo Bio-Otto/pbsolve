@@ -56,21 +56,27 @@ impl CoefficientMaps {
     /// Uniform dielectric, no mobile ions (reference state).
     pub fn homogeneous(grid: &Grid, eps: f64) -> Self {
         let n = grid.len();
+        let filled = || {
+            let mut v = vec![0.0; n];
+            v.par_iter_mut().for_each(|e| *e = eps);
+            v
+        };
         Self {
-            eps_x: vec![eps; n],
-            eps_y: vec![eps; n],
-            eps_z: vec![eps; n],
+            eps_x: filled(),
+            eps_y: filled(),
+            eps_z: filled(),
             kappa_sq: vec![0.0; n],
         }
     }
 
     /// Dielectric and ion maps for the solvated state.
     pub fn solvated(grid: &Grid, atoms: &[Atom], params: &PbParams) -> Self {
-        let srad = match params.surface {
-            SurfaceMethod::Vdw => 0.0,
-            SurfaceMethod::Mol | SurfaceMethod::HarmonicMol => params.srad,
-        };
-        let surf = MolecularSurface::new(atoms, srad, params.sdens, apbs_clist_radius(params));
+        Self::solvated_with(grid, atoms, params, &MolecularSurface::for_params(atoms, params))
+    }
+
+    /// [`Self::solvated`] with a prebuilt surface (it depends only on the
+    /// atoms and `params`, so focusing levels share it).
+    pub fn solvated_with(grid: &Grid, atoms: &[Atom], params: &PbParams, surf: &MolecularSurface) -> Self {
         let (pdie, sdie) = (params.pdie, params.sdie);
         let h = grid.spacing;
 
@@ -185,6 +191,15 @@ pub struct MolecularSurface {
 }
 
 impl MolecularSurface {
+    /// The surface `params.surface` asks for (`vdw`: no probe).
+    pub fn for_params(atoms: &[Atom], params: &PbParams) -> Self {
+        let srad = match params.surface {
+            SurfaceMethod::Vdw => 0.0,
+            SurfaceMethod::Mol | SurfaceMethod::HarmonicMol => params.srad,
+        };
+        Self::new(atoms, srad, params.sdens, apbs_clist_radius(params))
+    }
+
     /// `clist_radius` is APBS' cell-list radius (see [`apbs_clist_radius`]);
     /// it only affects the density of SAS points.
     pub fn new(atoms: &[Atom], srad: f64, sdens: f64, clist_radius: f64) -> Self {
@@ -303,8 +318,10 @@ pub fn mark_map(grid: &Grid, shift: [f64; 3], fill: f64, passes: &[(&[Sphere], f
         })
         .collect();
 
-    let mut out = vec![fill; grid.len()];
+    // Zeroed allocation, filled per plane: the pages are touched in parallel.
+    let mut out = vec![0.0; grid.len()];
     out.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+        plane.fill(fill);
         let fk = k as f64;
         for ((spheres, value), (starts, items)) in passes.iter().zip(&buckets) {
             for &n in &items[starts[k] as usize..starts[k + 1] as usize] {

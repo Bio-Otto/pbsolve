@@ -53,6 +53,15 @@
 - `pbsolve apbs compare` and `pbsolve apbs run` accept `--preconditioner`
   (`run_input(..., preconditioner=...)`).
 
+- Faster host stages with bit-identical results:
+  - the molecular surface is built once per focusing sequence;
+  - node maps are filled in parallel;
+  - `mdh` hoists atom factors and interleaves four boundary nodes;
+  - the CPU backend's host transfers run in parallel.
+
+  Gains: 1.06–1.26× per calculation on the CPU and 1.03–1.19× on CUDA.
+  Energies, iterations, maps and potentials are identical bit for bit.
+
 ### Fixed
 
 - The CUDA platform failed with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` when the

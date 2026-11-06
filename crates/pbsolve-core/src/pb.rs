@@ -12,8 +12,9 @@ use crate::molecule::Atom;
 use crate::operator::{assemble_rhs, StencilOperator};
 use crate::params::PbParams;
 use crate::solver::{pcg, SolveStats, SolverOptions};
-use crate::surface::CoefficientMaps;
+use crate::surface::{CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
+use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -91,9 +92,15 @@ pub struct PolarSolvation {
 
 /// Dielectric and ion maps of one grid level for the given medium.
 pub fn coefficient_maps(grid: &Grid, atoms: &[Atom], params: &PbParams, medium: Medium) -> CoefficientMaps {
-    match medium {
-        Medium::Solvated => CoefficientMaps::solvated(grid, atoms, params),
-        Medium::Reference => CoefficientMaps::homogeneous(grid, params.pdie),
+    let surf = (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params));
+    maps_with(grid, atoms, params, surf.as_ref())
+}
+
+/// Maps of one level; `surf` is the solvated state's surface (None: reference).
+fn maps_with(grid: &Grid, atoms: &[Atom], params: &PbParams, surf: Option<&MolecularSurface>) -> CoefficientMaps {
+    match surf {
+        Some(s) => CoefficientMaps::solvated_with(grid, atoms, params, s),
+        None => CoefficientMaps::homogeneous(grid, params.pdie),
     }
 }
 
@@ -148,8 +155,8 @@ pub fn solve_with_maps<B: Backend>(
     }
     let bad_eps = [&maps.eps_x, &maps.eps_y, &maps.eps_z]
         .iter()
-        .any(|m| m.iter().any(|e| e.is_nan() || *e <= 0.0));
-    if bad_eps || maps.kappa_sq.iter().any(|k| k.is_nan() || *k < 0.0) {
+        .any(|m| m.par_iter().any(|e| e.is_nan() || *e <= 0.0));
+    if bad_eps || maps.kappa_sq.par_iter().any(|k| k.is_nan() || *k < 0.0) {
         return crate::error::invalid("dielectric maps must be positive and kappa_sq non-negative");
     }
     let mut g = vec![0.0; n];
@@ -160,9 +167,7 @@ pub fn solve_with_maps<B: Backend>(
     let op = Arc::new(StencilOperator::new(grid, maps));
     let b = assemble_rhs(&op, node_charge, &g, lb0);
     let (mut u, stats) = pcg(be, op, &b, opts)?;
-    for (ui, gi) in u.iter_mut().zip(&g) {
-        *ui += gi;
-    }
+    u.par_iter_mut().zip(g.par_iter()).for_each(|(ui, gi)| *ui += gi);
     Ok((u, stats))
 }
 
@@ -172,12 +177,12 @@ fn solve_level<B: Backend>(
     grid: &Grid,
     atoms: &[Atom],
     params: &PbParams,
-    medium: Medium,
+    surf: Option<&MolecularSurface>,
     g_ext: Vec<f64>,
     timings: &mut Timings,
 ) -> Result<(Vec<f64>, SolveStats)> {
     let t = Instant::now();
-    let maps = coefficient_maps(grid, atoms, params, medium);
+    let maps = maps_with(grid, atoms, params, surf);
     timings.maps += t.elapsed().as_secs_f64();
     let t = Instant::now();
     let q = spread_charges(grid, atoms)?;
@@ -209,6 +214,10 @@ pub fn solve_focused<B: Backend>(
     let bm = boundary_medium(params, medium);
     let mut stats = Vec::with_capacity(levels.len());
     let mut timings = Timings::default();
+    // The molecular surface depends only on the atoms: built once for all levels.
+    let t = Instant::now();
+    let surf = (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params));
+    timings.maps += t.elapsed().as_secs_f64();
     let mut prev: Option<(Grid, Vec<f64>)> = None;
     for grid in levels {
         let t = Instant::now();
@@ -217,7 +226,7 @@ pub fn solve_focused<B: Backend>(
             Some((pg, pu)) => focus_boundary(&grid, pg, pu)?,
         };
         timings.boundary += t.elapsed().as_secs_f64();
-        let (u, s) = solve_level(be, &grid, atoms, params, medium, g, &mut timings)?;
+        let (u, s) = solve_level(be, &grid, atoms, params, surf.as_ref(), g, &mut timings)?;
         stats.push(s);
         prev = Some((grid, u));
     }

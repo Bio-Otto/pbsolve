@@ -34,8 +34,10 @@ pub struct BoundaryMedium {
     pub lb0: f64,
 }
 
-/// Debye–Hückel potential (kT/e) of charge z with exclusion radius a at distance d (APBS `bcfl1sp`).
-#[inline]
+/// Debye–Hückel potential (kT/e) of charge z with exclusion radius a at
+/// distance d (APBS `bcfl1sp`). Reference form; the `mdh` sum evaluates it
+/// through [`DhSources`].
+#[cfg(test)]
 fn dh(z: f64, a: f64, d: f64, m: &BoundaryMedium) -> f64 {
     if m.kappa > 0.0 {
         m.lb0 * z / m.eps * (-(m.kappa) * (d - a)).exp() / ((1.0 + m.kappa * a) * d)
@@ -43,6 +45,73 @@ fn dh(z: f64, a: f64, d: f64, m: &BoundaryMedium) -> f64 {
         m.lb0 * z / (m.eps * d)
     }
 }
+
+/// The charged atoms of an `mdh` sum with their atom-only factors hoisted
+/// out of the node loop. Each atom–node term performs exactly the operations
+/// of `dh`, in the same order (`((l_B0 z / ε) · e^{−κ(d−a)}) / ((1+κa) d)`,
+/// or `(l_B0 z) / (ε d)` without salt), so the sums are bit-identical to the
+/// direct form, with one division less per term.
+struct DhSources {
+    position: Vec<[f64; 3]>,
+    /// l_B0 z / ε (κ > 0) or l_B0 z (κ = 0).
+    scale: Vec<f64>,
+    radius: Vec<f64>,
+    /// 1 + κ a.
+    screen: Vec<f64>,
+}
+
+impl DhSources {
+    fn new(atoms: &[Atom], m: &BoundaryMedium) -> Self {
+        let charged: Vec<&Atom> = atoms.iter().filter(|a| a.charge != 0.0).collect();
+        Self {
+            position: charged.iter().map(|a| a.position).collect(),
+            scale: charged
+                .iter()
+                .map(|a| {
+                    if m.kappa > 0.0 {
+                        m.lb0 * a.charge / m.eps
+                    } else {
+                        m.lb0 * a.charge
+                    }
+                })
+                .collect(),
+            radius: charged.iter().map(|a| a.radius).collect(),
+            screen: charged.iter().map(|a| 1.0 + m.kappa * a.radius).collect(),
+        }
+    }
+
+    /// Σ_i dh(q_i, a_i, |p − r_i|) at `NODES` points at once. Every point
+    /// keeps its own sum in atom order, starting from the neutral element of
+    /// `f64: Sum`, exactly like `iter().map(dh).sum()`. Interleaving the
+    /// points only gives the CPU independent dependency chains (and reuses
+    /// each atom's data), so the results are bit-identical.
+    #[inline]
+    fn potentials(&self, p: &[[f64; 3]; NODES], m: &BoundaryMedium) -> [f64; NODES] {
+        let zero: f64 = std::iter::empty::<f64>().sum();
+        let mut acc = [zero; NODES];
+        let atoms = self.position.iter().zip(&self.scale);
+        if m.kappa > 0.0 {
+            let k = m.kappa;
+            for ((r, s), (a, w)) in atoms.zip(self.radius.iter().zip(&self.screen)) {
+                for (acc, p) in acc.iter_mut().zip(p) {
+                    let d = dist2(*p, *r).sqrt();
+                    *acc += s * (-k * (d - a)).exp() / (w * d);
+                }
+            }
+        } else {
+            for (r, s) in atoms {
+                for (acc, p) in acc.iter_mut().zip(p) {
+                    let d = dist2(*p, *r).sqrt();
+                    *acc += s / (m.eps * d);
+                }
+            }
+        }
+        acc
+    }
+}
+
+/// Boundary nodes evaluated together by [`DhSources::potentials`].
+const NODES: usize = 4;
 
 /// Radial factors of the monopole, dipole and quadrupole potentials outside a
 /// sphere of radius `rad` and dielectric ε_p in a medium (ε_w, κ) — APBS `multipolebc`.
@@ -145,18 +214,23 @@ pub fn analytic_boundary(grid: &Grid, atoms: &[Atom], bc: BoundaryCondition, m: 
     let bidx = grid.boundary_indices();
     let values: Vec<f64> = match bc {
         BoundaryCondition::Zero => return g,
-        BoundaryCondition::Mdh => bidx
-            .par_iter()
-            .map(|&c| {
-                let (i, j, k) = grid.ijk(c);
-                let p = grid.position(i, j, k);
-                atoms
-                    .iter()
-                    .filter(|a| a.charge != 0.0)
-                    .map(|a| dh(a.charge, a.radius, dist2(p, a.position).sqrt(), m))
-                    .sum()
-            })
-            .collect(),
+        BoundaryCondition::Mdh => {
+            let src = DhSources::new(atoms, m);
+            let mut values = vec![0.0; bidx.len()];
+            values
+                .par_chunks_mut(NODES)
+                .zip(bidx.par_chunks(NODES))
+                .for_each(|(out, idx)| {
+                    // A short last chunk repeats its first node in the unused slots.
+                    let p: [[f64; 3]; NODES] = std::array::from_fn(|l| {
+                        let (i, j, k) = grid.ijk(idx[l.min(idx.len() - 1)]);
+                        grid.position(i, j, k)
+                    });
+                    let v = src.potentials(&p, m);
+                    out.copy_from_slice(&v[..out.len()]);
+                });
+            values
+        }
         BoundaryCondition::Sdh => {
             let mp = Multipoles::of(atoms);
             bidx.par_iter()
@@ -216,6 +290,40 @@ mod tests {
         let d = dist2(p, [1.0, 2.0, 3.0]).sqrt();
         let want = dh(-1.5, 2.2, d, &m);
         assert!((mp.potential(p, &m) - want).abs() < 1e-12 * want.abs());
+    }
+
+    /// The hoisted `mdh` sum equals the direct sum of `dh` terms bit for bit.
+    #[test]
+    fn mdh_equals_the_direct_sum_bit_for_bit() {
+        let mut s: u64 = 7;
+        let mut rnd = || {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut atoms: Vec<Atom> = (0..300)
+            .map(|_| atom([0, 1, 2].map(|_| 12.0 * (rnd() - 0.5)), rnd() - 0.5, 0.8 + 1.5 * rnd()))
+            .collect();
+        atoms[5].charge = 0.0; // skipped by both forms
+        atoms[9].radius = 0.0;
+        let grid = Grid::centered([0.3, -0.2, 0.1], [40.0, 36.0, 44.0], [17, 15, 19]).unwrap();
+        for m in [
+            medium(78.54, 2.0, 0.125),
+            medium(2.0, 2.0, 0.0),
+            medium(80.0, 1.0, 1e-300),
+        ] {
+            let g = analytic_boundary(&grid, &atoms, BoundaryCondition::Mdh, &m);
+            for c in grid.boundary_indices() {
+                let (i, j, k) = grid.ijk(c);
+                let p = grid.position(i, j, k);
+                let want: f64 = atoms
+                    .iter()
+                    .filter(|a| a.charge != 0.0)
+                    .map(|a| dh(a.charge, a.radius, dist2(p, a.position).sqrt(), &m))
+                    .sum();
+                assert_eq!(g[c].to_bits(), want.to_bits(), "node {c}, kappa {}", m.kappa);
+            }
+            assert!(g.iter().all(|v| v.is_finite()));
+        }
     }
 
     #[test]

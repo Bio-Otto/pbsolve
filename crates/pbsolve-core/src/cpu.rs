@@ -122,7 +122,7 @@ impl<T: CpuReal> Backend for Cpu<T> {
     }
 
     fn upload(&self, host: &[f64]) -> Result<Self::Vector> {
-        Ok(host.iter().map(|&v| T::from_f64(v)).collect())
+        Ok(host.par_iter().map(|&v| T::from_f64(v)).collect())
     }
 
     fn zeros(&self, n: usize) -> Result<Self::Vector> {
@@ -130,16 +130,22 @@ impl<T: CpuReal> Backend for Cpu<T> {
     }
 
     fn download(&self, v: &Self::Vector) -> Result<Vec<f64>> {
-        Ok(v.iter().map(|x| x.to_f64()).collect())
+        Ok(v.par_iter().map(|x| x.to_f64()).collect())
     }
 
     fn read(&self, v: &Self::Vector, host: &mut [f64]) -> Result<()> {
-        host.iter_mut().zip(v).for_each(|(h, x)| *h = x.to_f64());
+        host.par_iter_mut()
+            .zip(v.par_iter())
+            .with_min_len(CHUNK)
+            .for_each(|(h, x)| *h = x.to_f64());
         Ok(())
     }
 
     fn write(&self, host: &[f64], v: &mut Self::Vector) -> Result<()> {
-        v.iter_mut().zip(host).for_each(|(x, &h)| *x = T::from_f64(h));
+        v.par_iter_mut()
+            .zip(host.par_iter())
+            .with_min_len(CHUNK)
+            .for_each(|(x, &h)| *x = T::from_f64(h));
         Ok(())
     }
 

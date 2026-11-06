@@ -51,6 +51,7 @@ should update the status table below.
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
 | Mixed precision (unreleased, the default) | `multigrid-f32`: ΔG_polar within 7.9e-13 of f64 (Born, 1YCR), equal iteration counts; 1YCR 1.42–1.55× faster on the CPU, 1.03–1.12× on the shared GPU (V-cycle 2× on the device). Default after a sweep of 28 cases (5 systems up to 20 179 atoms, 14 parameter variants, CPU and CUDA): ≤ 4.2e-13, identical iterations, CPU 1.4–1.7× on proteins; Born table and 1YCR APBS comparison unchanged; see *Mixed precision* |
+| Host stages (unreleased) | Faster maps, `mdh` boundary, operator setup and host transfers; every energy, iteration count, residual, map and potential bit-identical to the previous commit on CPU and CUDA (13 cases + MM-PBSA species); 1.06–1.26× (CPU), 1.03–1.19× (CUDA) per calculation; see *Host stages* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -393,6 +394,58 @@ f64 multigrid, 18 CPU threads for the host stages):
 * `tests/test_apbs_tools.py`: `--preconditioner` of `pbsolve apbs run`.
 * `tests/test_platforms.py`: CUDA = CPU on the peptide with
   `multigrid-f32`.
+
+## Host stages: bit-identical speed-ups
+
+On an idle GPU the host stages took 75–78 % of a calculation (see *Where the
+time goes on the GPU*). These changes make them faster without changing any
+floating-point operation:
+* The molecular surface (SAS points, probe spheres) depends only on the atoms.
+  It is now built once per focusing sequence instead of once per level.
+* Node maps (`mark_map`, homogeneous reference maps) are filled per z-plane in
+  parallel, so their pages are touched by all threads.
+* Map validation, κ²·V, `u += g` and the CPU backend's host transfers
+  (`upload`, `download`, `read`, `write`) run in parallel. They are
+  element-wise.
+* `mdh` hoists the atom-only factors (l_B0 q/ε, 1 + κa) out of the node loop
+  and sums four boundary nodes per pass over the atoms. Each node keeps its
+  own sum in atom order, starting from the neutral element of `f64: Sum`, so
+  every term and every sum is bit-identical. The test
+  `mdh_equals_the_direct_sum_bit_for_bit` checks this.
+
+**Check.** Energies, solvated and reference energies, iteration counts and
+residuals (as `float.hex`) were compared before and after, together with
+SHA-256 digests of all maps and both potentials of 1YCR and the MM-PBSA
+species energies. The 13 cases cover Born, 1YCR with `multigrid`, `jacobi`,
+`vdw`, `harmonic`, no salt, `sdh`, `zero`, pdie 4 with 0.5 M and APBS grids,
+1TII and 5DK3. All are identical on CPU and CUDA.
+
+**Time per ΔG_polar** (s, before → after; the load of other jobs rose from 2
+to 12 during the last CPU cases):
+
+| System | Platform | Maps | Boundary | Assembly | Setup | Total |
+|---|---|---|---|---|---|---|
+| 1YCR | CPU | 0.134 → 0.100 | 0.073 → 0.066 | 0.089 → 0.077 | 0.263 → 0.237 | 2.13 → 1.81 (1.18×) |
+| 1TII | CPU | 0.75 → 0.39 | 1.16 → 0.96 | 0.71 → 0.54 | 1.31 → 1.09 | 16.5 → 14.7 (1.12×) |
+| 5DK3 | CPU | 1.71 → 0.81 | 4.05 → 3.48 | 1.66 → 1.22 | 3.56 → 2.93 | 39.9 → 36.7 (1.09×) |
+| 1YCR | CUDA | 0.139 → 0.095 | 0.072 → 0.067 | 0.087 → 0.086 | 0.30 → 0.30 | 0.72 → 0.67 (1.08×) |
+| 1TII | CUDA | 0.74 → 0.38 | 1.11 → 0.94 | 0.53 → 0.37 | 1.43 → 1.43 | 4.63 → 3.95 (1.17×) |
+| 5DK3 | CUDA | 1.64 → 0.80 | 4.05 → 3.41 | 1.34 → 0.91 | 3.84 → 3.73 | 12.89 → 10.87 (1.19×) |
+
+**Galerkin products: a negative result.** The multigrid setup (`Setup`) is now
+the largest remaining host stage. Two order-preserving rewrites of
+`galerkin` were measured against the original:
+* per-axis index tables instead of recomputing transfers per stencil entry;
+* a row-major symmetrisation instead of 27 strided passes.
+
+Both gave bit-identical operators and no speed-up: 37.6–38.0 s against
+40.2–40.7 s of CPU time for three 5DK3 hierarchies. The product is bound by
+its arithmetic. The fine level needs about 640 multiply-adds per coarse row
+(27 fine rows × 7 entries × 3.4 interpolation targets), and their order
+cannot change without changing the result. Re-associating the product axis by
+axis (sum factorisation) would save only 1.3–2× of these operations, so it
+was not done. The changes were reverted. Moving the product to the GPU, where
+it is cheap and can keep the same operation order, is the better route.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

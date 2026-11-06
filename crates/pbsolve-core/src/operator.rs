@@ -34,7 +34,7 @@ impl StencilOperator {
         let [hx, hy, hz] = grid.spacing;
         let coef = [hy * hz / hx, hx * hz / hy, hx * hy / hz];
         let vol = grid.cell_volume();
-        let kvol: Vec<f64> = maps.kappa_sq.iter().map(|k| k * vol).collect();
+        let kvol: Vec<f64> = maps.kappa_sq.par_iter().map(|k| k * vol).collect();
         let [nx, ny, _] = grid.dims;
         let (sx, sy, sz) = (1usize, nx, nx * ny);
         let mut inv_diag = vec![0.0; grid.len()];

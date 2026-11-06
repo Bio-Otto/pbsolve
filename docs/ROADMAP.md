@@ -139,6 +139,15 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   side, multigrid setup) take 75–78 % of a calculation; the CG solve is
   the smaller part.
 
+**Host stages** (follow-up of 4.4). *Status: done (unreleased).*
+* Faster maps, `mdh` sums, operator setup and host transfers, with results
+  identical bit for bit: 1.06–1.26× per calculation (CPU), 1.03–1.19× (CUDA).
+* An order-preserving rewrite of the Galerkin product brought nothing: it is
+  arithmetic-bound, as measured in `docs/VALIDATION.md`.
+* *Next:* GPU-resident setup. The Galerkin products, maps and right-hand side
+  would be built on the device; the same operation order keeps the results
+  bit-identical to the CPU.
+
 ### v0.2 — Accuracy
 
 **4.5 Reaction-field decomposition.** Split the potential into the singular
