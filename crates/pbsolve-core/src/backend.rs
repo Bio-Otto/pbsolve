@@ -129,6 +129,15 @@ pub trait Backend {
     /// A host copy of a fine operator (for grids too small to coarsen, whose
     /// multigrid is a single factorised level).
     fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
+    /// The values `v[idx[m]]` in the order of `idx` (indices below the length
+    /// of `v`, repetitions allowed). The pipeline reads the potential at the
+    /// charges and at the nodes the next focusing level interpolates instead
+    /// of downloading it; backends override the default, which downloads `v`.
+    fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>> {
+        let all = self.download(v)?;
+        check_gather(all.len(), idx)?;
+        Ok(idx.iter().map(|&c| all[c]).collect())
+    }
     /// Waits until all queued work has finished (stage timings). Backends that
     /// compute synchronously keep the default no-op.
     fn synchronize(&self) -> Result<()> {
@@ -144,6 +153,14 @@ pub fn check_scatter(n: usize, idx: &[usize], values: &[f64]) -> Result<()> {
     }
     if let Some(c) = idx.iter().find(|&&c| c >= n) {
         return crate::error::invalid(format!("scatter: index {c} outside a vector of {n} values"));
+    }
+    Ok(())
+}
+
+/// Checks the indices of [`Backend::gather`]: every index below `len`.
+pub fn check_gather(len: usize, idx: &[usize]) -> Result<()> {
+    if let Some(c) = idx.iter().find(|&&c| c >= len) {
+        return crate::error::invalid(format!("gather: index {c} outside a vector of {len} values"));
     }
     Ok(())
 }

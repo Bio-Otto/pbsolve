@@ -4,7 +4,7 @@
 
 use crate::autogrid::GridSpec;
 use crate::backend::Backend;
-use crate::boundary::{analytic_boundary, focus_boundary, BoundaryMedium};
+use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
 use crate::charge::{spread_charges, spread_charges_sparse};
 use crate::error::Result;
 use crate::grid::Grid;
@@ -165,76 +165,118 @@ pub fn solve_with_maps<B: Backend>(
         be.upload_owned(maps.kappa_sq)?,
     ];
     let q = be.upload(node_charge)?;
-    solve_assembled(be, grid, maps, q, g_ext, bjerrum_length_vacuum(temperature), opts)
+    let boundary = grid.boundary_indices();
+    let g: Vec<f64> = boundary.iter().map(|&c| g_ext[c]).collect();
+    let lb0 = bjerrum_length_vacuum(temperature);
+    let (x, mut stats) = solve_assembled(be, grid, &boundary, &g, maps, q, lb0, opts)?;
+    let t = Instant::now();
+    let sol = LevelSolution::<B> {
+        grid: grid.clone(),
+        x,
+        g,
+    };
+    let (_, u) = sol.potential(be)?;
+    stats.solve_seconds += t.elapsed().as_secs_f64();
+    Ok((u, stats))
 }
 
 /// Assembles the system of maps and node charges already on `be` (as
 /// [`crate::operator::StencilOperator::new`] and
-/// [`crate::operator::assemble_rhs`] do on the host) and solves it. Returns
-/// u = x + g with g = `g_ext` on boundary nodes and 0 inside.
+/// [`crate::operator::assemble_rhs`] do on the host) and solves it for x;
+/// u = x + g with g = `g` on the `boundary` nodes and 0 inside.
+#[allow(clippy::too_many_arguments)]
 fn solve_assembled<B: Backend>(
     be: &B,
     grid: &Grid,
+    boundary: &[usize],
+    g: &[f64],
     maps: [B::Vector; 4],
     q: B::Vector,
-    g_ext: &[f64],
     lb0: f64,
     opts: SolverOptions,
-) -> Result<(Vec<f64>, SolveStats)> {
+) -> Result<(B::Vector, SolveStats)> {
     let n = grid.len();
     let (op, inv_diag) = be.assemble_operator(grid, maps)?;
     // b = 4π l_B0 q − A g on interior nodes, 0 on the boundary.
     let mut b = be.zeros(n)?;
     {
-        let boundary = grid.boundary_indices();
-        let values: Vec<f64> = boundary.iter().map(|&c| g_ext[c]).collect();
-        let g = be.scatter(n, &boundary, &values)?;
+        let g = be.scatter(n, boundary, g)?;
         be.apply(&op, &g, &mut b)?;
     }
     be.source_rhs(4.0 * PI * lb0, &q, &inv_diag, &mut b)?;
     drop(q);
     be.synchronize()?;
-    let (x, mut stats) = pcg_on(be, grid.dims, &op, inv_diag, b, opts)?;
-    drop(op);
-    let t = Instant::now();
-    let mut u = be.download(&x)?;
-    drop(x);
-    stats.solve_seconds += t.elapsed().as_secs_f64();
-    add_boundary_values(grid, &mut u, g_ext);
-    Ok((u, stats))
+    pcg_on(be, grid.dims, &op, inv_diag, b, opts)
 }
 
-/// u ← u + g, g = `g_ext` on boundary nodes and 0.0 on interior ones.
-fn add_boundary_values(grid: &Grid, u: &mut [f64], g_ext: &[f64]) {
+/// The solution of one level, still on the backend: u = x + g, with g the
+/// Dirichlet values on the boundary nodes and 0.0 on interior ones.
+struct LevelSolution<B: Backend> {
+    grid: Grid,
+    x: B::Vector,
+    /// g on `grid.boundary_indices()`, in that order.
+    g: Vec<f64>,
+}
+
+impl<B: Backend> LevelSolution<B> {
+    /// g at node `c` (0.0 inside).
+    fn g_at(&self, c: usize) -> f64 {
+        let (i, j, k) = self.grid.ijk(c);
+        self.grid.boundary_position(i, j, k).map_or(0.0, |m| self.g[m])
+    }
+
+    /// u at the given nodes, computed as [`Self::potential`] computes it,
+    /// reading only those values of x.
+    fn values_at(&self, be: &B, nodes: &[usize]) -> Result<Vec<f64>> {
+        let x = be.gather(&self.x, nodes)?;
+        Ok(nodes.iter().zip(x).map(|(&c, x)| x + self.g_at(c)).collect())
+    }
+
+    /// The grid and the full potential u = x + g.
+    fn potential(self, be: &B) -> Result<(Grid, Vec<f64>)> {
+        let mut u = be.download(&self.x)?;
+        drop(self.x);
+        add_boundary_values(&self.grid, &mut u, &self.g);
+        Ok((self.grid, u))
+    }
+}
+
+/// u ← u + g, with g = `g` (in `grid.boundary_indices()` order) on boundary
+/// nodes and 0.0 on interior ones.
+fn add_boundary_values(grid: &Grid, u: &mut [f64], g: &[f64]) {
     let [nx, ny, _] = grid.dims;
     u.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
         for j in 0..ny {
             for i in 0..nx {
-                let c = i + nx * (j + ny * k);
-                let g = if grid.is_boundary(i, j, k) { g_ext[c] } else { 0.0 };
-                plane[i + nx * j] += g;
+                plane[i + nx * j] += grid.boundary_position(i, j, k).map_or(0.0, |m| g[m]);
             }
         }
     });
 }
 
-/// One LPBE solve on `grid` with Dirichlet data `g_ext`. Returns u = x + g_ext.
+/// Node charges of a level ([`spread_charges_sparse`]): nodes in increasing
+/// order and their charges.
+type NodeCharges = (Vec<usize>, Vec<f64>);
+
+/// One LPBE solve on `grid` with Dirichlet values `g` (on
+/// `grid.boundary_indices()`). Also returns the node charges.
+#[allow(clippy::too_many_arguments)]
 fn solve_level<B: Backend>(
     be: &B,
-    grid: &Grid,
+    grid: Grid,
+    g: Vec<f64>,
     atoms: &[Atom],
     params: &PbParams,
     surf: Option<&MolecularSurface>,
-    g_ext: Vec<f64>,
     timings: &mut Timings,
-) -> Result<(Vec<f64>, SolveStats)> {
+) -> Result<(LevelSolution<B>, SolveStats, NodeCharges)> {
     let t = Instant::now();
     // Maps built from validated parameters are valid (ε > 0, κ̄² ≥ 0).
-    let maps = maps_on(be, grid, atoms, params, surf)?;
+    let maps = maps_on(be, &grid, atoms, params, surf)?;
     be.synchronize()?;
     timings.maps += t.elapsed().as_secs_f64();
     let t = Instant::now();
-    let (nodes, charges) = spread_charges_sparse(grid, atoms)?;
+    let (nodes, charges) = spread_charges_sparse(&grid, atoms)?;
     let q = be.scatter(grid.len(), &nodes, &charges)?;
     let opts = SolverOptions {
         tol: params.tol,
@@ -242,12 +284,69 @@ fn solve_level<B: Backend>(
         preconditioner: params.preconditioner,
     };
     let lb0 = bjerrum_length_vacuum(params.temperature);
-    let (u, stats) = solve_assembled(be, grid, maps, q, &g_ext, lb0, opts)?;
+    let (x, mut stats) = solve_assembled(be, &grid, &grid.boundary_indices(), &g, maps, q, lb0, opts)?;
+    // The solver's buffers are freed at the next synchronisation (the CUDA
+    // memory pool returns them to the driver then); that belongs to the solve.
+    let freeing = Instant::now();
+    be.synchronize()?;
+    stats.solve_seconds += freeing.elapsed().as_secs_f64();
     let total = t.elapsed().as_secs_f64();
     timings.setup += stats.setup_seconds;
     timings.solve += stats.solve_seconds;
     timings.assembly += (total - stats.setup_seconds - stats.solve_seconds).max(0.0);
-    Ok((u, stats))
+    Ok((LevelSolution { grid, x, g }, stats, (nodes, charges)))
+}
+
+/// Boundary values of `fine` focused from the solution of the coarser level,
+/// as [`crate::boundary::focus_boundary`] computes them, reading only the coarse nodes the
+/// interpolation uses ([`focus_nodes`]).
+fn focus_from<B: Backend>(be: &B, fine: &Grid, coarse: &LevelSolution<B>) -> Result<Vec<f64>> {
+    let nodes = focus_nodes(fine, &coarse.grid);
+    let u = coarse.values_at(be, &nodes.indices())?;
+    focus_boundary_values(fine, &coarse.grid, |c| u[nodes.position(c).expect("a focusing node")])
+}
+
+/// Runs the focusing sequence of `spec` (APBS mg-auto, see
+/// [`GridSpec::levels`]): the outermost level uses the analytic boundary
+/// condition `bcfl`, every finer level takes its boundary from the previous
+/// one, read from the backend at the nodes it needs. `finish` turns the
+/// finest level's solution and node charges into the result.
+fn focused<B: Backend, T>(
+    be: &B,
+    spec: &GridSpec,
+    atoms: &[Atom],
+    params: &PbParams,
+    medium: Medium,
+    finish: impl FnOnce(LevelSolution<B>, NodeCharges, &mut Timings) -> Result<T>,
+) -> Result<(T, Vec<SolveStats>, Timings)> {
+    params.validate()?;
+    let levels = spec.levels()?;
+    let bm = boundary_medium(params, medium);
+    let mut stats = Vec::with_capacity(levels.len());
+    let mut timings = Timings::default();
+    // The molecular surface depends only on the atoms: built once for all levels.
+    let t = Instant::now();
+    let surf = (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params));
+    timings.maps += t.elapsed().as_secs_f64();
+    let mut last: Option<(LevelSolution<B>, NodeCharges)> = None;
+    for grid in levels {
+        let t = Instant::now();
+        let coarse = last.take();
+        let g = match &coarse {
+            None => analytic_boundary_values(&grid, atoms, params.bcfl, &bm),
+            Some((coarse, _)) => focus_from(be, &grid, coarse)?,
+        };
+        timings.boundary += t.elapsed().as_secs_f64();
+        // The coarser level is released before this one allocates (freeing
+        // memory belongs to no stage).
+        drop(coarse);
+        let (sol, s, charges) = solve_level(be, grid, g, atoms, params, surf.as_ref(), &mut timings)?;
+        stats.push(s);
+        last = Some((sol, charges));
+    }
+    let (sol, charges) = last.expect("at least one level");
+    let out = finish(sol, charges, &mut timings)?;
+    Ok((out, stats, timings))
 }
 
 /// Focusing solve over all levels of `spec` (APBS mg-auto sequence, see
@@ -260,28 +359,12 @@ pub fn solve_focused<B: Backend>(
     params: &PbParams,
     medium: Medium,
 ) -> Result<FieldSolution> {
-    params.validate()?;
-    let levels = spec.levels()?;
-    let bm = boundary_medium(params, medium);
-    let mut stats = Vec::with_capacity(levels.len());
-    let mut timings = Timings::default();
-    // The molecular surface depends only on the atoms: built once for all levels.
-    let t = Instant::now();
-    let surf = (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params));
-    timings.maps += t.elapsed().as_secs_f64();
-    let mut prev: Option<(Grid, Vec<f64>)> = None;
-    for grid in levels {
+    let ((grid, potential), stats, timings) = focused(be, spec, atoms, params, medium, |sol, _, timings| {
         let t = Instant::now();
-        let g = match &prev {
-            None => analytic_boundary(&grid, atoms, params.bcfl, &bm),
-            Some((pg, pu)) => focus_boundary(&grid, pg, pu)?,
-        };
-        timings.boundary += t.elapsed().as_secs_f64();
-        let (u, s) = solve_level(be, &grid, atoms, params, surf.as_ref(), g, &mut timings)?;
-        stats.push(s);
-        prev = Some((grid, u));
-    }
-    let (grid, potential) = prev.expect("at least one level");
+        let field = sol.potential(be)?;
+        timings.solve += t.elapsed().as_secs_f64();
+        Ok(field)
+    })?;
     Ok(FieldSolution {
         grid,
         potential,
@@ -297,6 +380,14 @@ pub fn electrostatic_energy_kt(sol: &FieldSolution, atoms: &[Atom]) -> Result<f6
     Ok(0.5 * q.iter().zip(&sol.potential).map(|(a, b)| a * b).sum::<f64>())
 }
 
+/// [`electrostatic_energy_kt`] of the finest level from u at the charged
+/// nodes only: the same products in the same order without the zero terms,
+/// hence the same value (a total of exactly zero may differ in its sign).
+fn energy_at_charges<B: Backend>(be: &B, sol: &LevelSolution<B>, (nodes, charges): NodeCharges) -> Result<f64> {
+    let u = sol.values_at(be, &nodes)?;
+    Ok(0.5 * charges.iter().zip(&u).map(|(a, b)| a * b).sum::<f64>())
+}
+
 /// Polar (electrostatic) solvation free energy on the given grid.
 pub fn polar_solvation<B: Backend>(
     be: &B,
@@ -304,22 +395,23 @@ pub fn polar_solvation<B: Backend>(
     params: &PbParams,
     spec: &GridSpec,
 ) -> Result<PolarSolvation> {
-    let solv = solve_focused(be, spec, atoms, params, Medium::Solvated)?;
-    let refr = solve_focused(be, spec, atoms, params, Medium::Reference)?;
-    let t = Instant::now();
-    let solvated_kt = electrostatic_energy_kt(&solv, atoms)?;
-    let reference_kt = electrostatic_energy_kt(&refr, atoms)?;
+    let energy = |sol: LevelSolution<B>, charges, timings: &mut Timings| {
+        let t = Instant::now();
+        let e = energy_at_charges(be, &sol, charges)?;
+        timings.energy += t.elapsed().as_secs_f64();
+        Ok(e)
+    };
+    let (solvated_kt, stats_solvated, mut timings) = focused(be, spec, atoms, params, Medium::Solvated, energy)?;
+    let (reference_kt, stats_reference, t) = focused(be, spec, atoms, params, Medium::Reference, energy)?;
+    timings += t;
     let energy_kt = solvated_kt - reference_kt;
-    let mut timings = solv.timings;
-    timings += refr.timings;
-    timings.energy = t.elapsed().as_secs_f64();
     Ok(PolarSolvation {
         energy_kcal: energy_kt * kt_in_kcal_per_mol(params.temperature),
         energy_kt,
         solvated_kt,
         reference_kt,
-        stats_solvated: solv.stats,
-        stats_reference: refr.stats,
+        stats_solvated,
+        stats_reference,
         grid: spec.clone(),
         timings,
     })
@@ -534,6 +626,160 @@ mod tests {
             default.energy_kt,
             f64_cycle.energy_kt
         );
+    }
+
+    /// The pipeline before potentials stayed on the backend, from the host
+    /// references: every level's potential in full, boundaries from the full
+    /// potential of the coarser level, maps and charges built on the host.
+    fn host_focused(spec: &GridSpec, atoms: &[Atom], params: &PbParams, medium: Medium) -> (Grid, Vec<f64>) {
+        use crate::boundary::{analytic_boundary, focus_boundary};
+        let be = CpuBackend::new();
+        let bm = boundary_medium(params, medium);
+        let opts = SolverOptions {
+            tol: params.tol,
+            max_iter: params.max_iter,
+            preconditioner: params.preconditioner,
+        };
+        let mut prev: Option<(Grid, Vec<f64>)> = None;
+        for grid in spec.levels().unwrap() {
+            let g = match &prev {
+                None => analytic_boundary(&grid, atoms, params.bcfl, &bm),
+                Some((pg, pu)) => focus_boundary(&grid, pg, pu).unwrap(),
+            };
+            let maps = coefficient_maps(&grid, atoms, params, medium);
+            let q = spread_charges(&grid, atoms).unwrap();
+            let (u, _) = solve_with_maps(&be, &grid, maps, &q, &g, params.temperature, opts).unwrap();
+            prev = Some((grid, u));
+        }
+        prev.unwrap()
+    }
+
+    /// Energies taken from u at the charged nodes, with the focusing
+    /// boundaries read at the stencil nodes only, equal the energies of the
+    /// full potentials bit for bit; so do the potentials of `solve_focused`
+    /// and of the host references. One to three focusing levels, every
+    /// boundary condition and preconditioner.
+    #[test]
+    fn energies_from_the_charged_nodes_equal_the_full_potential_energies() {
+        use crate::params::BoundaryCondition;
+        let atoms = small_protein();
+        let auto = GridSpec::auto(&atoms, 0.5, 1.7, 12.0).unwrap();
+        let fine = auto.fine_length;
+        let two = GridSpec {
+            coarse_length: fine.map(|l| 2.0 * l),
+            ..auto.clone()
+        };
+        let three = GridSpec {
+            coarse_length: fine.map(|l| 9.0 * l),
+            ..auto.clone()
+        };
+        let single = GridSpec {
+            coarse_length: fine,
+            ..auto.clone()
+        };
+        // Equal lengths along y: the fine y faces lie on the coarse ones, so
+        // focusing reads coarse boundary nodes (u = g there).
+        let flush = GridSpec {
+            coarse_length: [2.0 * fine[0], fine[1], 1.5 * fine[2]],
+            ..auto.clone()
+        };
+        let salt = PbParams {
+            pdie: 2.0,
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
+        let cases = [
+            (&two, salt.clone()),
+            (&three, salt.clone()),
+            (&single, salt.clone()),
+            (&flush, salt.clone()),
+            (
+                &two,
+                PbParams {
+                    bcfl: BoundaryCondition::Sdh,
+                    preconditioner: Preconditioner::Multigrid,
+                    ..salt.clone()
+                },
+            ),
+            (
+                &two,
+                PbParams {
+                    bcfl: BoundaryCondition::MdhFast,
+                    ..salt.clone()
+                },
+            ),
+            (
+                &three,
+                PbParams {
+                    bcfl: BoundaryCondition::Zero,
+                    preconditioner: Preconditioner::Jacobi,
+                    ..PbParams::default()
+                },
+            ),
+        ];
+        let mut levels = Vec::new();
+        for (spec, params) in cases {
+            let be = CpuBackend::new();
+            let r = polar_solvation(&be, &atoms, &params, spec).unwrap();
+            let label = format!(
+                "{:?} {:?}, {} levels",
+                params.bcfl,
+                params.preconditioner,
+                r.stats_solvated.len()
+            );
+            for (medium, kt) in [(Medium::Solvated, r.solvated_kt), (Medium::Reference, r.reference_kt)] {
+                let field = solve_focused(&be, spec, &atoms, &params, medium).unwrap();
+                let full = electrostatic_energy_kt(&field, &atoms).unwrap();
+                assert_eq!(kt.to_bits(), full.to_bits(), "{label} {medium:?}: {kt} vs {full}");
+                let (grid, u) = host_focused(spec, &atoms, &params, medium);
+                assert_eq!(field.grid, grid);
+                assert!(
+                    field.potential.iter().zip(&u).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "{label} {medium:?}: potential"
+                );
+            }
+            assert_eq!(r.energy_kt.to_bits(), (r.solvated_kt - r.reference_kt).to_bits());
+            levels.push(r.stats_solvated.len());
+        }
+        assert_eq!(levels, [2, 3, 1, 2, 2, 2, 3]);
+        let coarse = &flush.levels().unwrap()[0];
+        let read = focus_nodes(&flush.levels().unwrap()[1], coarse).indices();
+        assert!(read.iter().any(|&c| {
+            let (i, j, k) = coarse.ijk(c);
+            coarse.is_boundary(i, j, k)
+        }));
+        // Without charges both energies are zero.
+        let neutral: Vec<Atom> = atoms.iter().map(|a| Atom { charge: 0.0, ..*a }).collect();
+        let r = polar_solvation(&CpuBackend::new(), &neutral, &salt, &auto).unwrap();
+        assert_eq!((r.solvated_kt, r.reference_kt, r.energy_kt), (0.0, 0.0, 0.0));
+    }
+
+    /// `add_boundary_values` adds g on the boundary and 0.0 inside, which
+    /// turns an interior −0.0 into +0.0 as the full-length form did.
+    #[test]
+    fn boundary_values_are_added_on_the_boundary_nodes_only() {
+        let grid = Grid::centered([0.0; 3], [6.0, 5.0, 7.0], [7, 6, 9]).unwrap();
+        let bidx = grid.boundary_indices();
+        let g: Vec<f64> = (0..bidx.len())
+            .map(|m| if m % 5 == 0 { -0.0 } else { m as f64 - 40.0 })
+            .collect();
+        let mut g_ext = vec![0.0; grid.len()];
+        for (&c, &v) in bidx.iter().zip(&g) {
+            g_ext[c] = v;
+        }
+        let x: Vec<f64> = (0..grid.len())
+            .map(|c| if c % 3 == 0 { -0.0 } else { 0.25 * c as f64 })
+            .collect();
+        let mut u = x.clone();
+        add_boundary_values(&grid, &mut u, &g);
+        for c in 0..grid.len() {
+            let (i, j, k) = grid.ijk(c);
+            let want = x[c] + if grid.is_boundary(i, j, k) { g_ext[c] } else { 0.0 };
+            assert_eq!(u[c].to_bits(), want.to_bits(), "node {c}");
+        }
+        let interior_zero =
+            (0..grid.len()).find(|&c| x[c].to_bits() == (-0.0f64).to_bits() && bidx.binary_search(&c).is_err());
+        assert_eq!(u[interior_zero.unwrap()].to_bits(), 0.0f64.to_bits());
     }
 
     #[test]

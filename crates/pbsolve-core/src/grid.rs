@@ -3,6 +3,8 @@
 //! backend so fields can be moved between them without reordering.
 
 use crate::error::{invalid, Result};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Grid {
@@ -156,8 +158,48 @@ impl Grid {
 
     /// Trilinear interpolation of a node field at `p`.
     pub fn interpolate(&self, field: &[f64], p: [f64; 3]) -> Option<f64> {
+        self.interpolate_with(|c| field[c], p)
+    }
+
+    /// [`interpolate`](Self::interpolate) of a field read node by node
+    /// through `field` (same arithmetic, same result).
+    pub fn interpolate_with(&self, field: impl Fn(usize) -> f64, p: [f64; 3]) -> Option<f64> {
         let (idx, w) = self.trilinear(p)?;
-        Some((0..8).map(|n| field[idx[n]] * w[n]).sum())
+        Some((0..8).map(|n| field(idx[n]) * w[n]).sum())
+    }
+
+    /// The position of node (i, j, k) in
+    /// [`boundary_indices`](Self::boundary_indices), if it is a boundary node.
+    #[inline]
+    pub fn boundary_position(&self, i: usize, j: usize, k: usize) -> Option<usize> {
+        let [nx, ny, nz] = self.dims;
+        if k == 0 || k == nz - 1 {
+            // Bottom and top planes are boundary nodes throughout.
+            let below = if k == 0 {
+                0
+            } else {
+                nx * ny + (nz - 2) * self.inner_plane_boundary()
+            };
+            return Some(below + i + nx * j);
+        }
+        let below = nx * ny + (k - 1) * self.inner_plane_boundary();
+        if j == 0 {
+            Some(below + i)
+        } else if j == ny - 1 {
+            Some(below + nx + 2 * (ny - 2) + i)
+        } else if i == 0 || i == nx - 1 {
+            Some(below + nx + 2 * (j - 1) + usize::from(i != 0))
+        } else {
+            None
+        }
+    }
+
+    /// Boundary nodes of a plane 0 < k < nz − 1: two full rows and both ends
+    /// of the rows between them.
+    #[inline]
+    fn inner_plane_boundary(&self) -> usize {
+        let [nx, ny, _] = self.dims;
+        2 * nx + 2 * (ny - 2)
     }
 
     /// Indices of all boundary nodes, in increasing order.
@@ -176,6 +218,68 @@ impl Grid {
             }
         }
         out
+    }
+}
+
+/// A set of node indices below `n`, one bit per node: built from a parallel
+/// iterator, it lists its members in increasing order and gives the position
+/// of a member in that list in constant time.
+#[derive(Clone, Debug)]
+pub struct NodeSet {
+    words: Vec<u64>,
+    /// Members in the words before each word.
+    before: Vec<usize>,
+    len: usize,
+}
+
+impl NodeSet {
+    /// The set of the indices `idx` yields (repetitions allowed).
+    ///
+    /// # Panics
+    /// If an index is `n` or larger.
+    pub fn from_indices(n: usize, idx: impl ParallelIterator<Item = usize>) -> Self {
+        let bits: Vec<AtomicU64> = (0..n.div_ceil(64)).map(|_| AtomicU64::new(0)).collect();
+        idx.for_each(|c| {
+            assert!(c < n, "node {c} outside a grid of {n} nodes");
+            bits[c / 64].fetch_or(1 << (c % 64), Ordering::Relaxed);
+        });
+        let words: Vec<u64> = bits.into_iter().map(AtomicU64::into_inner).collect();
+        let mut before = Vec::with_capacity(words.len());
+        let mut len = 0;
+        for w in &words {
+            before.push(len);
+            len += w.count_ones() as usize;
+        }
+        Self { words, before, len }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The members in increasing order.
+    pub fn indices(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.len);
+        for (k, &w) in self.words.iter().enumerate() {
+            let mut w = w;
+            while w != 0 {
+                out.push(64 * k + w.trailing_zeros() as usize);
+                w &= w - 1;
+            }
+        }
+        out
+    }
+
+    /// The position of `c` in [`indices`](Self::indices), if it is a member.
+    #[inline]
+    pub fn position(&self, c: usize) -> Option<usize> {
+        let w = *self.words.get(c / 64)?;
+        let bit = 1u64 << (c % 64);
+        (w & bit != 0).then(|| self.before[c / 64] + (w & (bit - 1)).count_ones() as usize)
     }
 }
 
@@ -199,6 +303,43 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_through_a_closure_equals_the_slice_form() {
+        let g = Grid::centered([0.3, 0.1, -0.2], [9.0, 7.0, 8.0], [10, 9, 11]).unwrap();
+        let f: Vec<f64> = (0..g.len()).map(|c| ((c * 7919) % 1000) as f64 / 37.0 - 9.0).collect();
+        for p in [[0.37, -1.11, 2.9], [-4.2, 3.3, -3.8], [4.8, 3.6, 3.8], [0.0; 3]] {
+            let a = g.interpolate(&f, p).unwrap();
+            let b = g.interpolate_with(|c| f[c], p).unwrap();
+            assert_eq!(a.to_bits(), b.to_bits(), "{p:?}");
+        }
+        assert_eq!(g.interpolate_with(|c| f[c], [9.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn node_set_lists_and_ranks_its_members() {
+        for n in [0, 1, 63, 64, 65, 1000, 4097] {
+            let picks: Vec<usize> = (0..3 * n)
+                .map(|m| (m * 2654435761) % n.max(1))
+                .filter(|_| n > 0)
+                .collect();
+            let set = NodeSet::from_indices(n, picks.par_iter().copied());
+            let mut want = picks.clone();
+            want.sort_unstable();
+            want.dedup();
+            assert_eq!(set.indices(), want, "n = {n}");
+            assert_eq!((set.len(), set.is_empty()), (want.len(), want.is_empty()));
+            for c in 0..n + 70 {
+                assert_eq!(set.position(c), want.binary_search(&c).ok(), "n = {n}, c = {c}");
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "outside a grid of 10 nodes")]
+    fn node_set_rejects_indices_outside_the_grid() {
+        NodeSet::from_indices(10, [3usize, 10].into_par_iter());
+    }
+
+    #[test]
     fn boundary_indices_are_the_boundary_nodes_in_order() {
         for dims in [[5, 5, 5], [7, 5, 6], [9, 17, 5], [33, 6, 11]] {
             let g = Grid::from_spacing([0.0; 3], [0.5; 3], dims).unwrap();
@@ -209,6 +350,14 @@ mod tests {
                 })
                 .collect();
             assert_eq!(g.boundary_indices(), brute, "{dims:?}");
+            for c in 0..g.len() {
+                let (i, j, k) = g.ijk(c);
+                assert_eq!(
+                    g.boundary_position(i, j, k),
+                    brute.binary_search(&c).ok(),
+                    "{dims:?} node {c}"
+                );
+            }
         }
     }
 }

@@ -377,4 +377,10 @@ impl<T: CpuReal> Backend for Cpu<T> {
     fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator> {
         assembly(T::fine_matrix(op).cloned())
     }
+
+    fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>> {
+        assembly((T::NAME == "f64").then_some(()))?;
+        crate::backend::check_gather(v.len(), idx)?;
+        Ok(idx.par_iter().with_min_len(CHUNK).map(|&c| v[c].to_f64()).collect())
+    }
 }

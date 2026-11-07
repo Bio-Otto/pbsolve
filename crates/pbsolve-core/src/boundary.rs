@@ -3,8 +3,10 @@
 // Memorial Institute and other APBS contributors, BSD-3-Clause.
 // See THIRD_PARTY_NOTICES.md for the full license text.
 
-//! Dirichlet boundary values. The returned vector has full grid length with
-//! values on boundary nodes and zeros in the interior ("g_ext").
+//! Dirichlet boundary values. [`analytic_boundary`] and [`focus_boundary`]
+//! return a vector of full grid length with values on boundary nodes and
+//! zeros in the interior ("g_ext"); their `*_values` forms return the same
+//! values on the boundary nodes only, in [`Grid::boundary_indices`] order.
 //!
 //! Both analytic conditions follow APBS 3.x exactly (`vpmg.c`):
 //!
@@ -23,8 +25,8 @@
 //! the degree follows from the patch size and its distance to the nearest
 //! atom, and patches near atoms are split or summed directly.
 
-use crate::error::{invalid, Result};
-use crate::grid::Grid;
+use crate::error::{PbError, Result};
+use crate::grid::{Grid, NodeSet};
 use crate::molecule::{bounding_box, dist2, Atom};
 use crate::params::BoundaryCondition;
 use rayon::prelude::*;
@@ -237,13 +239,22 @@ fn mdh_chunk(src: &DhSources, m: &BoundaryMedium, pts: &[[f64; 3]]) -> [f64; NOD
 
 pub fn analytic_boundary(grid: &Grid, atoms: &[Atom], bc: BoundaryCondition, m: &BoundaryMedium) -> Vec<f64> {
     let mut g = vec![0.0; grid.len()];
-    if bc == BoundaryCondition::MdhFast {
-        mdh_fast(grid, &DhSources::new(atoms, m), m, MDH_FAST_TOLERANCE, &mut g);
-        return g;
+    for (c, v) in grid
+        .boundary_indices()
+        .into_iter()
+        .zip(analytic_boundary_values(grid, atoms, bc, m))
+    {
+        g[c] = v;
     }
+    g
+}
+
+/// [`analytic_boundary`] on the boundary nodes only, in
+/// [`Grid::boundary_indices`] order.
+pub fn analytic_boundary_values(grid: &Grid, atoms: &[Atom], bc: BoundaryCondition, m: &BoundaryMedium) -> Vec<f64> {
     let bidx = grid.boundary_indices();
-    let values: Vec<f64> = match bc {
-        BoundaryCondition::Zero => return g,
+    match bc {
+        BoundaryCondition::Zero => vec![0.0; bidx.len()],
         BoundaryCondition::Mdh => {
             let points: Vec<[f64; 3]> = bidx
                 .iter()
@@ -254,7 +265,14 @@ pub fn analytic_boundary(grid: &Grid, atoms: &[Atom], bc: BoundaryCondition, m: 
                 .collect();
             mdh_at(&DhSources::new(atoms, m), m, &points)
         }
-        BoundaryCondition::MdhFast => unreachable!(),
+        BoundaryCondition::MdhFast => {
+            let mut values = vec![0.0; bidx.len()];
+            mdh_fast(grid, &DhSources::new(atoms, m), m, MDH_FAST_TOLERANCE, |c, v| {
+                let (i, j, k) = grid.ijk(c);
+                values[grid.boundary_position(i, j, k).expect("patches hold boundary nodes")] = v;
+            });
+            values
+        }
         BoundaryCondition::Sdh => {
             let mp = Multipoles::of(atoms);
             bidx.par_iter()
@@ -264,11 +282,7 @@ pub fn analytic_boundary(grid: &Grid, atoms: &[Atom], bc: BoundaryCondition, m: 
                 })
                 .collect()
         }
-    };
-    for (c, v) in bidx.into_iter().zip(values) {
-        g[c] = v;
     }
-    g
 }
 
 // ------------------------------------------------------------------ mdh-fast
@@ -550,30 +564,55 @@ fn evaluate(leaf: &Leaf, grid: &Grid, src: &DhSources, m: &BoundaryMedium) -> Ve
 }
 
 /// `mdh` on the boundary of `grid` by patch-wise interpolation (see the
-/// module documentation); writes the boundary nodes of `g`.
-fn mdh_fast(grid: &Grid, src: &DhSources, m: &BoundaryMedium, tol: f64, g: &mut [f64]) {
+/// module documentation); calls `write(node, value)` once per boundary node.
+fn mdh_fast(grid: &Grid, src: &DhSources, m: &BoundaryMedium, tol: f64, mut write: impl FnMut(usize, f64)) {
     let leaves: Vec<Leaf> = Patch::faces(grid.dims)
         .into_par_iter()
         .flat_map_iter(|f| plan(f, grid, src, m.kappa, tol))
         .collect();
     let values: Vec<Vec<(usize, f64)>> = leaves.par_iter().map(|l| evaluate(l, grid, src, m)).collect();
     for (c, v) in values.into_iter().flatten() {
-        g[c] = v;
+        write(c, v);
     }
 }
 
 /// Boundary of a fine grid taken from a coarse solution (focusing).
 pub fn focus_boundary(fine: &Grid, coarse: &Grid, u_coarse: &[f64]) -> Result<Vec<f64>> {
     let mut g = vec![0.0; fine.len()];
-    for c in fine.boundary_indices() {
-        let (i, j, k) = fine.ijk(c);
-        let p = fine.position(i, j, k);
-        match coarse.interpolate(u_coarse, p) {
-            Some(v) => g[c] = v,
-            None => return invalid("fine grid is not contained in the coarse grid"),
-        }
+    let values = focus_boundary_values(fine, coarse, |c| u_coarse[c])?;
+    for (c, v) in fine.boundary_indices().into_iter().zip(values) {
+        g[c] = v;
     }
     Ok(g)
+}
+
+/// [`focus_boundary`] on the boundary nodes of `fine` only, in
+/// [`Grid::boundary_indices`] order, with the coarse solution read node by
+/// node through `u_coarse`. Only the nodes of [`focus_nodes`] are read.
+pub fn focus_boundary_values(fine: &Grid, coarse: &Grid, u_coarse: impl Fn(usize) -> f64 + Sync) -> Result<Vec<f64>> {
+    fine.boundary_indices()
+        .into_par_iter()
+        .map(|c| {
+            let (i, j, k) = fine.ijk(c);
+            coarse
+                .interpolate_with(&u_coarse, fine.position(i, j, k))
+                .ok_or_else(|| PbError::InvalidInput("fine grid is not contained in the coarse grid".into()))
+        })
+        .collect()
+}
+
+/// The nodes of `coarse` that focusing the boundary of `fine` reads: the
+/// trilinear stencils of the fine boundary nodes. (Boundary nodes outside
+/// `coarse` add nothing; [`focus_boundary_values`] reports them.)
+pub fn focus_nodes(fine: &Grid, coarse: &Grid) -> NodeSet {
+    let stencils = fine.boundary_indices().into_par_iter().flat_map_iter(|c| {
+        let (i, j, k) = fine.ijk(c);
+        coarse
+            .trilinear(fine.position(i, j, k))
+            .into_iter()
+            .flat_map(|(idx, _)| idx)
+    });
+    NodeSet::from_indices(coarse.len(), stencils)
 }
 
 #[cfg(test)]
@@ -759,6 +798,72 @@ mod tests {
                 assert_eq!(n, u8::from(grid.is_boundary(i, j, k)), "{dims:?} node {c}");
             }
         }
+    }
+
+    /// The boundary-only forms return the boundary nodes of the full forms,
+    /// bit for bit, in `boundary_indices` order.
+    #[test]
+    fn boundary_values_are_the_boundary_nodes_of_the_full_vectors() {
+        let grid = Grid::centered([0.4, -0.3, 0.2], [44.0, 40.0, 48.0], [41, 33, 45]).unwrap();
+        let atoms = cluster(120, [1.0, -2.0, 0.5], 14.0, 17);
+        let bidx = grid.boundary_indices();
+        let m = medium(78.54, 2.0, 0.125);
+        for bc in [
+            BoundaryCondition::Zero,
+            BoundaryCondition::Mdh,
+            BoundaryCondition::MdhFast,
+            BoundaryCondition::Sdh,
+        ] {
+            let full = analytic_boundary(&grid, &atoms, bc, &m);
+            let values = analytic_boundary_values(&grid, &atoms, bc, &m);
+            assert_eq!(values.len(), bidx.len());
+            for (&c, v) in bidx.iter().zip(&values) {
+                assert_eq!(full[c].to_bits(), v.to_bits(), "{bc:?} node {c}");
+            }
+            let interior = (0..grid.len()).filter(|c| bidx.binary_search(c).is_err());
+            assert!(interior.into_iter().all(|c| full[c].to_bits() == 0), "{bc:?}");
+            assert!(bc == BoundaryCondition::Zero || values.iter().any(|&v| v != 0.0));
+        }
+        // Focusing a finer, shifted grid from a coarse field.
+        let fine = Grid::centered([1.1, -0.7, 0.9], [20.0, 17.0, 22.0], [33, 29, 37]).unwrap();
+        let u: Vec<f64> = (0..grid.len())
+            .map(|c| ((c * 7919) % 1013) as f64 / 7.0 - 70.0)
+            .collect();
+        let full = focus_boundary(&fine, &grid, &u).unwrap();
+        let values = focus_boundary_values(&fine, &grid, |c| u[c]).unwrap();
+        for (&c, v) in fine.boundary_indices().iter().zip(&values) {
+            assert_eq!(full[c].to_bits(), v.to_bits(), "focus node {c}");
+        }
+    }
+
+    /// `focus_nodes` is exactly the set of coarse nodes focusing reads.
+    #[test]
+    fn focus_nodes_are_the_nodes_focusing_reads() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let coarse = Grid::centered([0.0; 3], [40.0, 36.0, 44.0], [41, 37, 45]).unwrap();
+        for (center, lengths, dims) in [
+            ([1.1, -0.7, 0.9], [20.0, 17.0, 22.0], [33, 29, 37]),
+            ([0.0; 3], [40.0, 36.0, 44.0], [41, 37, 45]),
+            ([-3.2, 2.1, 0.4], [9.0, 11.0, 7.0], [9, 13, 7]),
+        ] {
+            let fine = Grid::centered(center, lengths, dims).unwrap();
+            let read: Vec<AtomicBool> = (0..coarse.len()).map(|_| AtomicBool::new(false)).collect();
+            focus_boundary_values(&fine, &coarse, |c| {
+                read[c].store(true, Ordering::Relaxed);
+                1.0
+            })
+            .unwrap();
+            let want: Vec<usize> = (0..coarse.len()).filter(|&c| read[c].load(Ordering::Relaxed)).collect();
+            assert_eq!(focus_nodes(&fine, &coarse).indices(), want, "{dims:?}");
+        }
+        // A fine grid sticking out of the coarse one.
+        let outside = Grid::centered([15.0, 0.0, 0.0], [20.0, 17.0, 22.0], [33, 29, 37]).unwrap();
+        let err = focus_boundary_values(&outside, &coarse, |_| 0.0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not contained"), "{err}");
+        let u = vec![0.0; coarse.len()];
+        assert_eq!(focus_boundary(&outside, &coarse, &u).unwrap_err().to_string(), err);
     }
 
     #[test]

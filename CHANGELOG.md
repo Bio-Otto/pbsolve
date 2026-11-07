@@ -69,6 +69,11 @@
   `batch::POOL_SLACK_BYTES` and `multigrid::coarse_dims` in `pbsolve-core`;
   `CudaBackend::memory_info`, `pool_peak`, `reset_pool_peak` and `PoolPeak`
   in `pbsolve-cuda`; `Solver.batch_workers(grid, workers=None)` in Python.
+- Reading values from the backend: `Backend::gather` (the values at a list
+  of nodes; the default downloads the vector) and `backend::check_gather`,
+  `grid::NodeSet`, `Grid::interpolate_with`, `Grid::boundary_position`, and
+  `boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes}`
+  (boundary values on the boundary nodes only, in `boundary_indices` order).
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
@@ -105,6 +110,19 @@
   A calculation is 1.23–1.32× faster on a shared RTX 2080 SUPER (5DK3:
   10.3 → 8.4 s). The CPU runs the same pipeline through the CPU backend and
   is unchanged in speed.
+
+- `polar_solvation` (and everything built on it: batches, MM-PBSA) no
+  longer copies potentials from the backend. Each focusing level reads the
+  coarser solution only at the nodes its boundary interpolates, and the
+  energy reads the finest solution only at the charged nodes, with the same
+  arithmetic as before. Results are identical bit for bit. A CUDA
+  calculation is 1.06–1.10× faster on a shared RTX 2080 SUPER (5DK3:
+  8.9 → 8.2 s) and its process needs 0.5 GB less host memory; the CPU gains
+  1–2 %. Boundary values are kept on the boundary nodes only.
+  `timings["energy"]` now includes reading the potential at the charges, and
+  `timings["solve"]` no longer includes a download (it still includes the
+  release of the solver's GPU memory). `Solver.potential` and `solve_maps`
+  still return the whole finest potential.
 
 ### Fixed
 

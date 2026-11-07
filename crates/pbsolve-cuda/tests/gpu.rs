@@ -783,3 +783,94 @@ fn device_operator_of_random_maps_equals_the_host() {
     host.apply(&system_like(grid.len()), &mut yh);
     assert_eq!(bits(&yh), bits(&gpu.download(&y).unwrap()));
 }
+
+/// `gather` reads the requested values of a device vector exactly, in the
+/// requested order (repetitions, any order, none), like the CPU backend, and
+/// refuses indices outside the vector.
+#[test]
+fn device_gather_reads_the_requested_values() {
+    if !gpu_present("device_gather_reads_the_requested_values") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let cpu = CpuBackend::new();
+    let mut rnd = rng(31);
+    let n = 100_003;
+    let mut host: Vec<f64> = (0..n).map(|_| 1e3 * (rnd() - 0.5)).collect();
+    host[7] = -0.0;
+    host[8] = f64::MIN_POSITIVE / 4.0; // subnormal
+    let v = gpu.upload(&host).unwrap();
+    let mut idx: Vec<usize> = (0..40_000).map(|_| (rnd() * n as f64) as usize).collect();
+    idx.extend([0, n - 1, 7, 8, 7, n - 1]);
+    let want: Vec<u64> = idx.iter().map(|&c| host[c].to_bits()).collect();
+    assert_eq!(bits(&gpu.gather(&v, &idx).unwrap()), want);
+    assert_eq!(bits(&cpu.gather(&host, &idx).unwrap()), want);
+    assert!(gpu.gather(&v, &[]).unwrap().is_empty());
+    for e in [
+        gpu.gather(&v, &[3, n]).err().unwrap(),
+        cpu.gather(&host, &[3, n]).err().unwrap(),
+    ] {
+        assert!(
+            e.to_string().contains(&format!("index {n} outside a vector of {n}")),
+            "{e}"
+        );
+    }
+    let single = gpu.single().unwrap();
+    let v32 = single.zeros(10).unwrap();
+    assert!(single.gather(&v32, &[1]).unwrap_err().to_string().contains("f64"));
+}
+
+/// On the GPU, energies taken from u at the charged nodes, with the focusing
+/// boundaries read at the stencil nodes only, equal the energies of the full
+/// potentials bit for bit (one to three focusing levels, a focusing level
+/// that reads coarse boundary nodes, both multigrid precisions).
+#[test]
+fn device_energies_from_the_charged_nodes_equal_the_full_potential_energies() {
+    use pbsolve_core::pb::{electrostatic_energy_kt, polar_solvation, solve_focused, Medium};
+    use pbsolve_core::GridSpec;
+    if !gpu_present("device_energies_from_the_charged_nodes_equal_the_full_potential_energies") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let atoms = cluster(150, 23);
+    let fine = [24.0, 22.0, 26.0];
+    let spec = |coarse: [f64; 3]| GridSpec {
+        center: [0.1, -0.2, 0.3],
+        dims: [49, 45, 53],
+        coarse_length: coarse,
+        fine_length: fine,
+    };
+    let params = PbParams {
+        pdie: 2.0,
+        ..PbParams::default()
+    }
+    .with_salt(0.15, 2.0);
+    let cases = [
+        (spec(fine), params.clone()),
+        (spec(fine.map(|l| 2.0 * l)), params.clone()),
+        (spec([2.0 * fine[0], fine[1], 1.5 * fine[2]]), params.clone()),
+        (
+            spec(fine.map(|l| 9.0 * l)),
+            PbParams {
+                preconditioner: Preconditioner::Multigrid,
+                ..params.clone()
+            },
+        ),
+    ];
+    let mut levels = Vec::new();
+    for (spec, params) in cases {
+        let r = polar_solvation(&gpu, &atoms, &params, &spec).unwrap();
+        for (medium, kt) in [(Medium::Solvated, r.solvated_kt), (Medium::Reference, r.reference_kt)] {
+            let field = solve_focused(&gpu, &spec, &atoms, &params, medium).unwrap();
+            let full = electrostatic_energy_kt(&field, &atoms).unwrap();
+            assert_eq!(
+                kt.to_bits(),
+                full.to_bits(),
+                "{:?} {medium:?}: {kt} vs {full}",
+                spec.coarse_length
+            );
+        }
+        levels.push(r.stats_solvated.len());
+    }
+    assert_eq!(levels, [1, 2, 2, 3]);
+}

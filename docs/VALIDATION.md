@@ -56,6 +56,7 @@ should update the status table below.
 | Multigrid setup on the GPU (unreleased) | Galerkin operators, 1/diag, Gershgorin bounds and f32 copies built on the device: bit-identical to the host hierarchy (4 operators incl. semi-coarsening, all levels) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA setup 2.2–3.1×, calculation 1.2–1.3× faster on a shared GPU; see *Multigrid setup on the GPU* |
 | Maps and right-hand side on the GPU (unreleased) | Dielectric and ion maps, operator, node charges and right-hand side assembled through the backend: bit-identical to the host (sphere marking incl. constructed boundary and summation-order cases, all surfaces and media, random maps, whole solves) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; CUDA calculation 1.23–1.32× faster on a shared GPU, CPU unchanged; see *Maps and right-hand side on the GPU* |
 | CUDA workers from free memory (unreleased) | The device memory of a calculation is counted exactly (estimate = memory-pool peak to the byte on every measured grid up to 19.4 M nodes, 3 preconditioners); batches run as many CUDA workers as fit in the free memory (at most 3 by default): 3 × 5DK3 now runs on 2 workers instead of failing with out-of-memory on an 8 GB card; 1YCR and 1TII keep 3 workers; every result bit-identical to the previous commit (CPU and CUDA); see *CUDA workers from the free device memory* |
+| Potentials read where needed (unreleased) | The solution stays on the backend: focusing reads it at the stencil nodes of the next level's boundary, the energy at the charged nodes; energies and potentials bit-identical to the full-potential path and to a host reference of the old pipeline (7 core cases, 4 GPU cases) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA calculation 1.06–1.10× faster on a shared GPU, 0.5 GB less host memory for 5DK3; see *Potentials read only where they are needed* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -832,6 +833,104 @@ by `nvidia-smi` above the baseline):
   * the binding ignoring device memory.
 * The 13 fingerprint cases are bit-identical to the previous commit on CPU
   and CUDA, and single-calculation times are unchanged.
+
+## Potentials read only where they are needed
+
+**Problem.** After every solve the pipeline downloaded the whole solution
+(155 MB per 5DK3 grid), added the boundary values on the host, interpolated
+the next level's boundary from that array and summed the energy over a
+charge array of full grid length. On CUDA (5DK3, four solves) this took
+0.68 s of an 8.8 s calculation: the downloads 0.34 s, adding the boundary
+values 0.05 s, the two focusing boundaries 0.10 s and the energies 0.19 s.
+About 0.19 s of the download time was in fact a wait for the CUDA memory
+pool, which returns the solver's freed buffers to the driver at the next
+synchronisation; that wait remains (see below).
+
+**Change.**
+* `Backend::gather(v, idx)` returns the values of a backend vector at a
+  list of nodes: on CUDA the kernel `pb_gather` and a download of just those
+  values, on the CPU a copy. The default implementation downloads `v`.
+* The solution of a level stays on the backend (`LevelSolution`: x and the
+  boundary values g). u = x + g is computed as before (x + g on boundary
+  nodes, x + 0.0 inside), but only at the nodes that are needed:
+  * focusing: `boundary::focus_nodes` collects the coarse nodes of the
+    trilinear stencils of the fine boundary nodes in a bitmap
+    (`grid::NodeSet`, which also gives a node's position in the gathered
+    list), and `focus_boundary_values` interpolates with the arithmetic of
+    `focus_boundary` (`Grid::interpolate_with`). For 5DK3 that is 428 556 of
+    19.4 M coarse nodes;
+  * energy: ½ Σ q u over the charged nodes of `spread_charges_sparse`, in
+    increasing order (157 656 nodes for 5DK3). The full-length sum adds the
+    same products in the same order plus exact zeros, which leave a sum
+    with any nonzero term unchanged, so the energy is identical. Only a
+    total of exactly zero (no charges) could differ in its sign.
+* Boundary values are kept on the boundary nodes only
+  (`analytic_boundary_values`, `focus_boundary_values`,
+  `Grid::boundary_position`); `analytic_boundary` and `focus_boundary` keep
+  their full-length results and are built from these.
+* `solve_focused` (`Solver.potential`, maps) and `solve_with_maps` still
+  download the finest potential; their coarser levels read only the
+  focusing nodes.
+* Timings: the energy stage now contains reading u at the charges. The
+  solve stage no longer contains a download, but it ends with a
+  synchronisation, so the memory pool's release of the solver's buffers
+  (~47 ms per 5DK3 solve) still counts there. Freeing host memory belongs to
+  no stage, as before.
+
+**Checks.**
+* `energies_from_the_charged_nodes_equal_the_full_potential_energies`
+  (core, CPU): 7 cases with 1, 2 and 3 focusing levels, `mdh`, `sdh`,
+  `mdh-fast` and `zero`, all three preconditioners, and a level whose y faces
+  lie on the coarse level's faces (focusing then reads coarse boundary
+  nodes). `polar_solvation`'s energies equal `solve_focused` +
+  `electrostatic_energy_kt` bit for bit, and `solve_focused`'s potential
+  equals a host reference of the old pipeline (full potentials,
+  `analytic_boundary`, `focus_boundary`, host maps and charges,
+  `solve_with_maps`) bit for bit. An uncharged molecule gives 0. Ignoring g
+  at gathered boundary nodes fails the test (the flush case catches it).
+* `boundary_values_are_the_boundary_nodes_of_the_full_vectors` (all four
+  boundary conditions and focusing), `focus_nodes_are_the_nodes_focusing_reads`
+  (also the error for a fine grid outside the coarse one),
+  `boundary_values_are_added_on_the_boundary_nodes_only` (an interior −0.0
+  still becomes +0.0), `node_set_lists_and_ranks_its_members`,
+  `interpolation_through_a_closure_equals_the_slice_form`, and
+  `boundary_position` against `boundary_indices`.
+* GPU: `device_gather_reads_the_requested_values` (repetitions, any order,
+  −0.0 and a subnormal, an empty list, index errors, the f32 twin refuses) and
+  `device_energies_from_the_charged_nodes_equal_the_full_potential_energies`
+  (1–3 levels, the flush level, both multigrid precisions). The memory test
+  still finds the pool's peak equal to `solve_device_bytes` to the byte.
+* The 13 fingerprint cases (energies, iterations, residuals, maps,
+  potentials, MM-PBSA species) are bit-identical to the previous commit on
+  CPU and CUDA; the `cuda-12` build passes the GPU tests with NVRTC 12.9.
+* The 1YCR APBS comparison on CUDA passes with the same energies as before
+  (ΔΔG 422.8939 kcal/mol). The Born table is unchanged.
+
+**Time per ΔG_polar** (s; A/B: the previous and the new build run
+alternately, median of 6 (1YCR, CUDA), 3 (CPU 1YCR, CUDA 1TII and 5DK3) or 1
+calculation per run, two runs each. The RTX 2080 SUPER was shared with
+GROMACS at 92–93 % utilisation; the 18 CPU threads had a load of 12–15 from
+other jobs. Peak RSS of the Python process.)
+
+| System | Platform | Previous | New | Energy stage | Peak RSS (MiB) |
+|---|---|---|---|---|---|
+| 1YCR | CUDA | 0.629 / 0.616 | 0.577 / 0.583 (1.07×) | 0.004 → 0.003 | 315 → 272 |
+| 1TII | CUDA | 3.228 / 3.134 | 2.940 / 2.966 (1.08×) | 0.070 → 0.003 | 514 → 332 |
+| 5DK3 | CUDA | 8.928 / 8.839 | 8.177 / 8.321 (1.08×) | 0.189 → 0.005 | 936 → 430 |
+| 1YCR | CPU | 2.345 / 2.317 | 2.321 / 2.284 (1.01×) | 0.005 → 0.000 | 307 → 286 |
+| 1TII | CPU | 16.38 / 16.38 | 16.13 / 16.13 (1.02×) | 0.06 → 0.002 | 1 196 → 1 057 |
+| 5DK3 | CPU | 39.89 / 40.05 | 39.54 / 39.53 (1.01×) | 0.19 → 0.01 | 3 136 → 2 741 |
+
+The 5DK3 CPU row was measured with an intermediate build that freed the
+finest solution inside the energy stage; it is otherwise the same code.
+On CUDA the 5DK3 solve stage went from 3.44 / 3.39 to 3.28 / 3.25 s and
+assembly from 0.16 to 0.11 s (no 155 MB host buffers to fault in).
+
+The largest stages of a CUDA calculation are now the `mdh` boundary (host,
+3.4 s for 5DK3; 0.55 s with `mdh-fast`) and the CG solve. The memory pool
+returns each level's buffers to the driver at the next synchronisation
+(release threshold 0) and allocates them again for the next level; keeping
+them reserved during a calculation is a candidate to measure.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

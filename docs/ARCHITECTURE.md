@@ -93,8 +93,8 @@ A backend provides:
   `scatter` (sparse charges and boundary values into a zero vector),
   `assemble_operator` (κ̄²V and the inverse diagonal from the maps),
   `source_rhs` (b = 4π l_B q − A g on interior nodes), `operator_to_host`
-  (grids too small to coarsen), and `upload_owned`/`synchronize` with
-  defaults.
+  (grids too small to coarsen), `gather` (the values at a list of nodes),
+  and `upload_owned`/`synchronize`/`gather` with defaults.
 
 The kernels are written once, generic over `Real` (`f64`, `f32`; `real.rs`).
 CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`; the setup and
@@ -114,8 +114,13 @@ calls `mark_maps`; the CPU backend runs `surface::mark_map`, the CUDA backend
 marks one sphere per warp with the host's node test. Charges are spread on
 the host (`spread_charges_sparse`, the same sums as `spread_charges`) and
 scattered on the device together with the boundary values; `pcg_on` then
-solves without any host copy of the operator. Only the surface itself (SAS
-points), the boundary values and the final potential stay on the host.
+solves without any host copy of the operator. The solution stays on the
+backend: the next focusing level reads it with `gather` at the trilinear
+stencils of its boundary nodes (`boundary::focus_nodes`), and the energy at
+the charged nodes, with the same arithmetic as the full potential, so the
+results are bit-identical. Only `solve_focused` (potential maps) downloads
+the finest potential. The surface itself (SAS points) and the boundary
+values are computed on the host.
 
 ## Concurrent calculations (trajectories, MM-PBSA)
 

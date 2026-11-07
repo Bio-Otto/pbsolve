@@ -710,3 +710,10 @@ extern "C" __global__ void pb_scatter(const long long m, const unsigned int* __r
 {
     GRID_STRIDE_LOOP(c, m) { out[idx[c]] = values[c]; }
 }
+
+// out[m] = x[idx[m]]
+extern "C" __global__ void pb_gather(const long long m, const unsigned int* __restrict__ idx,
+                                     const double* __restrict__ x, double* __restrict__ out)
+{
+    GRID_STRIDE_LOOP(c, m) { out[c] = x[idx[c]]; }
+}

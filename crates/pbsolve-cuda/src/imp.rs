@@ -4,7 +4,7 @@ use cudarc::driver::{
     ValidAsZeroBits,
 };
 use cudarc::nvrtc::Ptx;
-use pbsolve_core::backend::check_scatter;
+use pbsolve_core::backend::{check_gather, check_scatter};
 use pbsolve_core::multigrid::{LevelOp, Stencil27, Transfer};
 use pbsolve_core::operator::StencilOperator;
 use pbsolve_core::real::{convert, zeros_touched, Real};
@@ -169,6 +169,7 @@ struct Setup {
     operator7: CudaFunction,
     source_rhs: CudaFunction,
     scatter: CudaFunction,
+    gather: CudaFunction,
 }
 
 impl Setup {
@@ -186,6 +187,7 @@ impl Setup {
             operator7: f("pb_operator7")?,
             source_rhs: f("pb_source_rhs")?,
             scatter: f("pb_scatter")?,
+            gather: f("pb_gather")?,
         })
     }
 }
@@ -923,6 +925,30 @@ impl<T: CudaReal> Backend for Dev<T> {
             read(&op.eps_z)?,
             read(&op.kvol)?,
         ))
+    }
+
+    fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>> {
+        let k = self.assembly()?;
+        check_gather(v.len(), idx)?;
+        if v.len() > u32::MAX as usize {
+            return Err(PbError::Backend(format!(
+                "gather: {} values exceed 32-bit indices",
+                v.len()
+            )));
+        }
+        if idx.is_empty() {
+            return Ok(Vec::new());
+        }
+        let idx32: Vec<u32> = idx.iter().map(|&c| c as u32).collect();
+        let idx_dev = self.stream().clone_htod(&idx32).map_err(cuda_err("upload"))?;
+        let mut out = self.uninit(idx.len())?;
+        let m = idx.len() as i64;
+        let mut b = self.stream().launch_builder(&k.gather);
+        b.arg(&m).arg(&idx_dev).arg(v).arg(&mut out);
+        // SAFETY: argument list matches pb_gather; every index is below v.len()
+        // (checked) and the kernel writes all m values of `out`.
+        unsafe { b.launch(Self::grid_for(idx.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_gather"))?;
+        self.download(&out)
     }
 
     fn synchronize(&self) -> Result<()> {
