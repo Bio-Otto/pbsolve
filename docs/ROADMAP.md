@@ -116,6 +116,11 @@ batch; identical energies to single-frame solves.
   faster kernels (fused updates, 4.4).
 * One batched kernel launch over many small grids was not needed for this
   workload. It remains an option for small ligand-only grids.
+* CUDA workers from the free device memory (done): the device memory of a
+  calculation is counted exactly (`solve_device_bytes`, equal to the memory
+  pool's peak), and a batch runs at most as many workers as fit. Three 5DK3
+  calculations now run on two workers instead of running out of memory on an
+  8 GB card. On the shared GPU, two 5DK3 workers were no faster than one.
 
 **4.4 Mixed precision.** FP32 multigrid cycles inside an FP64 outer CG or
 iterative refinement, the arrangement analysed for multigrid by McCormick,
@@ -160,9 +165,6 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   operator is no longer built or uploaded. A CUDA calculation is 1.23–1.32×
   faster (5DK3 10.3 → 8.4 s on a shared GPU).
 * *Next:*
-  * choose the number of concurrent CUDA workers from the free device
-    memory. Three concurrent 5DK3 calculations need about 7 GB and can run
-    out of memory on an 8 GB card;
   * on CUDA the `mdh` boundary (host, 3.5 s for 5DK3) and the CG solve are
     now the largest stages; the full potential is downloaded after every
     solve (0.3 s per 5DK3 calculation) although the energy and the next

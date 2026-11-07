@@ -1,6 +1,6 @@
 use crate::nvrtc::{self, CodeType, Target};
 use cudarc::driver::{
-    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg,
+    sys, CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg,
     ValidAsZeroBits,
 };
 use cudarc::nvrtc::Ptx;
@@ -133,7 +133,7 @@ impl CudaReal for f32 {
 
 /// Context, stream and compiled module, shared by a backend and its twin.
 struct Shared {
-    _ctx: Arc<CudaContext>,
+    ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     module: Arc<CudaModule>,
     name: String,
@@ -279,12 +279,81 @@ impl CudaBackend {
             ))
         })?;
         Dev::from_shared(Arc::new(Shared {
-            _ctx: ctx,
+            ctx,
             stream,
             module,
             name: format!("{dev} (cc {major}.{minor}, device {ordinal})"),
             target,
         }))
+    }
+}
+
+/// The most memory this process held in the device's memory pool at once
+/// since the last [`CudaBackend::reset_pool_peak`] (bytes, all backends of
+/// the process together).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoolPeak {
+    /// Allocated buffers.
+    pub used: u64,
+    /// Device memory the pool had reserved for them (at least `used`).
+    pub reserved: u64,
+}
+
+impl CudaBackend {
+    /// Free and total memory of the device in bytes (`cuMemGetInfo`): memory
+    /// of other processes and of this one counts as taken.
+    pub fn memory_info(&self) -> Result<(u64, u64)> {
+        let (free, total) = self.shared.ctx.mem_get_info().map_err(cuda_err("memory query"))?;
+        Ok((free as u64, total as u64))
+    }
+
+    /// The memory pool that device buffers are allocated from.
+    fn mem_pool(&self) -> Result<sys::CUmemoryPool> {
+        let ctx = &self.shared.ctx;
+        ctx.bind_to_thread().map_err(cuda_err("memory pool query"))?;
+        let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+        // SAFETY: `pool` is a valid out-pointer and the device belongs to the live context.
+        unsafe { sys::cuDeviceGetMemPool(&mut pool, ctx.cu_device()) }
+            .result()
+            .map_err(cuda_err("memory pool query"))?;
+        Ok(pool)
+    }
+
+    fn pool_attribute(pool: sys::CUmemoryPool, attr: sys::CUmemPool_attribute) -> Result<u64> {
+        let mut v: u64 = 0;
+        // SAFETY: both high-watermark attributes are cuuint64_t values.
+        unsafe { sys::cuMemPoolGetAttribute(pool, attr, (&mut v as *mut u64).cast()) }
+            .result()
+            .map_err(cuda_err("memory pool query"))?;
+        Ok(v)
+    }
+
+    /// Peak memory of the device's pool since the last reset (the stream is
+    /// synchronised first, so queued work is included).
+    pub fn pool_peak(&self) -> Result<PoolPeak> {
+        self.stream().synchronize().map_err(cuda_err("synchronisation"))?;
+        let pool = self.mem_pool()?;
+        Ok(PoolPeak {
+            used: Self::pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH)?,
+            reserved: Self::pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH)?,
+        })
+    }
+
+    /// Restarts [`pool_peak`](Self::pool_peak) from the current usage.
+    pub fn reset_pool_peak(&self) -> Result<()> {
+        self.stream().synchronize().map_err(cuda_err("synchronisation"))?;
+        let pool = self.mem_pool()?;
+        for attr in [
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+        ] {
+            let mut zero: u64 = 0;
+            // SAFETY: the high watermarks may only be reset to zero (cuuint64_t).
+            unsafe { sys::cuMemPoolSetAttribute(pool, attr, (&mut zero as *mut u64).cast()) }
+                .result()
+                .map_err(cuda_err("memory pool reset"))?;
+        }
+        Ok(())
     }
 }
 

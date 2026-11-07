@@ -63,6 +63,12 @@
   `StencilOperator::new`, `spread_charges` and `assemble_rhs` stay the host
   references. `Levels::build` and `MultigridPreconditioner::from_levels` take
   the fine grid size and inverse diagonal instead of a host operator.
+- Device memory planning: `solver::solve_device_bytes` (the backend memory a
+  calculation holds at its peak, equal to the CUDA memory pool's peak to the
+  byte), `batch::worker_device_bytes`, `batch::device_workers`,
+  `batch::POOL_SLACK_BYTES` and `multigrid::coarse_dims` in `pbsolve-core`;
+  `CudaBackend::memory_info`, `pool_peak`, `reset_pool_peak` and `PoolPeak`
+  in `pbsolve-cuda`; `Solver.batch_workers(grid, workers=None)` in Python.
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
@@ -102,6 +108,12 @@
 
 ### Fixed
 
+- Batches on CUDA (`polar_solvation_many`, `polar_solvation_batch`,
+  `pbsa_solvation_frames`, `pbsolve mmpbsa`) ran three calculations at once
+  whatever their size, and large grids ran out of GPU memory (three 5DK3
+  calculations on an 8 GB card). They now run at most as many workers as fit
+  in the free device memory, also when `workers` is given; small grids keep
+  three. Results do not depend on the number of workers, bit for bit.
 - The CUDA platform failed with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` when the
   NVRTC in use was newer than the driver. It also picked a system toolkit's
   NVRTC over the environment's, because cudarc tried the unversioned

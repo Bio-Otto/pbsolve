@@ -121,7 +121,8 @@ print(res.energy, "kcal/mol on", res.platform, res.iterations)
 frame = pbsolve.pbsa_solvation_frame(solver, coords, charges, radii, ligand_atoms=lig_idx)
 print(frame.delta_polar, frame.delta_nonpolar)
 
-# ... or for many frames, solved concurrently (default: 2 workers on the CPU, 3 on CUDA)
+# ... or for many frames, solved concurrently (default: 2 workers on the CPU, 3 on CUDA,
+# fewer on CUDA if they do not fit in the free GPU memory: see solver.batch_workers(grid))
 frames = pbsolve.pbsa_solvation_frames(solver, frame_coords, charges, radii, ligand_atoms=lig_idx)
 results = solver.polar_solvation_many([(x, charges, radii) for x in frame_coords], workers=3)
 print(results[0].timings)   # seconds per stage: maps, boundary, assembly, setup, solve, energy

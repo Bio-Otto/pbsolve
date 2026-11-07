@@ -4,7 +4,7 @@
 
 use numpy::ndarray::ArrayView2;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
-use pbsolve_core::batch::{polar_solvation_batch as core_batch, Job};
+use pbsolve_core::batch::{device_workers, polar_solvation_batch as core_batch, worker_device_bytes, Job};
 use pbsolve_core::charge::spread_charges;
 use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
 use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
@@ -94,6 +94,15 @@ impl Engine {
 
     fn device_name(&self) -> String {
         dispatch!(self, be => be.device_name())
+    }
+
+    /// Free and total device memory in bytes; `None` on the CPU.
+    fn device_memory(&self) -> Result<Option<(u64, u64)>, PbError> {
+        match self {
+            Engine::Cpu(_) => Ok(None),
+            #[cfg(any(feature = "cuda-12", feature = "cuda-13"))]
+            Engine::Cuda(be) => be.memory_info().map(Some),
+        }
     }
 
     fn polar(&self, atoms: &[Atom], params: &PbParams, spec: &GridSpec) -> Result<PolarSolvation, PbError> {
@@ -395,7 +404,8 @@ struct PySolver {
 }
 
 /// Default number of concurrent batch workers: enough to overlap host work
-/// with solver work (measured in docs/VALIDATION.md, *Batched solves*).
+/// with solver work (measured in docs/VALIDATION.md, *Batched solves*). On
+/// CUDA, fewer run where they do not fit in the free device memory.
 fn default_workers(platform: &str) -> usize {
     match platform {
         "CUDA" => 3,
@@ -420,7 +430,7 @@ impl PySolver {
         specs: &[GridSpec],
         workers: usize,
     ) -> Result<Vec<PolarSolvation>, PbError> {
-        let workers = workers.clamp(1, systems.len().max(1));
+        let workers = self.fitting_workers(specs, workers)?.min(systems.len().max(1));
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
         while pool.len() + 1 < workers {
             let extra = Engine::create(self.engine.platform(), self.device)
@@ -462,6 +472,17 @@ impl PySolver {
             .enumerate()
             .map(|(i, r)| r.map_err(|e| job_error(e, i)))
             .collect()
+    }
+
+    /// `workers` (at least 1), on CUDA limited to the calculations on grids
+    /// `specs` that fit in the free device memory at once.
+    fn fitting_workers(&self, specs: &[GridSpec], workers: usize) -> Result<usize, PbError> {
+        let workers = workers.max(1);
+        let Some((free, total)) = self.engine.device_memory()? else {
+            return Ok(workers);
+        };
+        let per_worker = worker_device_bytes(specs.iter().map(|s| s.dims), self.params.preconditioner);
+        Ok(device_workers(workers, per_worker, free, total))
     }
 
     /// Grid of every system: one shared `GridSpec`, one per system, or automatic.
@@ -653,9 +674,10 @@ impl PySolver {
     }
 
     /// ΔG_polar (kcal/mol) for every frame of an (F, N, 3) trajectory.
-    /// With `grid=None` a grid is built per frame. `workers` frames are solved
-    /// concurrently (default: 2 on the CPU, 3 on CUDA); the energies do not
-    /// depend on it.
+    /// With `grid=None` a grid is built per frame. Up to `workers` frames are
+    /// solved concurrently (default: 2 on the CPU, 3 on CUDA; on CUDA no more
+    /// than fit in the free GPU memory, see `batch_workers`); the energies do
+    /// not depend on it.
     #[pyo3(signature = (frames, charges, radii, grid = None, workers = None))]
     fn polar_solvation_batch<'py>(
         &self,
@@ -683,7 +705,9 @@ impl PySolver {
         Ok(PyArray1::from_vec(py, out.iter().map(|r| r.energy_kcal).collect()))
     }
 
-    /// ΔG_polar for several systems, `workers` of them solved concurrently.
+    /// ΔG_polar for several systems, up to `workers` of them solved
+    /// concurrently (default: 2 on the CPU, 3 on CUDA; on CUDA no more than
+    /// fit in the free GPU memory, see `batch_workers`).
     ///
     /// `systems` is a sequence of `(coords, charges, radii)`; `grid` is None
     /// (automatic grid per system), one GridSpec for all, or one per system.
@@ -712,6 +736,26 @@ impl PySolver {
         let out = py.detach(|| self.run_batch(&atoms, &specs, workers)).map_err(to_py)?;
         let platform = self.engine.platform();
         Ok(out.into_iter().map(|r| PyPolarResult::from_core(r, platform)).collect())
+    }
+
+    /// Number of calculations `polar_solvation_many` and
+    /// `polar_solvation_batch` run at once on `grid` (a GridSpec, or one per
+    /// system) for a batch of at least that many systems: `workers` (default
+    /// 2 on the CPU, 3 on CUDA), on CUDA limited to the calculations that fit
+    /// in the GPU memory free now, while 1/20 of the device stays free. At
+    /// least 1.
+    #[pyo3(signature = (grid, workers = None))]
+    fn batch_workers(&self, grid: Bound<'_, PyAny>, workers: Option<usize>) -> PyResult<usize> {
+        let specs: Vec<GridSpec> = if let Ok(one) = grid.extract::<PyGridSpec>() {
+            vec![one.inner]
+        } else {
+            let many: Vec<PyGridSpec> = grid
+                .extract()
+                .map_err(|_| PyValueError::new_err("grid must be a GridSpec or a sequence of GridSpec"))?;
+            many.into_iter().map(|g| g.inner).collect()
+        };
+        let workers = self.workers_for(workers)?;
+        self.fitting_workers(&specs, workers).map_err(to_py)
     }
 
     /// Electrostatic potential (kT/e) on the finest grid as an (nx, ny, nz)

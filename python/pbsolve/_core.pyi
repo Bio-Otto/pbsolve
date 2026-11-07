@@ -110,6 +110,11 @@ class Solver:
         grid: Optional[GridSpec | Sequence[GridSpec]] = None,
         workers: Optional[int] = None,
     ) -> list[PolarResult]: ...
+    def batch_workers(
+        self,
+        grid: GridSpec | Sequence[GridSpec],
+        workers: Optional[int] = None,
+    ) -> int: ...
     def potential(
         self,
         coords: npt.ArrayLike,

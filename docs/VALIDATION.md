@@ -55,6 +55,7 @@ should update the status table below.
 | `bcfl="mdh-fast"` (unreleased, opt-in) | Interpolated `mdh`: ΔG_polar within 1.1e-13 of `mdh` (Born, 1YCR ×4, 1HPV, 1TII, 5DK3; CPU and CUDA), equal iterations; boundary 5DK3 3.39 → 0.55 s; 1YCR APBS comparison prints identical energies; see *mdh-fast* |
 | Multigrid setup on the GPU (unreleased) | Galerkin operators, 1/diag, Gershgorin bounds and f32 copies built on the device: bit-identical to the host hierarchy (4 operators incl. semi-coarsening, all levels) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA setup 2.2–3.1×, calculation 1.2–1.3× faster on a shared GPU; see *Multigrid setup on the GPU* |
 | Maps and right-hand side on the GPU (unreleased) | Dielectric and ion maps, operator, node charges and right-hand side assembled through the backend: bit-identical to the host (sphere marking incl. constructed boundary and summation-order cases, all surfaces and media, random maps, whole solves) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; CUDA calculation 1.23–1.32× faster on a shared GPU, CPU unchanged; see *Maps and right-hand side on the GPU* |
+| CUDA workers from free memory (unreleased) | The device memory of a calculation is counted exactly (estimate = memory-pool peak to the byte on every measured grid up to 19.4 M nodes, 3 preconditioners); batches run as many CUDA workers as fit in the free memory (at most 3 by default): 3 × 5DK3 now runs on 2 workers instead of failing with out-of-memory on an 8 GB card; 1YCR and 1TII keep 3 workers; every result bit-identical to the previous commit (CPU and CUDA); see *CUDA workers from the free device memory* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -197,7 +198,9 @@ several calculations at once overlaps the two.
 * **Each CUDA backend needs its own stream.** The legacy default stream would
   serialise the workers.
 * **Default worker counts.** 2 on the CPU, where a third worker adds 4 %. 3 on
-  CUDA, where more workers add little and multiply the device memory in use.
+  CUDA, where more workers add little and multiply the device memory in use
+  (since *CUDA workers from the free device memory*, fewer where they do not
+  fit).
   At 3 CUDA workers the time per calculation (≈ 0.55 s) is about the GPU solve
   time, so the GPU is now the limit.
 
@@ -223,11 +226,12 @@ overhead to amortise. The gain comes from overlapping calculations. A single
 frame already has three calculations to overlap.
 
 **Tests.**
-* `batch.rs`, 3 unit tests:
+* `batch.rs`, 5 unit tests:
   * batch = sequential, bit for bit, for 1–3 workers;
   * a failing job leaves the others intact;
-  * more workers than jobs, and empty batches.
-* `tests/test_batch.py`, 10 tests (CPU and CUDA):
+  * more workers than jobs, and empty batches;
+  * worker counts from device memory (two tests).
+* `tests/test_batch.py`, 12 tests (CPU and CUDA):
   * `polar_solvation_many` = sequential calls bit for bit, for 1, 2, 3 and 7
     workers;
   * `polar_solvation_batch` with workers = single frames;
@@ -236,7 +240,8 @@ frame already has three calculations to overlap.
   * the index of a failing system is reported, and the solver stays usable;
   * the timings add up;
   * `pbsa_solvation_frames` = `pbsa_solvation_frame`;
-  * `pbsolve mmpbsa --workers 1` and `--workers 3` write identical CSV files.
+  * `pbsolve mmpbsa --workers 1` and `--workers 3` write identical CSV files;
+  * `batch_workers`.
 
 ## Mixed precision: f32 multigrid inside f64 CG
 
@@ -715,6 +720,118 @@ of a 5DK3 calculation take 0.3 s.
 
 Without the early f32 rounding of the inverse diagonal the new peak was
 2 560 MiB for one worker.
+
+## CUDA workers from the free device memory
+
+**Problem.** Batches (`polar_solvation_many`, `polar_solvation_batch`,
+`pbsa_solvation_frames`, `pbsolve mmpbsa`) ran three calculations at once on
+CUDA by default, whatever the grid. Each worker holds the buffers of its own
+calculation, about 131 bytes per grid node with the default preconditioner.
+Three 5DK3 calculations (19.4 M nodes) need 7.1 GiB, and they failed with
+`CUDA_ERROR_OUT_OF_MEMORY` on the 8 GB card (6.3 GiB free).
+
+**Change.**
+* `solver::solve_device_bytes(dims, preconditioner)` counts the backend
+  vectors that a solve holds at its peak, in the CG iterations:
+  * f64 values per fine node: the operator (ε_x, ε_y, ε_z, κ̄²V) and the CG
+    vectors x, r, z, Ap and p (9), plus 1/diag for Jacobi;
+  * `multigrid`: 4 more f64 per fine node (1/diag and the smoother's r, d,
+    t), and 33 f64 per coarse node (27 coefficients, 1/diag, r, d, t, x, b);
+  * `multigrid-f32`: the same levels in f32, plus the f32 fine operator and
+    the rounded residual and correction (10 f32 per fine node).
+
+  `polar_solvation` frees the buffers of each solve before the next one, so
+  this is also the peak of a whole calculation.
+* `batch::worker_device_bytes` sets aside this amount for the largest grid of
+  the batch, plus 1/8 and 64 MiB (`POOL_SLACK_BYTES`) for the rounding of the
+  device's memory pool.
+* `batch::device_workers` keeps 1/20 of the device free and runs as many
+  workers as fit in the rest of the free memory (`cuMemGetInfo`, which
+  counts other processes). It returns at least 1, and at most the requested
+  or default count.
+* The Python `Solver` applies this limit on CUDA to the default and to an
+  explicit `workers`. `Solver.batch_workers(grid, workers=None)` returns the
+  number it will use. The CPU is unchanged.
+* `CudaBackend` gains `memory_info`, `pool_peak` and `reset_pool_peak` (the
+  high watermarks of the device's memory pool).
+* `multigrid` now checks `hierarchy_fits` before building the hierarchy, as
+  `multigrid-f32` already did. The results are the same, and no hierarchy is
+  built just to be discarded. (With the current coarsening the coarsest
+  level has at most 1000 unknowns, so every grid fits.)
+
+**Estimate and measured peak** (one `polar_solvation`, CUDA). The pool's
+high watermark of used memory equals the estimate plus the 16 KiB reduction
+scratch of each precision in use, to the byte, on every grid below. Memory
+depends on the grid and the preconditioner only, so the rows are labelled by
+grid size.
+
+| Grid (nodes) | Preconditioner | Estimate = measured (MiB) | Bytes/node | Reserved by the pool (MiB) | Set aside per worker (MiB) |
+|---|---|---|---|---|---|
+| 121×121×105 (1YCR) | multigrid-f32 | 193 | 131.5 | 224 (1.16×) | 281 |
+| 129³ | multigrid-f32 | 269 | 131.4 | 320 (1.19×) | 367 |
+| 201×177×201 (1TII) | multigrid-f32 | 895 | 131.3 | 992 (1.11×) | 1 071 |
+| 201×177×201 (1TII) | multigrid | 972 | 142.5 | 1 056 (1.09×) | 1 157 |
+| 201×177×201 (1TII) | jacobi | 546 | 80.0 | 576 (1.06×) | 678 |
+| 225³ | multigrid-f32 | 1 425 | 131.2 | 1 536 (1.08×) | 1 667 |
+| 193×313×321 (5DK3) | multigrid-f32 | 2 425 | 131.1 | 2 528 (1.04×) | 2 792 |
+
+The pool reserves 32 MiB chunks, so it rounds up by 4–19 % (at most
+115 MiB). Two concurrent workers on the 1TII grid reserved 2 016 MiB, 1.13×
+their buffers. Building an extra backend did not change the free device
+memory measurably.
+
+**Batches before and after** (`polar_solvation_many` of N copies on one
+grid, default workers, two runs each; previous build = 7bad270; RTX 2080
+SUPER shared with two GROMACS processes at ~95 %, 6.3 GiB free; GPU memory
+by `nvidia-smi` above the baseline):
+
+| System | N | Previous: workers, time | New: workers, time | GPU memory, new |
+|---|---|---|---|---|
+| 5DK3 | 3 | 3: out of memory (both runs, +6.2 GiB at failure) | 2: 25.8 / 26.0 s | +4.9 GiB |
+| 1TII | 6 | 3: 12.0 / 13.2 s | 3: 13.2 / 12.8 s | +2.7 GiB |
+| 1YCR | 12 | 3: 3.28 / 3.62 s | 3: 3.65 / 3.58 s | +0.6 GiB |
+
+* The energies are identical (`float.hex`) between the two builds, across
+  all copies and for every worker count.
+* An explicit `workers=3` on 5DK3 now runs 2 workers (26.8 / 27.2 s).
+* For comparison, the previous build with `workers=2` took 27.0 / 25.7 s,
+  and the new one with `workers=1` took 25.9 / 26.1 s.
+* On this shared machine, several workers therefore give nothing for a
+  grid as large as 5DK3's. The gain of concurrency is on small grids
+  (1YCR 2.2×, see *Batched solves*). Whether large grids gain on an idle GPU
+  is not measured.
+
+**Checks.**
+* Core `device_bytes_match_the_measured_peaks`: the estimate equals the
+  pool peaks measured above (three preconditioners, three grids), so the
+  formula is checked on machines without a GPU too.
+* Core `workers_are_limited_by_the_free_device_memory` and
+  `device_workers_boundaries`:
+  * the benchmark grids on an 8 GB card give 3 workers for 1YCR and 1TII
+    and 2 for 5DK3;
+  * the count is at least 1 and at most the limit;
+  * the largest grid decides;
+  * a worker is added exactly when it fits next to the 1/20 reserve.
+* Core: the levels test checks that `coarse_dims` equals the levels of the
+  host hierarchy.
+* `tests/memory.rs` (CUDA) runs in a process of its own, because the pool's
+  counters cover the whole process.
+  * For four grids up to 7.2 M nodes, the pool peak equals
+    `solve_device_bytes` plus the scratch (three preconditioners).
+  * The reserved memory stays within `worker_device_bytes`.
+  * Three concurrent workers stay within three times that.
+* `test_batch_workers` (CPU and CUDA): the default, an explicit count, at
+  most 1 on CUDA for a 1025³ grid (~140 GB), and argument errors.
+* Mutations, all caught:
+  * fewer f32 values per node in the estimate;
+  * no 1/20 reserve;
+  * the smallest grid deciding;
+  * no 1/8 slack (caught by the 7.2 M-node grid);
+  * an extra CG vector that the estimate does not count;
+  * half the memory per worker;
+  * the binding ignoring device memory.
+* The 13 fingerprint cases are bit-identical to the previous commit on CPU
+  and CUDA, and single-calculation times are unchanged.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

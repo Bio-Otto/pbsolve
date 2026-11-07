@@ -6,7 +6,7 @@
 
 use crate::backend::Backend;
 use crate::error::{PbError, Result};
-use crate::multigrid::{hierarchy_fits, Chebyshev, Levels, MultigridPreconditioner};
+use crate::multigrid::{coarse_dims, hierarchy_fits, Chebyshev, Levels, MultigridPreconditioner};
 use crate::operator::StencilOperator;
 use crate::params::Preconditioner;
 use std::sync::Arc;
@@ -67,12 +67,12 @@ impl<B: Backend> Precond<B> {
     fn build(be: &B, dims: [usize; 3], op: &B::Operator, inv_diag: B::Vector, kind: Preconditioner) -> Result<Self> {
         match kind {
             Preconditioner::Jacobi => {}
-            Preconditioner::Multigrid => {
-                if let Some(l) = Levels::build(be, dims, op, Chebyshev::default())? {
-                    return Ok(Self::Multigrid(Box::new(MultigridPreconditioner::from_levels(
-                        be, inv_diag, l,
-                    )?)));
-                }
+            Preconditioner::Multigrid if hierarchy_fits(dims) => {
+                let l = Levels::build(be, dims, op, Chebyshev::default())?
+                    .ok_or_else(|| PbError::Backend(format!("multigrid: no hierarchy for {dims:?}")))?;
+                return Ok(Self::Multigrid(Box::new(MultigridPreconditioner::from_levels(
+                    be, inv_diag, l,
+                )?)));
             }
             // The f32 copy of the inverse diagonal is made first, so the f64
             // one is freed before the hierarchy is built (lower peak memory).
@@ -95,7 +95,7 @@ impl<B: Backend> Precond<B> {
                 })));
             }
             // No hierarchy fits (where `Levels::build` returns `None`): Jacobi.
-            Preconditioner::MultigridF32 => {}
+            Preconditioner::Multigrid | Preconditioner::MultigridF32 => {}
         }
         Ok(Self::Jacobi(inv_diag))
     }
@@ -124,6 +124,35 @@ impl<B: Backend> Precond<B> {
     /// the flexible CG update.
     fn is_flexible(&self) -> bool {
         matches!(self, Self::Mixed(_))
+    }
+}
+
+/// Bytes of backend vectors held at once while the PB system of a grid of
+/// `dims` is solved with `preconditioner`, on a backend that stores a value
+/// in 8 bytes and its f32 twin in 4. The peak is reached in the CG
+/// iterations; it is also the peak of [`crate::pb::polar_solvation`], whose
+/// solves each free their buffers before the next one starts (the CUDA tests
+/// compare it with the device's memory pool). Values per node:
+/// * fine operator (ε_x, ε_y, ε_z, κ̄²·V) and the CG vectors x, r, z, Ap
+///   and p: 9 on the fine grid;
+/// * Jacobi (also the fallback where no hierarchy fits): 1/diag;
+/// * multigrid: 1/diag and the smoother's r, d and t on the fine grid, and
+///   27 coefficients, 1/diag, r, d, t, x and b (33) on every coarse level;
+/// * mixed precision: the same multigrid in f32, plus the f32 fine operator
+///   and the rounded residual and correction (10 f32 on the fine grid).
+///
+/// Fixed-size buffers (the reduction scratch, 16 KiB per precision) are not
+/// counted.
+pub fn solve_device_bytes(dims: [usize; 3], preconditioner: Preconditioner) -> u64 {
+    let nodes = |d: &[usize; 3]| d.iter().map(|&n| n as u64).product::<u64>();
+    let n = nodes(&dims);
+    let coarse: u64 = coarse_dims(dims).iter().map(nodes).sum();
+    let common = 9 * 8 * n;
+    match preconditioner {
+        _ if !hierarchy_fits(dims) => common + 8 * n,
+        Preconditioner::Jacobi => common + 8 * n,
+        Preconditioner::Multigrid => common + 4 * 8 * n + 33 * 8 * coarse,
+        Preconditioner::MultigridF32 => common + 10 * 4 * n + 33 * 4 * coarse,
     }
 }
 
@@ -373,5 +402,36 @@ mod tests {
         assert_eq!(Preconditioner::DEFAULT, Preconditioner::MultigridF32);
         assert_eq!(SolverOptions::new(1e-8, 10).preconditioner, Preconditioner::DEFAULT);
         assert_eq!(crate::PbParams::default().preconditioner, Preconditioner::DEFAULT);
+    }
+
+    /// The peaks the CUDA memory pool reported for one `polar_solvation` on
+    /// these grids (RTX 2080 SUPER, docs/VALIDATION.md), less the 16 KiB
+    /// reduction scratch of each precision in use.
+    #[test]
+    fn device_bytes_match_the_measured_peaks() {
+        const SCRATCH: u64 = 16 << 10;
+        let cases = [
+            ([65, 57, 49], Preconditioner::MultigridF32, 24_028_016 - 2 * SCRATCH),
+            ([65, 57, 49], Preconditioner::Multigrid, 26_221_480 - SCRATCH),
+            ([65, 57, 49], Preconditioner::Jacobi, 14_539_984 - SCRATCH),
+            ([201, 177, 201], Preconditioner::MultigridF32, 938_655_416 - 2 * SCRATCH),
+            ([201, 177, 201], Preconditioner::Multigrid, 1_019_144_440 - SCRATCH),
+            ([201, 177, 201], Preconditioner::Jacobi, 572_094_544 - SCRATCH),
+            (
+                [193, 313, 321],
+                Preconditioner::MultigridF32,
+                2_543_173_136 - 2 * SCRATCH,
+            ),
+        ];
+        for (dims, pc, peak) in cases {
+            assert_eq!(solve_device_bytes(dims, pc), peak, "{dims:?} {pc:?}");
+        }
+        // Jacobi holds 10 f64 per node; coarse levels add about 1/7 of the
+        // fine grid to the multigrid preconditioners.
+        let n = 193 * 313 * 321;
+        assert_eq!(solve_device_bytes([193, 313, 321], Preconditioner::Jacobi), 80 * n);
+        let per_node = |pc| solve_device_bytes([193, 313, 321], pc) as f64 / n as f64;
+        assert!((131.0..132.0).contains(&per_node(Preconditioner::MultigridF32)));
+        assert!((142.0..143.0).contains(&per_node(Preconditioner::Multigrid)));
     }
 }

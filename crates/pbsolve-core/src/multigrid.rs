@@ -65,16 +65,24 @@ pub fn interior_count(d: [usize; 3]) -> usize {
     d.iter().map(|&n| n.saturating_sub(2)).product()
 }
 
-/// Dimensions of the coarsest level of the hierarchy of a `fine` grid: the
-/// level sequence of [`Hierarchy::build`] and [`Levels::build`] depends on
-/// the dimensions only.
-pub fn coarsest_dims(fine: [usize; 3]) -> [usize; 3] {
+/// Dimensions of the coarse levels (1, 2, …) of the hierarchy of a `fine`
+/// grid: the level sequence of [`Hierarchy::build`] and [`Levels::build`]
+/// depends on the dimensions only.
+pub fn coarse_dims(fine: [usize; 3]) -> Vec<[usize; 3]> {
+    let mut levels = Vec::new();
     let mut dims = fine;
     while interior_count(dims) > COARSEST_MAX_UNKNOWNS {
         let Some(t) = Transfer::new(dims) else { break };
         dims = t.coarse;
+        levels.push(dims);
     }
-    dims
+    levels
+}
+
+/// Dimensions of the coarsest level of the hierarchy of a `fine` grid (the
+/// fine grid itself if it is not coarsened).
+pub fn coarsest_dims(fine: [usize; 3]) -> [usize; 3] {
+    coarse_dims(fine).last().copied().unwrap_or(fine)
 }
 
 /// False where [`Hierarchy::build`] and [`Levels::build`] return `None`
@@ -1399,6 +1407,8 @@ mod tests {
             assert_eq!(l.transfers, h.transfers);
             assert!(hierarchy_fits(dims));
             assert_eq!(coarsest_dims(dims), h.coarsest.dims());
+            let coarse: Vec<[usize; 3]> = h.transfers.iter().map(|t| t.coarse).collect();
+            assert_eq!(coarse_dims(dims), coarse);
             assert_eq!(bits(&l.lmax), bits(&h.lmax));
             assert_eq!(l.coarsest, h.coarsest);
             for (lev, s) in h.coarse.iter().enumerate() {

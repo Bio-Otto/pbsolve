@@ -16,13 +16,18 @@
 //! every result is bit-for-bit identical to a sequential [`polar_solvation`]
 //! call, whatever the number of workers or the order in which they pick up
 //! the jobs.
+//!
+//! Every worker on a GPU holds the buffers of its own calculation, so
+//! [`device_workers`] limits the number of workers to those that fit in the
+//! free device memory.
 
 use crate::autogrid::GridSpec;
 use crate::backend::Backend;
 use crate::error::Result;
 use crate::molecule::Atom;
-use crate::params::PbParams;
+use crate::params::{PbParams, Preconditioner};
 use crate::pb::{polar_solvation, PolarSolvation};
+use crate::solver::solve_device_bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -31,6 +36,33 @@ use std::sync::Mutex;
 pub struct Job<'a> {
     pub atoms: &'a [Atom],
     pub spec: &'a GridSpec,
+}
+
+/// Device memory left to the memory pool's rounding and fragmentation per
+/// worker, on top of 1/8 of its buffers (measured: 4–19 % and at most
+/// 115 MiB, docs/VALIDATION.md).
+pub const POOL_SLACK_BYTES: u64 = 64 << 20;
+
+/// Device memory (bytes) set aside for one worker by [`device_workers`]: the
+/// buffers of the largest calculation on grids of `dims`
+/// ([`solve_device_bytes`]) plus 1/8 and [`POOL_SLACK_BYTES`]. 0 without grids.
+pub fn worker_device_bytes(dims: impl IntoIterator<Item = [usize; 3]>, preconditioner: Preconditioner) -> u64 {
+    match dims.into_iter().map(|d| solve_device_bytes(d, preconditioner)).max() {
+        Some(peak) => peak + peak / 8 + POOL_SLACK_BYTES,
+        None => 0,
+    }
+}
+
+/// Number of concurrent workers for calculations needing `per_worker` bytes
+/// each ([`worker_device_bytes`]) on a device with `free` of `total` bytes
+/// free: as many as fit while 1/20 of the device stays free (for other
+/// processes and the driver), at least 1 and at most `max_workers`. A single
+/// worker is returned even if it does not fit; its calculation then fails
+/// with the device's out-of-memory error.
+pub fn device_workers(max_workers: usize, per_worker: u64, free: u64, total: u64) -> usize {
+    let usable = free.saturating_sub(total / 20);
+    let fit = usable / per_worker.max(1);
+    usize::try_from(fit).unwrap_or(usize::MAX).clamp(1, max_workers.max(1))
 }
 
 /// Runs `jobs` on `backends.len()` concurrent workers (one backend each) and
@@ -179,6 +211,52 @@ mod tests {
             out[0].as_ref().unwrap().energy_kt.to_bits(),
             out[2].as_ref().unwrap().energy_kt.to_bits()
         );
+    }
+
+    const MIB: u64 = 1 << 20;
+
+    /// The grids of the benchmark systems (docs/VALIDATION.md) on an 8 GB
+    /// card with 6.3 GiB free: three 5DK3 calculations do not fit, two do.
+    #[test]
+    fn workers_are_limited_by_the_free_device_memory() {
+        let pc = Preconditioner::MultigridF32;
+        let (total, free) = (7776 * MIB, 6470 * MIB);
+        let one = |d: [usize; 3]| worker_device_bytes([d], pc);
+        assert_eq!(device_workers(3, one([121, 121, 105]), free, total), 3);
+        assert_eq!(device_workers(3, one([201, 177, 201]), free, total), 3);
+        assert_eq!(device_workers(3, one([193, 313, 321]), free, total), 2);
+        assert_eq!(
+            device_workers(3, one([193, 313, 321]), 2000 * MIB, total),
+            1,
+            "at least one"
+        );
+        assert_eq!(
+            device_workers(2, one([121, 121, 105]), free, total),
+            2,
+            "at most the limit"
+        );
+        assert_eq!(device_workers(0, one([121, 121, 105]), free, total), 1);
+        // The largest grid decides; no grids need nothing.
+        let mixed = worker_device_bytes([[121, 121, 105], [193, 313, 321], [33, 33, 33]], pc);
+        assert_eq!(mixed, one([193, 313, 321]));
+        assert_eq!(worker_device_bytes([], pc), 0);
+        assert_eq!(device_workers(3, 0, 0, total), 1);
+        assert_eq!(device_workers(3, 0, free, total), 3);
+    }
+
+    /// The reserve: one worker more as soon as it fits next to 1/20 of the device.
+    #[test]
+    fn device_workers_boundaries() {
+        let (total, per) = (2000 * MIB, 300 * MIB);
+        let reserve = total / 20;
+        for w in 1..=5u64 {
+            assert_eq!(device_workers(9, per, reserve + w * per, total), w as usize);
+            assert_eq!(
+                device_workers(9, per, reserve + w * per - 1, total),
+                (w - 1).max(1) as usize
+            );
+        }
+        assert_eq!(device_workers(3, per, u64::MAX, u64::MAX), 3);
     }
 
     #[test]

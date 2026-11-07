@@ -125,9 +125,11 @@ def pbsa_solvation_frames(
     Each frame contributes three PB calculations (complex, receptor, ligand)
     on one grid: ``grid`` if given, otherwise the automatic grid of that
     frame's complex. All calculations of the given frames are solved
-    ``workers`` at a time (default: 2 on the CPU, 3 on CUDA), so pass frames
-    in chunks rather than one by one. The results do not depend on
-    ``workers`` and equal those of :func:`pbsa_solvation_frame` bit for bit.
+    up to ``workers`` at a time (default: 2 on the CPU, 3 on CUDA; on CUDA
+    no more than fit in the free GPU memory, see ``Solver.batch_workers``),
+    so pass frames in chunks rather than one by one. The results do not
+    depend on ``workers`` and equal those of :func:`pbsa_solvation_frame`
+    bit for bit.
     """
     q, r = _vec(charges), _vec(radii)
     coords = [_xyz(x) for x in frames]

@@ -1,5 +1,6 @@
 """Concurrent batches: `polar_solvation_many`, `polar_solvation_batch` with
-workers, `pbsa_solvation_frames` and `pbsolve mmpbsa --workers`.
+workers, `pbsa_solvation_frames`, `pbsolve mmpbsa --workers` and the worker
+count (`batch_workers`).
 
 Concurrency must only change the throughput: every result has to equal the
 sequential one bit for bit, in input order, on every platform.
@@ -96,6 +97,25 @@ def test_failing_system_is_named_and_others_are_unaffected(peptide_frames):
     assert s.polar_solvation_many([(frames[0], q, r)], grid=grid, workers=3)[0].energy == (
         s.polar_solvation(frames[0], q, r, grid=grid).energy
     )
+
+
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_batch_workers(peptide_frames, platform):
+    frames, q, r = peptide_frames
+    s = solver(platform)
+    grid = s.make_grid(frames[0], r)
+    # A small grid: the default (CPU 2, CUDA 3) or what is asked for.
+    assert s.batch_workers(grid) == (3 if platform == "CUDA" else 2)
+    assert s.batch_workers([grid, grid], workers=5) == 5
+    assert s.batch_workers(grid, workers=1) == 1
+    # 1025^3 nodes need ~140 GB per calculation: on a GPU only one runs at a
+    # time (and fails if it does not fit); the CPU ignores device memory.
+    huge = pbsolve.GridSpec([0.0, 0.0, 0.0], [1025, 1025, 1025], [400.0, 400.0, 400.0])
+    assert s.batch_workers([grid, huge], workers=3) == (1 if platform == "CUDA" else 3)
+    with pytest.raises(ValueError, match="workers"):
+        s.batch_workers(grid, workers=0)
+    with pytest.raises(ValueError, match="GridSpec"):
+        s.batch_workers("auto")
 
 
 def test_timings_are_reported(peptide_frames):

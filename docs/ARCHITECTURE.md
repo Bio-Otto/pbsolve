@@ -137,6 +137,16 @@ Every result reports per-stage wall times (`PolarResult.timings`).
 `docs/VALIDATION.md` records how the default worker counts (CPU 2, CUDA 3)
 were chosen.
 
+On a GPU every worker holds the buffers of its own calculation.
+`solver::solve_device_bytes` counts them from the grid size and the
+preconditioner: the peak is reached in the CG iterations, and each solve
+frees its buffers before the next one. `tests/memory.rs` checks this count
+against the CUDA memory pool's high watermark, to the byte. Before a batch,
+the Python `Solver` reads the free device memory and lets
+`batch::device_workers` cap the worker count. Each worker is given the largest
+calculation of the batch plus the pool's rounding, and 1/20 of the device
+stays free.
+
 ## CUDA runtime model
 
 * The driver (`libcuda`, through cudarc) and NVRTC (`pbsolve-cuda/src/nvrtc.rs`)

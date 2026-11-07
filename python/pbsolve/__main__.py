@@ -264,7 +264,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m.add_argument(
         "--workers",
         type=int,
-        help="PB calculations solved concurrently (default: 2 on the CPU, 3 on CUDA); results do not depend on it",
+        help="PB calculations solved concurrently (default: 2 on the CPU, 3 on CUDA; on CUDA at most as many as "
+        "fit in the free GPU memory); results do not depend on it",
     )
     _add_solver(m)
 
