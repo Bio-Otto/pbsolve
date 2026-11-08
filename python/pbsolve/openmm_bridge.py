@@ -111,6 +111,7 @@ class OpenMMPBSA:
         self.gamma, self.beta, self.probe = gamma, beta, probe
 
     def frame(self, positions: Union["unit.Quantity", npt.ArrayLike]) -> PBSAFrame:
+        """Solvation terms of one frame (OpenMM positions in any length unit, or a plain array in Å)."""
         return pbsa_solvation_frame(
             self.solver,
             positions_angstrom(positions),
@@ -124,4 +125,5 @@ class OpenMMPBSA:
         )
 
     def trajectory(self, frames: Iterable[Union["unit.Quantity", npt.ArrayLike]]) -> list[PBSAFrame]:
+        """Solvation terms of every frame, one :meth:`frame` call each."""
         return [self.frame(p) for p in frames]

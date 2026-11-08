@@ -89,6 +89,12 @@
   the sources and `_core.pyi` (nothing is executed). Configuration for Read
   the Docs (`.readthedocs.yaml`) and a GitHub Actions workflow that builds it
   with warnings as errors and can publish it to GitHub Pages.
+- Docstrings for every public class, function, property and attribute,
+  with NumPy-style Parameters, Returns and Raises sections where there are
+  any (units, defaults, APBS keyword equivalents). The stubs (`_core.pyi`,
+  read by the documentation site and editors) and `help()` on the compiled
+  module show the same text; `tests/test_docstrings.py` keeps them
+  identical and the stubs complete.
 
 ### Changed
 

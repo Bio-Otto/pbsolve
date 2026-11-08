@@ -90,6 +90,7 @@ class Molecule:
     # ------------------------------------------------------------- basics
     @property
     def n_atoms(self) -> int:
+        """Number of atoms."""
         return int(self.names.shape[0])
 
     def __len__(self) -> int:
@@ -97,10 +98,12 @@ class Molecule:
 
     @property
     def has_charges(self) -> bool:
+        """Whether every atom has a charge."""
         return bool(self.n_atoms) and not np.isnan(self.charges).any()
 
     @property
     def has_radii(self) -> bool:
+        """Whether every atom has a radius."""
         return bool(self.n_atoms) and not np.isnan(self.radii).any()
 
     def __repr__(self) -> str:
@@ -214,6 +217,8 @@ class Molecule:
 
 
 def write_pqr(path: PathLike, mol: Molecule, coords: npt.ArrayLike) -> None:
+    """Write ``mol`` at positions ``coords`` ((N, 3), Å) as a whitespace-separated PQR file (charges in e, radii in Å).
+    """
     xyz = np.asarray(coords, dtype=np.float64)
     if xyz.shape != (mol.n_atoms, 3):
         raise ValueError(f"coords have shape {xyz.shape}, expected ({mol.n_atoms}, 3)")

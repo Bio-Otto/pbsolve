@@ -34,6 +34,7 @@ shutil.copy2(ROOT / "examples" / "pbsolve_tutorial.ipynb", DOCS / "tutorial.ipyn
 extensions = [
     "myst_nb",
     "autoapi.extension",
+    "sphinx.ext.napoleon",
     "sphinx_copybutton",
 ]
 
@@ -63,6 +64,10 @@ autoapi_options = [
     "imported-members",
 ]
 autoapi_ignore = ["*/__main__.py", "*/_console.py", "*/test_installation.py"]
+# Docstrings are reStructuredText; those with parameters use NumPy sections
+# (Parameters, Returns, Raises), the same text help() shows.
+napoleon_google_docstring = False
+napoleon_numpy_docstring = True
 
 html_theme = "furo"
 html_title = f"pbsolve {release}"

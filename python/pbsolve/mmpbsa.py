@@ -54,6 +54,7 @@ class SolvationTerms:
 
     @property
     def total(self) -> float:
+        """Polar plus non-polar term."""
         return self.polar + self.nonpolar
 
 
@@ -67,17 +68,21 @@ class PBSAFrame:
 
     @property
     def delta_polar(self) -> float:
+        """Polar term of binding (complex − receptor − ligand)."""
         return self.complex.polar - self.receptor.polar - self.ligand.polar
 
     @property
     def delta_nonpolar(self) -> float:
+        """Non-polar term of binding (complex − receptor − ligand)."""
         return self.complex.nonpolar - self.receptor.nonpolar - self.ligand.nonpolar
 
     @property
     def delta_solvation(self) -> float:
+        """Solvation free energy of binding, polar plus non-polar."""
         return self.delta_polar + self.delta_nonpolar
 
     def as_dict(self) -> dict[str, float]:
+        """All terms as a flat dict (``complex_polar``, ..., ``delta_solvation``)."""
         out: dict[str, float] = {}
         for name in ("complex", "receptor", "ligand"):
             terms: SolvationTerms = getattr(self, name)

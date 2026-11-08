@@ -495,6 +495,7 @@ class PrepReport:
     pqr_text: str = ""  # pdb2pqr --whitespace layout
 
     def summary(self) -> str:
+        """The report as text, as ``pbsolve prep`` prints it."""
         lines = [
             f"force field {self.forcefield.upper()}, protonation: "
             + (f"PROPKA at pH {self.ph}" if self.titration == "propka" else f"pH {self.ph}" if self.ph is not None else "standard states"),
@@ -2401,6 +2402,7 @@ def _to_molecule(atoms, report):
 
 # ===================================================================== CLI
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Command line ``pbsolve prep``; returns the exit status."""
     from ._console import utf8_stdio
 
     utf8_stdio()

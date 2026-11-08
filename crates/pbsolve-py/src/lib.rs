@@ -23,7 +23,12 @@ create_exception!(
     pbsolve,
     ConvergenceError,
     PyRuntimeError,
-    "The linear solver did not converge."
+    concat!(
+        "The linear solver did not converge.\n",
+        "\n",
+        "Raised when a linear solve does not reach the relative residual ``tol``\n",
+        "within ``max_iter`` iterations (see :class:`Solver`).",
+    )
 );
 
 fn to_py(e: PbError) -> PyErr {
@@ -132,7 +137,7 @@ impl Engine {
     }
 }
 
-/// Platforms usable in this process, fastest first.
+/// Platforms usable in this process, fastest first (e.g. ``["CUDA", "CPU"]``).
 #[pyfunction]
 fn available_platforms() -> Vec<&'static str> {
     let mut v = Vec::new();
@@ -144,6 +149,15 @@ fn available_platforms() -> Vec<&'static str> {
 }
 
 /// Build and runtime information about CUDA support.
+///
+/// Returns
+/// -------
+/// dict
+///     ``compiled`` (built with CUDA support), ``cuda_major`` (CUDA major
+///     version of the build, 0 without CUDA), ``available``,
+///     ``device_count``, ``reason`` (why CUDA is unavailable, or ``None``),
+///     ``driver`` and ``nvrtc`` (versions as "major.minor", or ``None``) and
+///     ``nvrtc_library`` (the NVRTC library loaded).
 #[pyfunction]
 fn cuda_info(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
     let d = pyo3::types::PyDict::new(py);
@@ -237,7 +251,32 @@ fn grid_dict<'py>(py: Python<'py>, g: &Grid) -> PyResult<Bound<'py, PyDict>> {
 
 // ---------------------------------------------------------------- GridSpec
 
-/// Two-level focusing grid (APBS mg-auto: dime, cglen, fglen, cgcent=fgcent).
+/// Focusing grid, the equivalent of APBS ``mg-auto``.
+///
+/// A coarse box solved with the analytic boundary condition and a fine box
+/// with the same centre and node counts; intermediate levels are added as
+/// APBS does when the spacing shrinks by more than a factor of 4 (see
+/// :attr:`levels`). :meth:`Solver.make_grid` builds one automatically; in
+/// MM-PBSA, build it once from the complex and reuse it for receptor and
+/// ligand.
+///
+/// Parameters
+/// ----------
+/// center : sequence of 3 float
+///     Common centre of all levels in Å (APBS ``cgcent`` = ``fgcent``).
+/// dims : sequence of 3 int
+///     Nodes per axis, the same on every level (APBS ``dime``). ``8k+1``
+///     values suit the multigrid preconditioner.
+/// coarse_length : sequence of 3 float
+///     Edge lengths of the coarse box in Å (APBS ``cglen``).
+/// fine_length : sequence of 3 float, optional
+///     Edge lengths of the fine box in Å (APBS ``fglen``). Defaults to
+///     ``coarse_length``: a single grid without focusing.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If the lengths or node counts do not define valid grids.
 #[pyclass(name = "GridSpec", module = "pbsolve", frozen, from_py_object)]
 #[derive(Clone)]
 struct PyGridSpec {
@@ -264,48 +303,62 @@ impl PyGridSpec {
         Ok(Self { inner })
     }
 
+    /// Common centre of all levels in Å.
     #[getter]
     fn center(&self) -> [f64; 3] {
         self.inner.center
     }
+    /// Nodes per axis on every level.
     #[getter]
     fn dims(&self) -> [usize; 3] {
         self.inner.dims
     }
+    /// Edge lengths of the coarse box in Å.
     #[getter]
     fn coarse_length(&self) -> [f64; 3] {
         self.inner.coarse_length
     }
+    /// Edge lengths of the fine box in Å.
     #[getter]
     fn fine_length(&self) -> [f64; 3] {
         self.inner.fine_length
     }
+    /// Node spacing of the fine grid in Å.
     #[getter]
     fn fine_spacing(&self) -> [f64; 3] {
         self.inner.fine_spacing()
     }
+    /// Whether the fine box is smaller than the coarse box.
     #[getter]
     fn is_focused(&self) -> bool {
         self.inner.is_focused()
     }
 
-    /// Node counts APBS would actually use (it silently resets `dime` > 65
-    /// that is not 32c+1); `None` if APBS would reject the grid.
+    /// Node counts APBS would actually use.
+    ///
+    /// APBS silently resets a ``dime`` above 65 that is not ``32c+1`` to a
+    /// smaller value. ``None`` if APBS would reject the grid.
     #[getter]
     fn apbs_dims(&self) -> Option<[usize; 3]> {
         self.inner.apbs_dims()
     }
 
-    /// Focusing levels (coarse first) exactly as APBS mg-auto sets them up:
-    /// list of dicts with `dims`, `spacing`, `origin`, `lengths`, `center`.
+    /// Focusing levels, coarse first, exactly as APBS ``mg-auto`` sets them up.
+    ///
+    /// A list of dicts with ``dims``, ``spacing``, ``origin``, ``lengths``
+    /// and ``center``.
     #[getter]
     fn levels<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let levels = self.inner.levels().map_err(to_py)?;
         levels.iter().map(|g| grid_dict(py, g)).collect()
     }
 
-    /// Equivalent APBS `mg-auto` keywords (full precision). Raises
-    /// `ValueError` if APBS would run a different grid (see `apbs_dims`).
+    /// Equivalent APBS ``mg-auto`` keywords, numbers in full precision.
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If APBS would run a different grid (see :attr:`apbs_dims`).
     fn to_apbs(&self) -> PyResult<String> {
         self.inner.to_apbs().map_err(to_py)
     }
@@ -321,23 +374,34 @@ impl PyGridSpec {
 
 // ---------------------------------------------------------------- results
 
-/// Result of a polar solvation calculation. `energy` is in kcal/mol.
+/// Result of a polar solvation calculation (:meth:`Solver.polar_solvation`).
+///
+/// The per-solve lists (:attr:`iterations`, :attr:`residuals`,
+/// :attr:`preconditioners`, :attr:`levels`) hold the solvated state's levels
+/// (coarse first), then the reference state's.
 #[pyclass(name = "PolarResult", module = "pbsolve", frozen, get_all)]
 struct PyPolarResult {
+    /// Polar solvation free energy ΔG_polar in kcal/mol.
     energy: f64,
+    /// ΔG_polar in kT.
     energy_kt: f64,
+    /// Electrostatic energy ½Σqu of the solvated state in kT.
     solvated_kt: f64,
+    /// Electrostatic energy ½Σqu of the reference state in kT.
     reference_kt: f64,
+    /// CG iterations of each linear solve.
     iterations: Vec<usize>,
+    /// Final relative residual of each linear solve.
     residuals: Vec<f64>,
     /// Preconditioner used by each linear solve ("multigrid-f32", "multigrid" or "jacobi").
     preconditioners: Vec<&'static str>,
     /// Multigrid levels of each linear solve (1 for Jacobi).
     levels: Vec<usize>,
-    /// Wall time per stage in seconds: maps, boundary, assembly, setup,
-    /// solve, energy and total.
+    /// Wall time per stage in seconds (maps, boundary, assembly, setup, solve, energy and total).
     timings: std::collections::BTreeMap<&'static str, f64>,
+    /// The grid of the calculation.
     grid: PyGridSpec,
+    /// Platform the calculation ran on, "CPU" or "CUDA".
     platform: String,
 }
 
@@ -386,10 +450,85 @@ impl PyPolarResult {
 
 // ---------------------------------------------------------------- Solver
 
-/// Linearized Poisson–Boltzmann solver (APBS mg-auto style focusing).
+/// Linearized Poisson–Boltzmann solver with APBS ``mg-auto`` style focusing.
 ///
-/// Energies are returned in kcal/mol. Lengths in Å, charges in e,
-/// concentrations in mol/L.
+/// Lengths are in Å, charges in e, concentrations in mol/L, potentials in
+/// kT/e and energies in kcal/mol (attributes ending in ``_kt`` in kT). The
+/// keyword names follow APBS where it has one.
+///
+/// Parameters
+/// ----------
+/// platform : str
+///     "auto" (CUDA when available, otherwise the CPU), "CPU" or "CUDA";
+///     case-insensitive.
+/// device : int
+///     CUDA device index.
+/// grid_spacing : float
+///     Largest fine-grid spacing in Å of automatic grids
+///     (:meth:`make_grid`).
+/// pdie : float
+///     Solute dielectric constant (APBS ``pdie``).
+/// sdie : float
+///     Solvent dielectric constant (APBS ``sdie``).
+/// temperature : float
+///     Temperature in K.
+/// ionic_strength : float
+///     Ionic strength of a 1:1 salt in mol/L (ions of charge +1 and -1 at
+///     that concentration). Ignored when ``ions`` is given.
+/// ion_radius : float
+///     Radius of both salt ions in Å; it defines the ion-accessibility
+///     surface.
+/// ions : sequence of tuple, optional
+///     Mobile ion species as in APBS ``ion``, each a tuple ``(charge,
+///     concentration, radius)``: valence in e, concentration in mol/L,
+///     radius in Å. They must be electroneutral. Replaces
+///     ``ionic_strength`` and ``ion_radius``.
+/// srad : float
+///     Solvent probe radius in Å (APBS ``srad``).
+/// sdens : float
+///     Surface sphere density in points per Å² (APBS ``sdens``).
+/// surface : str
+///     Dielectric boundary (APBS ``srfm``): "mol" (solvent-excluded
+///     surface, as APBS ``srfm mol``), "vdw" (union of the atomic spheres)
+///     or "harmonic" (molecular surface on the nodes with harmonic-mean face
+///     values; not APBS ``smol``).
+/// bcfl : str
+///     Boundary condition of the coarsest grid (APBS ``bcfl``): "mdh" (one
+///     Debye–Hückel sphere per atom), "mdh-fast" (the same sum interpolated
+///     on the box faces, error at most 1e-10 of the summed terms; not an
+///     APBS option), "sdh" (one sphere carrying the total charge) or "zero".
+/// cfac : float
+///     Automatic grids: the coarse box is ``cfac`` times the molecular
+///     extent, and at least the fine box (APBS ``psize``).
+/// fadd : float
+///     Automatic grids: the fine box is the molecular extent plus ``fadd``
+///     Å.
+/// tol : float
+///     Relative residual ‖r‖/‖b‖ at which a linear solve stops, in (0, 1).
+/// max_iter : int
+///     Largest number of iterations of a linear solve.
+/// dime_policy : str
+///     Node counts of automatic grids: "pbsolve" (``8k+1``) or "apbs"
+///     (``8k+1`` up to 65, ``32c+1`` above, which APBS runs unchanged). Use
+///     "apbs" to compare with APBS.
+/// preconditioner : str
+///     "multigrid-f32" (single-precision multigrid V-cycle inside the f64
+///     conjugate gradients), "multigrid" (the V-cycle in f64) or "jacobi".
+///     Energies of the multigrid variants agree to 1e-12 relative.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If a parameter is invalid.
+/// RuntimeError
+///     If ``platform="CUDA"`` and CUDA is not available
+///     (:func:`cuda_info` gives the reason).
+///
+/// Examples
+/// --------
+/// >>> solver = pbsolve.Solver(ionic_strength=0.15)
+/// >>> result = solver.polar_solvation(coords, charges, radii)
+/// >>> result.energy  # kcal/mol
 #[pyclass(name = "Solver", module = "pbsolve")]
 struct PySolver {
     engine: Engine,
@@ -629,24 +768,41 @@ impl PySolver {
         Ok(d)
     }
 
-    /// "CPU" or "CUDA".
+    /// Platform the solver runs on, "CPU" or "CUDA".
     #[getter]
     fn platform(&self) -> &'static str {
         self.engine.platform()
     }
 
+    /// Name of the device the solver runs on.
     #[getter]
     fn device_name(&self) -> String {
         self.engine.device_name()
     }
 
+    /// Ionic strength ½Σcz² of the mobile ions in mol/L.
     #[getter]
     fn ionic_strength(&self) -> f64 {
         self.params.ionic_strength()
     }
 
-    /// psize-like automatic grid for the given atoms. Build it once from the
-    /// complex and reuse it for receptor and ligand (MM-PBSA).
+    /// Automatic focusing grid for the given atoms, as APBS ``psize`` sizes it.
+    ///
+    /// The fine box is the extent of the atoms (radii included) plus
+    /// ``fadd``, the coarse box ``cfac`` times the extent, and the node
+    /// counts give a fine spacing of at most ``grid_spacing``. In MM-PBSA,
+    /// build it once from the complex and reuse it for receptor and ligand.
+    ///
+    /// Parameters
+    /// ----------
+    /// coords : array_like, shape (N, 3)
+    ///     Atom positions in Å.
+    /// radii : array_like, shape (N,)
+    ///     Atomic radii in Å.
+    ///
+    /// Returns
+    /// -------
+    /// GridSpec
     fn make_grid(&self, coords: PyReadonlyArray2<'_, f64>, radii: PyReadonlyArray1<'_, f64>) -> PyResult<PyGridSpec> {
         let xyz = coords_from(coords.as_array())?;
         let r = radii.as_array().to_vec();
@@ -655,7 +811,33 @@ impl PySolver {
         self.auto_grid(&atoms).map(|inner| PyGridSpec { inner }).map_err(to_py)
     }
 
-    /// Polar solvation free energy ΔG_polar (kcal/mol).
+    /// Polar solvation free energy ΔG_polar.
+    ///
+    /// Solves the solvated state (``sdie``, ions) and the reference state
+    /// (``pdie`` everywhere, no ions) on the same grid; ΔG_polar is
+    /// ½Σq(u_solvated − u_reference).
+    ///
+    /// Parameters
+    /// ----------
+    /// coords : array_like, shape (N, 3)
+    ///     Atom positions in Å.
+    /// charges : array_like, shape (N,)
+    ///     Atomic charges in e.
+    /// radii : array_like, shape (N,)
+    ///     Atomic radii in Å.
+    /// grid : GridSpec, optional
+    ///     Grid of the calculation; by default :meth:`make_grid` of the atoms.
+    ///
+    /// Returns
+    /// -------
+    /// PolarResult
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the arrays do not match or a charge lies outside the grid.
+    /// ConvergenceError
+    ///     If a linear solve does not converge.
     #[pyo3(signature = (coords, charges, radii, grid = None))]
     fn polar_solvation(
         &self,
@@ -673,11 +855,30 @@ impl PySolver {
         Ok(PyPolarResult::from_core(res, self.engine.platform()))
     }
 
-    /// ΔG_polar (kcal/mol) for every frame of an (F, N, 3) trajectory.
-    /// With `grid=None` a grid is built per frame. Up to `workers` frames are
-    /// solved concurrently (default: 2 on the CPU, 3 on CUDA; on CUDA no more
-    /// than fit in the free GPU memory, see `batch_workers`); the energies do
-    /// not depend on it.
+    /// ΔG_polar in kcal/mol for every frame of a trajectory.
+    ///
+    /// The energies do not depend on ``workers`` and equal those of
+    /// :meth:`polar_solvation` bit for bit.
+    ///
+    /// Parameters
+    /// ----------
+    /// frames : array_like, shape (F, N, 3)
+    ///     Atom positions of every frame in Å.
+    /// charges : array_like, shape (N,)
+    ///     Atomic charges in e.
+    /// radii : array_like, shape (N,)
+    ///     Atomic radii in Å.
+    /// grid : GridSpec or sequence of GridSpec, optional
+    ///     One grid for all frames or one per frame; by default an automatic
+    ///     grid per frame.
+    /// workers : int, optional
+    ///     Frames solved concurrently. Default: 2 on the CPU, 3 on CUDA; on
+    ///     CUDA no more than fit in the free GPU memory (see
+    ///     :meth:`batch_workers`).
+    ///
+    /// Returns
+    /// -------
+    /// numpy.ndarray, shape (F,)
     #[pyo3(signature = (frames, charges, radii, grid = None, workers = None))]
     fn polar_solvation_batch<'py>(
         &self,
@@ -705,14 +906,27 @@ impl PySolver {
         Ok(PyArray1::from_vec(py, out.iter().map(|r| r.energy_kcal).collect()))
     }
 
-    /// ΔG_polar for several systems, up to `workers` of them solved
-    /// concurrently (default: 2 on the CPU, 3 on CUDA; on CUDA no more than
-    /// fit in the free GPU memory, see `batch_workers`).
+    /// ΔG_polar for several systems, several of them solved at once.
     ///
-    /// `systems` is a sequence of `(coords, charges, radii)`; `grid` is None
-    /// (automatic grid per system), one GridSpec for all, or one per system.
-    /// Results are in input order and identical, bit for bit, to calling
-    /// `polar_solvation` on each system in turn.
+    /// The results are in input order and equal, bit for bit, those of
+    /// :meth:`polar_solvation` called on each system in turn.
+    ///
+    /// Parameters
+    /// ----------
+    /// systems : sequence of tuple
+    ///     The systems, each a tuple ``(coords, charges, radii)`` as the
+    ///     arguments of :meth:`polar_solvation`.
+    /// grid : GridSpec or sequence of GridSpec, optional
+    ///     One grid for all systems or one per system; by default an
+    ///     automatic grid per system.
+    /// workers : int, optional
+    ///     Systems solved concurrently. Default: 2 on the CPU, 3 on CUDA; on
+    ///     CUDA no more than fit in the free GPU memory (see
+    ///     :meth:`batch_workers`).
+    ///
+    /// Returns
+    /// -------
+    /// list of PolarResult
     #[pyo3(signature = (systems, grid = None, workers = None))]
     #[allow(clippy::type_complexity)]
     fn polar_solvation_many<'py>(
@@ -738,12 +952,24 @@ impl PySolver {
         Ok(out.into_iter().map(|r| PyPolarResult::from_core(r, platform)).collect())
     }
 
-    /// Number of calculations `polar_solvation_many` and
-    /// `polar_solvation_batch` run at once on `grid` (a GridSpec, or one per
-    /// system) for a batch of at least that many systems: `workers` (default
-    /// 2 on the CPU, 3 on CUDA), on CUDA limited to the calculations that fit
-    /// in the GPU memory free now, while 1/20 of the device stays free. At
-    /// least 1.
+    /// Number of calculations the batch methods run at once on ``grid``.
+    ///
+    /// This is the number :meth:`polar_solvation_many` and
+    /// :meth:`polar_solvation_batch` use for a batch of at least that many
+    /// systems: ``workers`` (default 2 on the CPU, 3 on CUDA), on CUDA
+    /// limited to the calculations that fit in the GPU memory free now while
+    /// 1/20 of the device stays free. At least 1.
+    ///
+    /// Parameters
+    /// ----------
+    /// grid : GridSpec or sequence of GridSpec
+    ///     The grid of every calculation, or one per system.
+    /// workers : int, optional
+    ///     Upper limit; the default as above.
+    ///
+    /// Returns
+    /// -------
+    /// int
     #[pyo3(signature = (grid, workers = None))]
     fn batch_workers(&self, grid: Bound<'_, PyAny>, workers: Option<usize>) -> PyResult<usize> {
         let specs: Vec<GridSpec> = if let Ok(one) = grid.extract::<PyGridSpec>() {
@@ -758,9 +984,32 @@ impl PySolver {
         self.fitting_workers(&specs, workers).map_err(to_py)
     }
 
-    /// Electrostatic potential (kT/e) on the finest grid as an (nx, ny, nz)
-    /// array, plus the grid origin and spacing (Å). Use `reference=True` for
-    /// the homogeneous reference state. Returns (potential, origin, spacing, energy_kt).
+    /// Electrostatic potential on the finest grid.
+    ///
+    /// Parameters
+    /// ----------
+    /// coords : array_like, shape (N, 3)
+    ///     Atom positions in Å.
+    /// charges : array_like, shape (N,)
+    ///     Atomic charges in e.
+    /// radii : array_like, shape (N,)
+    ///     Atomic radii in Å.
+    /// grid : GridSpec, optional
+    ///     Grid of the calculation; by default :meth:`make_grid` of the atoms.
+    /// reference : bool
+    ///     Solve the reference state (``pdie`` everywhere, no ions) instead
+    ///     of the solvated state.
+    ///
+    /// Returns
+    /// -------
+    /// potential : numpy.ndarray, shape (nx, ny, nz)
+    ///     Potential in kT/e, C order (x is the first index).
+    /// origin : list of 3 float
+    ///     Position of node (0, 0, 0) in Å.
+    /// spacing : list of 3 float
+    ///     Node spacing in Å.
+    /// energy_kt : float
+    ///     Electrostatic energy ½Σqu of that state in kT.
     #[pyo3(signature = (coords, charges, radii, grid = None, reference = false))]
     #[allow(clippy::type_complexity)]
     fn potential<'py>(
@@ -786,13 +1035,37 @@ impl PySolver {
         Ok((arr, sol.grid.origin, sol.grid.spacing, energy))
     }
 
-    /// Coefficient maps of one focusing level (default: the finest, `level=-1`)
-    /// as C-order (nx, ny, nz) arrays: `eps_x`, `eps_y`, `eps_z` (ε on the
-    /// faces i+½, j+½, k+½), `kappa_sq` (κ̄², Å⁻², 0 where ions are excluded),
-    /// `charge` (e per node, trilinear spreading), plus the level's `origin`,
-    /// `spacing`, `dims` and the bulk `kappa_bar_sq`. Comparable one-to-one with
-    /// APBS `write dielx/diely/dielz/kappa/charge` (APBS writes kappa as 0/1
-    /// accessibility and charge as density e/Å³).
+    /// Coefficient maps of one focusing level.
+    ///
+    /// The maps compare one to one with APBS ``write dielx``, ``diely``,
+    /// ``dielz``, ``kappa`` and ``charge`` (APBS writes kappa as 0/1
+    /// accessibility and the charge as a density in e/Å³).
+    ///
+    /// Parameters
+    /// ----------
+    /// coords : array_like, shape (N, 3)
+    ///     Atom positions in Å.
+    /// charges : array_like, shape (N,)
+    ///     Atomic charges in e.
+    /// radii : array_like, shape (N,)
+    ///     Atomic radii in Å.
+    /// grid : GridSpec, optional
+    ///     Grid of the calculation; by default :meth:`make_grid` of the atoms.
+    /// reference : bool
+    ///     Maps of the reference state instead of the solvated state.
+    /// level : int
+    ///     Focusing level, counted from the coarsest (0); negative values
+    ///     count from the finest (-1).
+    ///
+    /// Returns
+    /// -------
+    /// dict
+    ///     ``eps_x``, ``eps_y``, ``eps_z`` (ε on the faces i+½, j+½, k+½),
+    ///     ``kappa_sq`` (κ̄² in Å⁻², 0 where ions are excluded) and
+    ///     ``charge`` (e per node, trilinear spreading) as C-order
+    ///     (nx, ny, nz) arrays; the level's ``origin``, ``spacing``,
+    ///     ``dims``, ``lengths`` and ``center``; and the bulk
+    ///     ``kappa_bar_sq``.
     #[pyo3(signature = (coords, charges, radii, grid = None, reference = false, level = -1))]
     #[allow(clippy::too_many_arguments)]
     fn maps<'py>(
@@ -838,14 +1111,36 @@ impl PySolver {
         Ok(d)
     }
 
-    /// Solves the LPBE with *given* coefficient maps, node charges (e) and
-    /// boundary values (only boundary nodes of `boundary` are read), on the
-    /// grid with `origin`/`spacing` (Å); temperature, tolerance and platform
-    /// come from this solver. Arrays are C-order (nx, ny, nz). Returns
-    /// (potential kT/e, iterations, relative residual).
+    /// Solve the LPBE with given coefficient maps.
     ///
     /// Feeding APBS' own maps here tests pbsolve's discretisation and linear
-    /// solver in isolation ("map injection").
+    /// solver in isolation ("map injection"). Temperature, tolerance,
+    /// preconditioner and platform come from this solver. The arrays are
+    /// C-order (nx, ny, nz), as :meth:`maps` returns them.
+    ///
+    /// Parameters
+    /// ----------
+    /// eps_x, eps_y, eps_z : numpy.ndarray
+    ///     Dielectric constant on the faces i+½, j+½, k+½.
+    /// kappa_sq : numpy.ndarray
+    ///     κ̄² in Å⁻².
+    /// charge : numpy.ndarray
+    ///     Charge per node in e.
+    /// boundary : numpy.ndarray
+    ///     Potential in kT/e; only the boundary nodes are read.
+    /// origin : sequence of 3 float
+    ///     Position of node (0, 0, 0) in Å.
+    /// spacing : sequence of 3 float
+    ///     Node spacing in Å.
+    ///
+    /// Returns
+    /// -------
+    /// potential : numpy.ndarray, shape (nx, ny, nz)
+    ///     Potential in kT/e.
+    /// iterations : int
+    ///     CG iterations.
+    /// residual : float
+    ///     Final relative residual.
     #[pyo3(signature = (eps_x, eps_y, eps_z, kappa_sq, charge, boundary, origin, spacing))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn solve_maps<'py>(
@@ -904,7 +1199,23 @@ impl PySolver {
 
 // ---------------------------------------------------------------- functions
 
-/// Per-atom solvent-accessible surface area (Å², Shrake–Rupley).
+/// Solvent-accessible surface area of each atom (Shrake–Rupley).
+///
+/// Parameters
+/// ----------
+/// coords : array_like, shape (N, 3)
+///     Atom positions in Å.
+/// radii : array_like, shape (N,)
+///     Atomic radii in Å.
+/// probe : float
+///     Solvent probe radius in Å.
+/// n_points : int
+///     Test points per atom sphere.
+///
+/// Returns
+/// -------
+/// numpy.ndarray, shape (N,)
+///     Area of each atom in Å².
 #[pyfunction]
 #[pyo3(signature = (coords, radii, probe = 1.4, n_points = 960))]
 fn sasa<'py>(
@@ -943,8 +1254,10 @@ fn bjerrum_length(temperature: f64) -> f64 {
     bjerrum_length_vacuum(temperature)
 }
 
-/// The `dime` APBS actually uses for a requested value (APBS resets
-/// `dime` > 65 that is not 32c+1 to a smaller value); `None` if APBS rejects it.
+/// The ``dime`` APBS actually uses for a requested value.
+///
+/// APBS resets a ``dime`` above 65 that is not ``32c+1`` to a smaller value
+/// (121 becomes 97). ``None`` if APBS rejects the value.
 #[pyfunction]
 fn apbs_effective_dime(dime: usize) -> Option<usize> {
     core_apbs_effective_dime(dime)
@@ -967,12 +1280,38 @@ fn opt_array(py: Python<'_>, v: impl Iterator<Item = Option<f64>>) -> Bound<'_, 
     PyArray1::from_vec(py, v.map(|x| x.unwrap_or(f64::NAN)).collect())
 }
 
-/// Reads a structure / topology / coordinate file (format from the
-/// extension unless given). Returns a dict of per-atom lists/arrays
-/// (`names`, `resnames`, `resids`, `icodes`, `chains`, `segids`, `elements`,
-/// `atom_types`, `hetero`, `charges`, `radii`, `masses` — NaN where the format
-/// has no value), `bonds` (B, 2), `coords` (F, N, 3) in Å, `cells` (F, 6),
-/// `times` (F,), `format`, `periodic` and `notes`.
+/// Read a structure, topology or coordinate file.
+///
+/// :func:`pbsolve.io.load` builds a molecule from this; use it unless you
+/// need the raw arrays.
+///
+/// Parameters
+/// ----------
+/// path : str or path-like
+///     The file.
+/// format : str, optional
+///     File format ("pdb", "pqr", "cif", "gro", "mol2", "prmtop", "psf",
+///     "gmxtop", "inpcrd", "netcdf", "mdcrd", "dcd", "xtc", "trr");
+///     detected from the extension by default.
+/// include_dirs : sequence of str, optional
+///     Extra directories searched for GROMACS ``#include`` files.
+///
+/// Returns
+/// -------
+/// dict
+///     Per-atom lists and arrays (``names``, ``resnames``, ``resids``,
+///     ``icodes``, ``chains``, ``segids``, ``elements``, ``atom_types``,
+///     ``hetero``, ``charges``, ``radii``, ``masses``; NaN where the format
+///     has no value), ``bonds`` (B, 2), ``coords`` (F, N, 3) in Å,
+///     ``cells`` (F, 6), ``times`` (F,), ``format``, ``periodic`` and
+///     ``notes``.
+///
+/// Raises
+/// ------
+/// OSError
+///     If the file cannot be read.
+/// ValueError
+///     If the file is malformed or the format unknown.
 #[pyfunction]
 #[pyo3(signature = (path, format = None, include_dirs = None))]
 fn read_structure<'py>(
@@ -1021,9 +1360,30 @@ fn read_structure<'py>(
     Ok(d)
 }
 
-/// Streams frames of a trajectory (DCD, XTC, TRR, Amber NetCDF/mdcrd, or a
-/// multi-model PDB/GRO/mmCIF). Iterating yields `(coords (N,3) Å, cell or
-/// None, time or None, step or None)`.
+/// Streams the frames of a trajectory.
+///
+/// Reads DCD, XTC, TRR, Amber NetCDF and mdcrd, and multi-model PDB, GRO
+/// and mmCIF files. Iterating yields ``(coords, cell, time, step)``:
+/// positions (N, 3) in Å, the unit cell (a, b, c in Å, α, β, γ in degrees)
+/// or ``None``, the time or ``None`` and the step or ``None``.
+///
+/// Parameters
+/// ----------
+/// path : str or path-like
+///     The trajectory file.
+/// format : str, optional
+///     File format; detected from the extension by default.
+/// n_atoms : int, optional
+///     Atoms per frame; required for ASCII mdcrd, checked otherwise.
+/// mdcrd_box : bool, optional
+///     Whether mdcrd frames carry a box line; detected by default.
+///
+/// Raises
+/// ------
+/// OSError
+///     If the file cannot be opened.
+/// ValueError
+///     If the file is malformed or the format unknown.
 #[pyclass(name = "TrajectoryReader", module = "pbsolve")]
 struct PyTrajectoryReader {
     inner: std::sync::Mutex<Box<dyn pbsolve_io::FrameReader>>,
@@ -1052,6 +1412,7 @@ impl PyTrajectoryReader {
         })
     }
 
+    /// Atoms per frame, if known before reading a frame.
     #[getter]
     fn n_atoms(&self) -> Option<usize> {
         self.lock().n_atoms()
@@ -1088,7 +1449,16 @@ impl PyTrajectoryReader {
     }
 }
 
-/// Reads a PQR file. Returns (coords (N,3), charges (N,), radii (N,)).
+/// Read a PQR file.
+///
+/// Returns
+/// -------
+/// coords : numpy.ndarray, shape (N, 3)
+///     Atom positions in Å.
+/// charges : numpy.ndarray, shape (N,)
+///     Atomic charges in e.
+/// radii : numpy.ndarray, shape (N,)
+///     Atomic radii in Å.
 #[pyfunction]
 #[allow(clippy::type_complexity)]
 fn read_pqr<'py>(

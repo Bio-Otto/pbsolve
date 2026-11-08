@@ -503,6 +503,8 @@ def parse_input(path: PathLike) -> ApbsInput:
 
 @dataclass
 class ApbsCalcOutput:
+    """One calculation (ELEC statement) of an APBS run: its finest grid and energy in kJ/mol."""
+
     index: int
     name: str
     dims: tuple[int, int, int]
@@ -514,6 +516,8 @@ class ApbsCalcOutput:
 
 @dataclass
 class ApbsOutput:
+    """What :func:`parse_output` reads from APBS stdout: calculations, PRINT results (kJ/mol), warnings."""
+
     calcs: list[ApbsCalcOutput]
     prints: list[tuple[str, float]]  # (expression as echoed by APBS, kJ/mol)
     warnings: list[str]
@@ -682,9 +686,11 @@ class ComparisonReport:
         return abs(self.delta_g["rel"]) <= energy_rtol
 
     def to_dict(self) -> dict[str, Any]:
+        """The report as plain data (JSON-serialisable)."""
         return dataclasses.asdict(self)
 
     def format(self) -> str:
+        """The report as text, as ``pbsolve apbs compare`` prints it."""
         lines = [f"pbsolve vs APBS — {self.pqr}  (pbsolve on {self.platform}, files in {self.workdir})"]
         g = self.grid
         lines.append(
@@ -866,6 +872,7 @@ class BindingReport:
 
     @property
     def ddg(self) -> dict[str, float]:
+        """ΔΔG_polar of binding (complex − receptor − ligand, kcal/mol) from APBS and pbsolve, and their differences."""
         a = self.complex.delta_g["apbs"] - self.receptor.delta_g["apbs"] - self.ligand.delta_g["apbs"]
         p = self.complex.delta_g["pbsolve"] - self.receptor.delta_g["pbsolve"] - self.ligand.delta_g["pbsolve"]
         uf = self.complex.unit_factor
@@ -878,10 +885,12 @@ class BindingReport:
         }
 
     def passed(self, energy_rtol: float = 1e-3, ddg_atol: float = 0.05) -> bool:
+        """All three comparisons pass and the ΔΔG_polar values differ by at most ``ddg_atol`` kcal/mol."""
         ok = all(r.passed(energy_rtol) for r in (self.complex, self.receptor, self.ligand))
         return ok and abs(self.ddg["diff"]) <= ddg_atol
 
     def format(self) -> str:
+        """The report as text, with the binding verdict."""
         parts = []
         for name in ("complex", "receptor", "ligand"):
             parts.append(f"[{name}]\n" + getattr(self, name).format())
@@ -894,6 +903,7 @@ class BindingReport:
         return "\n\n".join(parts)
 
     def to_dict(self) -> dict[str, Any]:
+        """The report as plain data (JSON-serialisable)."""
         return {
             "complex": self.complex.to_dict(),
             "receptor": self.receptor.to_dict(),
@@ -965,6 +975,7 @@ class RunReport:
     prints: list[dict[str, Any]]  # expr, pbsolve_kj, apbs_kj, rel, rel_unit_corrected
 
     def passed(self, energy_rtol: float = 1e-3) -> bool:
+        """Grids identical and every energy APBS reports matched within ``energy_rtol`` (relative)."""
         if any(e["grid_issues"] for e in self.elecs):
             return False
         vals = [p for p in self.prints if p.get("apbs_kj") is not None]
@@ -972,6 +983,7 @@ class RunReport:
         return bool(vals) and all(abs(v["rel"]) <= energy_rtol for v in vals)
 
     def format(self) -> str:
+        """The report as text, as ``pbsolve apbs run`` prints it."""
         lines = [f"APBS input {self.input} evaluated by pbsolve"]
         lines += [f"  note: {n}" for n in self.notes]
         lines.append("  calculation              pbsolve (kJ/mol)   APBS (kJ/mol)   rel. diff  (APBS units)")
@@ -993,6 +1005,7 @@ class RunReport:
         return "\n".join(lines)
 
     def to_dict(self) -> dict[str, Any]:
+        """The report as plain data (JSON-serialisable)."""
         return dataclasses.asdict(self)
 
 
@@ -1136,6 +1149,7 @@ def _as_pqr(a: argparse.Namespace) -> str:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Command line ``pbsolve apbs``; returns the exit status."""
     from ._console import utf8_stdio
 
     utf8_stdio()
