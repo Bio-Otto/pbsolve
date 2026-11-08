@@ -3,7 +3,8 @@
 //! solved on identical grids so grid self-energies cancel exactly.
 
 use crate::autogrid::GridSpec;
-use crate::backend::Backend;
+use crate::backend::{Backend, MemoryHold};
+use crate::batch::worker_device_bytes;
 use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
 use crate::charge::{spread_charges, spread_charges_sparse};
 use crate::error::Result;
@@ -285,8 +286,9 @@ fn solve_level<B: Backend>(
     };
     let lb0 = bjerrum_length_vacuum(params.temperature);
     let (x, mut stats) = solve_assembled(be, &grid, &grid.boundary_indices(), &g, maps, q, lb0, opts)?;
-    // The solver's buffers are freed at the next synchronisation (the CUDA
-    // memory pool returns them to the driver then); that belongs to the solve.
+    // The solver's buffers are freed at the next synchronisation (where no
+    // calculation holds memory, the CUDA pool also returns them to the driver
+    // then); that belongs to the solve.
     let freeing = Instant::now();
     be.synchronize()?;
     stats.solve_seconds += freeing.elapsed().as_secs_f64();
@@ -349,6 +351,13 @@ fn focused<B: Backend, T>(
     Ok((out, stats, timings))
 }
 
+/// Keeps the memory freed between the levels of one calculation on `spec`
+/// for its next level, up to what [`crate::batch::device_workers`] sets aside
+/// for the calculation.
+fn hold_memory<'a, B: Backend>(be: &'a B, spec: &GridSpec, params: &PbParams) -> Result<MemoryHold<'a, B>> {
+    MemoryHold::new(be, worker_device_bytes([spec.dims], params.preconditioner))
+}
+
 /// Focusing solve over all levels of `spec` (APBS mg-auto sequence, see
 /// [`GridSpec::levels`]): the outermost level uses the analytic boundary
 /// condition `bcfl`, every finer level takes its boundary from the previous one.
@@ -359,12 +368,14 @@ pub fn solve_focused<B: Backend>(
     params: &PbParams,
     medium: Medium,
 ) -> Result<FieldSolution> {
+    let hold = hold_memory(be, spec, params)?;
     let ((grid, potential), stats, timings) = focused(be, spec, atoms, params, medium, |sol, _, timings| {
         let t = Instant::now();
         let field = sol.potential(be)?;
         timings.solve += t.elapsed().as_secs_f64();
         Ok(field)
     })?;
+    hold.release()?;
     Ok(FieldSolution {
         grid,
         potential,
@@ -401,9 +412,11 @@ pub fn polar_solvation<B: Backend>(
         timings.energy += t.elapsed().as_secs_f64();
         Ok(e)
     };
+    let hold = hold_memory(be, spec, params)?;
     let (solvated_kt, stats_solvated, mut timings) = focused(be, spec, atoms, params, Medium::Solvated, energy)?;
     let (reference_kt, stats_reference, t) = focused(be, spec, atoms, params, Medium::Reference, energy)?;
     timings += t;
+    hold.release()?;
     let energy_kt = solvated_kt - reference_kt;
     Ok(PolarSolvation {
         energy_kcal: energy_kt * kt_in_kcal_per_mol(params.temperature),

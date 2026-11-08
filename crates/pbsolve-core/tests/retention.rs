@@ -1,0 +1,266 @@
+//! Calculations retain their memory on the backend from start to end
+//! (`Backend::retain_memory` / `release_memory` through `MemoryHold`): a
+//! backend that records the calls around the CPU backend.
+
+use pbsolve_core::backend::MemoryHold;
+use pbsolve_core::batch::{polar_solvation_batch, worker_device_bytes, Job};
+use pbsolve_core::multigrid::{LevelOp, Stencil27, Transfer};
+use pbsolve_core::operator::StencilOperator;
+use pbsolve_core::pb::{polar_solvation, solve_focused, Medium};
+use pbsolve_core::surface::Sphere;
+use pbsolve_core::{
+    Atom, Backend, BoundaryCondition, CpuBackend, CpuSingle, Grid, GridSpec, PbParams, Preconditioner, Result,
+};
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Event {
+    Retain(u64),
+    Release(u64),
+    /// Any other backend call (consecutive ones are merged).
+    Work,
+}
+
+#[derive(Default)]
+struct Recorder {
+    cpu: CpuBackend,
+    events: Mutex<Vec<Event>>,
+}
+
+impl Recorder {
+    fn record(&self, e: Event) {
+        let mut events = self.events.lock().unwrap();
+        if !(e == Event::Work && events.last() == Some(&Event::Work)) {
+            events.push(e);
+        }
+    }
+
+    fn take(&self) -> Vec<Event> {
+        std::mem::take(&mut *self.events.lock().unwrap())
+    }
+}
+
+fn lower<'a>(op: LevelOp<'a, Recorder>) -> LevelOp<'a, CpuBackend> {
+    match op {
+        LevelOp::Fine(o) => LevelOp::Fine(o),
+        LevelOp::Coarse(c) => LevelOp::Coarse(c),
+    }
+}
+
+macro_rules! delegate {
+    ($(fn $name:ident(&self $(, $a:ident: $t:ty)*) -> $r:ty;)*) => {$(
+        fn $name(&self $(, $a: $t)*) -> $r {
+            self.record(Event::Work);
+            self.cpu.$name($($a),*)
+        }
+    )*};
+}
+
+impl Backend for Recorder {
+    type Vector = <CpuBackend as Backend>::Vector;
+    type Operator = <CpuBackend as Backend>::Operator;
+    type Coarse = <CpuBackend as Backend>::Coarse;
+    type Single = CpuSingle;
+
+    delegate! {
+        fn platform(&self) -> &'static str;
+        fn device_name(&self) -> String;
+        fn single(&self) -> Result<CpuSingle>;
+        fn demote(&self, x: &Self::Vector, y: &mut <CpuSingle as Backend>::Vector) -> Result<()>;
+        fn promote(&self, x: &<CpuSingle as Backend>::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn prepare(&self, op: Arc<StencilOperator>) -> Result<Self::Operator>;
+        fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse>;
+        fn upload(&self, host: &[f64]) -> Result<Self::Vector>;
+        fn upload_owned(&self, host: Vec<f64>) -> Result<Self::Vector>;
+        fn zeros(&self, n: usize) -> Result<Self::Vector>;
+        fn download(&self, v: &Self::Vector) -> Result<Vec<f64>>;
+        fn read(&self, v: &Self::Vector, host: &mut [f64]) -> Result<()>;
+        fn write(&self, host: &[f64], v: &mut Self::Vector) -> Result<()>;
+        fn apply(&self, op: &Self::Operator, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn dot(&self, a: &Self::Vector, b: &Self::Vector) -> Result<f64>;
+        fn dot2(&self, a: &Self::Vector, b: &Self::Vector, c: &Self::Vector) -> Result<(f64, f64)>;
+        fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn xpay(&self, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
+        fn axpby(&self, alpha: f64, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
+        fn scale(&self, alpha: f64, d: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn copy(&self, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn restrict(&self, t: &Transfer, fine: &Self::Vector, coarse: &mut Self::Vector) -> Result<()>;
+        fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()>;
+        fn coarse_to_host(&self, op: &Self::Coarse) -> Result<Stencil27>;
+        fn demote_operator(&self, op: &Self::Operator) -> Result<<CpuSingle as Backend>::Operator>;
+        fn demote_coarse(&self, op: &Self::Coarse) -> Result<<CpuSingle as Backend>::Coarse>;
+        fn mark_maps(&self, grid: &Grid, shifts: &[[f64; 3]], fill: f64, passes: &[(&[Sphere], f64)]) -> Result<Vec<Self::Vector>>;
+        fn scatter(&self, n: usize, idx: &[usize], values: &[f64]) -> Result<Self::Vector>;
+        fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)>;
+        fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
+        fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>>;
+        fn synchronize(&self) -> Result<()>;
+    }
+
+    fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)> {
+        self.record(Event::Work);
+        self.cpu.galerkin(t, lower(fine))
+    }
+
+    fn gershgorin_lmax(&self, level: LevelOp<'_, Self>) -> Result<f64> {
+        self.record(Event::Work);
+        self.cpu.gershgorin_lmax(lower(level))
+    }
+
+    fn retain_memory(&self, bytes: u64) -> Result<()> {
+        self.record(Event::Retain(bytes));
+        self.cpu.retain_memory(bytes)
+    }
+
+    fn release_memory(&self, bytes: u64) -> Result<()> {
+        self.record(Event::Release(bytes));
+        self.cpu.release_memory(bytes)
+    }
+}
+
+fn atoms() -> Vec<Atom> {
+    let mut s: u64 = 7;
+    let mut rnd = move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (s >> 11) as f64 / (1u64 << 53) as f64
+    };
+    (0..40)
+        .map(|_| Atom {
+            position: [rnd(), rnd(), rnd()].map(|v| 8.0 * (v - 0.5)),
+            charge: rnd() - 0.5,
+            radius: 1.2 + 0.7 * rnd(),
+        })
+        .collect()
+}
+
+/// Two focusing levels (coarse 1.6 × fine) at a spacing of 0.5 Å.
+fn spec(dims: [usize; 3]) -> GridSpec {
+    let fine = dims.map(|n| 0.5 * (n - 1) as f64);
+    GridSpec {
+        center: [0.0; 3],
+        dims,
+        coarse_length: fine.map(|l| 1.6 * l),
+        fine_length: fine,
+    }
+}
+
+fn params(pc: Preconditioner) -> PbParams {
+    PbParams {
+        pdie: 2.0,
+        preconditioner: pc,
+        bcfl: BoundaryCondition::parse("sdh").unwrap(),
+        ..PbParams::default()
+    }
+    .with_salt(0.15, 2.0)
+}
+
+/// One hold of `bytes` around all the work.
+fn held(events: &[Event], bytes: u64) -> bool {
+    events == [Event::Retain(bytes), Event::Work, Event::Release(bytes)]
+}
+
+#[test]
+fn a_calculation_retains_memory_from_its_first_to_its_last_backend_call() {
+    let rec = Recorder::default();
+    let atoms = atoms();
+    for (dims, pc) in [
+        ([33, 29, 37], Preconditioner::MultigridF32),
+        ([33, 29, 37], Preconditioner::Jacobi),
+        ([41, 41, 33], Preconditioner::Multigrid),
+    ] {
+        let bytes = worker_device_bytes([dims], pc);
+        let p = polar_solvation(&rec, &atoms, &params(pc), &spec(dims)).unwrap();
+        // Both states (four levels) under one hold.
+        assert_eq!(p.stats_solvated.len() + p.stats_reference.len(), 4);
+        let events = rec.take();
+        assert!(held(&events, bytes), "{dims:?} {pc:?}: {events:?}");
+        // Recording changes nothing.
+        let cpu = polar_solvation(&CpuBackend::default(), &atoms, &params(pc), &spec(dims)).unwrap();
+        assert_eq!(p.energy_kt.to_bits(), cpu.energy_kt.to_bits());
+
+        let f = solve_focused(&rec, &spec(dims), &atoms, &params(pc), Medium::Solvated).unwrap();
+        let events = rec.take();
+        assert!(held(&events, bytes), "{dims:?} {pc:?}: {events:?}");
+        let cpu = solve_focused(
+            &CpuBackend::default(),
+            &spec(dims),
+            &atoms,
+            &params(pc),
+            Medium::Solvated,
+        )
+        .unwrap();
+        assert!(f
+            .potential
+            .iter()
+            .zip(&cpu.potential)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+}
+
+#[test]
+fn a_failing_calculation_releases_its_memory() {
+    let rec = Recorder::default();
+    let dims = [33, 29, 37];
+    let pc = Preconditioner::Multigrid;
+    // Inside the coarse grid, outside the fine one: the fine level fails.
+    let mut atoms = atoms();
+    atoms.push(Atom {
+        position: [10.0, 0.0, 0.0],
+        charge: 1.0,
+        radius: 1.5,
+    });
+    let err = polar_solvation(&rec, &atoms, &params(pc), &spec(dims)).unwrap_err();
+    assert!(err.to_string().contains("outside the interior"), "{err}");
+    let events = rec.take();
+    assert!(held(&events, worker_device_bytes([dims], pc)), "{events:?}");
+}
+
+#[test]
+fn every_calculation_of_a_batch_holds_memory_on_its_worker() {
+    let workers = [Recorder::default(), Recorder::default()];
+    let refs: Vec<&Recorder> = workers.iter().collect();
+    let atoms = atoms();
+    let pc = Preconditioner::MultigridF32;
+    let specs = [
+        spec([33, 29, 37]),
+        spec([41, 41, 33]),
+        spec([33, 29, 37]),
+        spec([29, 33, 33]),
+    ];
+    let jobs: Vec<Job> = specs.iter().map(|spec| Job { atoms: &atoms, spec }).collect();
+    let results = polar_solvation_batch(&refs, &params(pc), &jobs);
+    let mut holds: Vec<u64> = Vec::new();
+    for w in &workers {
+        let events = w.take();
+        for one in events.chunks(3) {
+            let Event::Retain(bytes) = one[0] else {
+                panic!("{events:?}")
+            };
+            assert!(held(one, bytes), "{events:?}");
+            holds.push(bytes);
+        }
+    }
+    let mut expected: Vec<u64> = specs.iter().map(|s| worker_device_bytes([s.dims], pc)).collect();
+    holds.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(holds, expected, "one hold per calculation");
+    for (r, spec) in results.into_iter().zip(&specs) {
+        let alone = polar_solvation(&CpuBackend::default(), &atoms, &params(pc), spec).unwrap();
+        assert_eq!(r.unwrap().energy_kt.to_bits(), alone.energy_kt.to_bits());
+    }
+}
+
+#[test]
+fn a_memory_hold_ends_exactly_once() {
+    let rec = Recorder::default();
+    let a = MemoryHold::new(&rec, 5).unwrap();
+    let b = MemoryHold::new(&rec, 7).unwrap();
+    b.release().unwrap();
+    drop(a);
+    assert_eq!(
+        rec.take(),
+        [Event::Retain(5), Event::Retain(7), Event::Release(7), Event::Release(5)]
+    );
+}

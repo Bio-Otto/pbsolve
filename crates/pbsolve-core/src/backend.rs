@@ -143,6 +143,54 @@ pub trait Backend {
     fn synchronize(&self) -> Result<()> {
         Ok(())
     }
+    /// Keeps up to `bytes` more of the memory that a calculation frees
+    /// reserved for its later allocations, until the matching
+    /// [`release_memory`](Self::release_memory). A backend whose allocator
+    /// returns freed memory to the system (the CUDA memory pool) would
+    /// otherwise reserve it again for every focusing level. Calls may
+    /// overlap (concurrent workers); the bytes add up. Results do not change.
+    /// Use it through [`MemoryHold`]. Default: no-op.
+    fn retain_memory(&self, _bytes: u64) -> Result<()> {
+        Ok(())
+    }
+    /// Ends a [`retain_memory`](Self::retain_memory) of `bytes`: freed memory
+    /// that no calculation retains any more is returned to the system.
+    /// Default: no-op.
+    fn release_memory(&self, _bytes: u64) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Memory retained with [`Backend::retain_memory`] for one calculation.
+/// [`release`](Self::release) ends it and reports errors; dropping it (on an
+/// error path) ends it too and ignores them.
+#[must_use = "the memory is released when the hold is dropped"]
+pub struct MemoryHold<'a, B: Backend> {
+    be: Option<&'a B>,
+    bytes: u64,
+}
+
+impl<'a, B: Backend> MemoryHold<'a, B> {
+    pub fn new(be: &'a B, bytes: u64) -> Result<Self> {
+        be.retain_memory(bytes)?;
+        Ok(Self { be: Some(be), bytes })
+    }
+
+    pub fn release(mut self) -> Result<()> {
+        match self.be.take() {
+            Some(be) => be.release_memory(self.bytes),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<B: Backend> Drop for MemoryHold<'_, B> {
+    fn drop(&mut self) {
+        if let Some(be) = self.be.take() {
+            // An error here is reported by the backend's next operation.
+            let _ = be.release_memory(self.bytes);
+        }
+    }
 }
 
 /// Checks the arguments of [`Backend::scatter`]: as many values as indices,

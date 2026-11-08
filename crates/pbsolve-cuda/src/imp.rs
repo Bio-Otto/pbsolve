@@ -301,6 +301,106 @@ pub struct PoolPeak {
     pub reserved: u64,
 }
 
+/// The device's memory pool, which every backend of the process on that
+/// device allocates from (cudarc allocates with `cuMemAllocAsync`).
+fn device_pool(ctx: &CudaContext) -> Result<sys::CUmemoryPool> {
+    ctx.bind_to_thread().map_err(cuda_err("memory pool query"))?;
+    let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+    // SAFETY: `pool` is a valid out-pointer and the device belongs to the live context.
+    unsafe { sys::cuDeviceGetMemPool(&mut pool, ctx.cu_device()) }
+        .result()
+        .map_err(cuda_err("memory pool query"))?;
+    Ok(pool)
+}
+
+/// A cuuint64_t attribute of a pool (memory amounts, release threshold).
+fn pool_attribute(pool: sys::CUmemoryPool, attr: sys::CUmemPool_attribute) -> Result<u64> {
+    let mut v: u64 = 0;
+    // SAFETY: every attribute read here is a cuuint64_t value.
+    unsafe { sys::cuMemPoolGetAttribute(pool, attr, (&mut v as *mut u64).cast()) }
+        .result()
+        .map_err(cuda_err("memory pool query"))?;
+    Ok(v)
+}
+
+fn set_pool_attribute(pool: sys::CUmemoryPool, attr: sys::CUmemPool_attribute, mut v: u64) -> Result<()> {
+    // SAFETY: every attribute written here is a cuuint64_t value.
+    unsafe { sys::cuMemPoolSetAttribute(pool, attr, (&mut v as *mut u64).cast()) }
+        .result()
+        .map_err(cuda_err("memory pool setting"))
+}
+
+const RELEASE_THRESHOLD: sys::CUmemPool_attribute = sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD;
+
+/// Memory that calculations in progress retain in one device's pool
+/// ([`Backend::retain_memory`]).
+struct Retention {
+    device: sys::CUdevice,
+    /// The pool's release threshold before the first retention, restored
+    /// after the last one.
+    base: u64,
+    /// Bytes retained by the calculations in progress.
+    bytes: u64,
+}
+
+/// One entry per device with calculations in progress. The pool releases
+/// the memory it holds beyond its release threshold at every
+/// synchronisation (threshold 0 by default, so the buffers of a focusing
+/// level are returned to the driver and reserved again for the next one);
+/// while calculations run, the threshold is raised by the bytes they retain.
+static RETAINED: Mutex<Vec<Retention>> = Mutex::new(Vec::new());
+
+impl<T: CudaReal> Dev<T> {
+    fn mem_pool(&self) -> Result<sys::CUmemoryPool> {
+        device_pool(&self.shared.ctx)
+    }
+
+    fn retain(&self, bytes: u64) -> Result<()> {
+        let pool = self.mem_pool()?;
+        let device = self.shared.ctx.cu_device();
+        let mut all = RETAINED.lock().unwrap_or_else(|e| e.into_inner());
+        let i = match all.iter().position(|r| r.device == device) {
+            Some(i) => i,
+            None => {
+                let base = pool_attribute(pool, RELEASE_THRESHOLD)?;
+                all.push(Retention { device, base, bytes: 0 });
+                all.len() - 1
+            }
+        };
+        let retained = all[i].bytes.saturating_add(bytes);
+        if let Err(e) = set_pool_attribute(pool, RELEASE_THRESHOLD, all[i].base.saturating_add(retained)) {
+            if all[i].bytes == 0 {
+                all.swap_remove(i);
+            }
+            return Err(e);
+        }
+        all[i].bytes = retained;
+        Ok(())
+    }
+
+    fn release(&self, bytes: u64) -> Result<()> {
+        // Buffers freed on this stream can be returned once their frees have run.
+        self.stream().synchronize().map_err(cuda_err("synchronize"))?;
+        let pool = self.mem_pool()?;
+        let device = self.shared.ctx.cu_device();
+        let mut all = RETAINED.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(i) = all.iter().position(|r| r.device == device) else {
+            return Ok(());
+        };
+        all[i].bytes = all[i].bytes.saturating_sub(bytes);
+        let keep = all[i].base.saturating_add(all[i].bytes);
+        if all[i].bytes == 0 {
+            all.swap_remove(i);
+        }
+        set_pool_attribute(pool, RELEASE_THRESHOLD, keep)?;
+        // Return the unused memory now rather than at some later synchronisation.
+        // SAFETY: a valid pool; the driver keeps memory still in use.
+        unsafe { sys::cuMemPoolTrimTo(pool, usize::try_from(keep).unwrap_or(usize::MAX)) }
+            .result()
+            .map_err(cuda_err("memory pool trim"))
+    }
+}
+
 impl CudaBackend {
     /// Free and total memory of the device in bytes (`cuMemGetInfo`): memory
     /// of other processes and of this one counts as taken.
@@ -309,36 +409,34 @@ impl CudaBackend {
         Ok((free as u64, total as u64))
     }
 
-    /// The memory pool that device buffers are allocated from.
-    fn mem_pool(&self) -> Result<sys::CUmemoryPool> {
-        let ctx = &self.shared.ctx;
-        ctx.bind_to_thread().map_err(cuda_err("memory pool query"))?;
-        let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
-        // SAFETY: `pool` is a valid out-pointer and the device belongs to the live context.
-        unsafe { sys::cuDeviceGetMemPool(&mut pool, ctx.cu_device()) }
-            .result()
-            .map_err(cuda_err("memory pool query"))?;
-        Ok(pool)
-    }
-
-    fn pool_attribute(pool: sys::CUmemoryPool, attr: sys::CUmemPool_attribute) -> Result<u64> {
-        let mut v: u64 = 0;
-        // SAFETY: both high-watermark attributes are cuuint64_t values.
-        unsafe { sys::cuMemPoolGetAttribute(pool, attr, (&mut v as *mut u64).cast()) }
-            .result()
-            .map_err(cuda_err("memory pool query"))?;
-        Ok(v)
-    }
-
     /// Peak memory of the device's pool since the last reset (the stream is
     /// synchronised first, so queued work is included).
     pub fn pool_peak(&self) -> Result<PoolPeak> {
         self.stream().synchronize().map_err(cuda_err("synchronisation"))?;
         let pool = self.mem_pool()?;
         Ok(PoolPeak {
-            used: Self::pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH)?,
-            reserved: Self::pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH)?,
+            used: pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH)?,
+            reserved: pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH)?,
         })
+    }
+
+    /// Memory of the device's pool now, like [`pool_peak`](Self::pool_peak)
+    /// (the stream is synchronised first, which also lets the pool release
+    /// memory beyond its threshold).
+    pub fn pool_usage(&self) -> Result<PoolPeak> {
+        self.stream().synchronize().map_err(cuda_err("synchronisation"))?;
+        let pool = self.mem_pool()?;
+        Ok(PoolPeak {
+            used: pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT)?,
+            reserved: pool_attribute(pool, sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT)?,
+        })
+    }
+
+    /// Memory the device's pool keeps reserved when it is not in use
+    /// (bytes): its release threshold, raised by the calculations in
+    /// progress ([`Backend::retain_memory`]).
+    pub fn pool_release_threshold(&self) -> Result<u64> {
+        pool_attribute(self.mem_pool()?, RELEASE_THRESHOLD)
     }
 
     /// Restarts [`pool_peak`](Self::pool_peak) from the current usage.
@@ -349,11 +447,8 @@ impl CudaBackend {
             sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
             sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
         ] {
-            let mut zero: u64 = 0;
-            // SAFETY: the high watermarks may only be reset to zero (cuuint64_t).
-            unsafe { sys::cuMemPoolSetAttribute(pool, attr, (&mut zero as *mut u64).cast()) }
-                .result()
-                .map_err(cuda_err("memory pool reset"))?;
+            // The high watermarks may only be reset to zero.
+            set_pool_attribute(pool, attr, 0)?;
         }
         Ok(())
     }
@@ -953,5 +1048,13 @@ impl<T: CudaReal> Backend for Dev<T> {
 
     fn synchronize(&self) -> Result<()> {
         self.stream().synchronize().map_err(cuda_err("synchronize"))
+    }
+
+    fn retain_memory(&self, bytes: u64) -> Result<()> {
+        self.retain(bytes)
+    }
+
+    fn release_memory(&self, bytes: u64) -> Result<()> {
+        self.release(bytes)
     }
 }

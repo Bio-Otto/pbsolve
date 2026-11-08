@@ -169,12 +169,12 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   boundary and the energy at the charged nodes (`Backend::gather`),
   bit-identical. A CUDA calculation is 1.06–1.10× faster, and 5DK3 needs
   0.5 GB less host memory.
-* *Next:*
-  * on CUDA the `mdh` boundary (host, 3.4 s for 5DK3) and the CG solve are
-    now the largest stages;
-  * the CUDA memory pool returns each level's buffers to the driver at the
-    next synchronisation (~47 ms per 5DK3 solve) and allocates them again;
-    keeping them reserved during a calculation may save that.
+* GPU memory kept during a calculation (done): the memory pool keeps the
+  buffers freed between focusing levels (release threshold raised by the
+  calculation's share) and returns them when the calculation ends. Solve
+  stage 1.05–1.10× faster, results bit-identical.
+* *Next:* on CUDA the `mdh` boundary (host, 3.4 s for 5DK3) and the CG solve
+  are now the largest stages.
 
 ### v0.2 — Accuracy
 

@@ -57,6 +57,7 @@ should update the status table below.
 | Maps and right-hand side on the GPU (unreleased) | Dielectric and ion maps, operator, node charges and right-hand side assembled through the backend: bit-identical to the host (sphere marking incl. constructed boundary and summation-order cases, all surfaces and media, random maps, whole solves) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; CUDA calculation 1.23–1.32× faster on a shared GPU, CPU unchanged; see *Maps and right-hand side on the GPU* |
 | CUDA workers from free memory (unreleased) | The device memory of a calculation is counted exactly (estimate = memory-pool peak to the byte on every measured grid up to 19.4 M nodes, 3 preconditioners); batches run as many CUDA workers as fit in the free memory (at most 3 by default): 3 × 5DK3 now runs on 2 workers instead of failing with out-of-memory on an 8 GB card; 1YCR and 1TII keep 3 workers; every result bit-identical to the previous commit (CPU and CUDA); see *CUDA workers from the free device memory* |
 | Potentials read where needed (unreleased) | The solution stays on the backend: focusing reads it at the stencil nodes of the next level's boundary, the energy at the charged nodes; energies and potentials bit-identical to the full-potential path and to a host reference of the old pipeline (7 core cases, 4 GPU cases) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA calculation 1.06–1.10× faster on a shared GPU, 0.5 GB less host memory for 5DK3; see *Potentials read only where they are needed* |
+| GPU memory kept during a calculation (unreleased) | The CUDA memory pool keeps the buffers a calculation frees between focusing levels and returns them when it ends (release threshold raised by the calculation's `worker_device_bytes`, restored and trimmed at the end, also on errors): exactly one hold per calculation (core test with a recording backend, CI), threshold and pool usage back to idle after single, failing and concurrent calculations (GPU test), 10/10 mutations caught; every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; solve stage 1.05–1.10× faster, a calculation 1.03–1.08× with `sdh` on a shared GPU; see *GPU memory kept during a calculation* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -929,8 +930,109 @@ assembly from 0.16 to 0.11 s (no 155 MB host buffers to fault in).
 The largest stages of a CUDA calculation are now the `mdh` boundary (host,
 3.4 s for 5DK3; 0.55 s with `mdh-fast`) and the CG solve. The memory pool
 returns each level's buffers to the driver at the next synchronisation
-(release threshold 0) and allocates them again for the next level; keeping
-them reserved during a calculation is a candidate to measure.
+(release threshold 0) and allocates them again for the next level; the next
+section keeps them reserved during a calculation.
+
+## GPU memory kept during a calculation
+
+**Problem.** The CUDA backend allocates from the device's memory pool
+(cudarc uses `cuMemAllocAsync`). The pool's release threshold is 0 by
+default, so at every synchronisation it returns all freed memory to the
+driver. Each focusing level freed its solver buffers; at the next
+synchronisation the pool released them, and the next level reserved new
+memory. A probe at the synchronisation after each solve measured 51 ms per
+level for 5DK3 (2.5 GB reserved), 19 ms for 1TII and 3.4 ms for 1YCR, four
+times per calculation (two levels in each of the two media). With the
+threshold raised the wait was 0.
+
+**Change.**
+* `Backend::retain_memory(bytes)` and `release_memory(bytes)` (no-ops by
+  default), used through `backend::MemoryHold`, which retains on creation and
+  releases on `release()` or when dropped (so also when a calculation fails).
+* `polar_solvation` (both media) and `solve_focused` hold
+  `worker_device_bytes([dims], preconditioner)`, what `device_workers` sets
+  aside for one calculation, from start to end.
+* CUDA: a process-wide registry per device sums the bytes of the
+  calculations in progress, and the pool's release threshold is the previous
+  threshold plus that sum. When a calculation ends, the backend synchronises
+  its stream (so its frees have run), lowers the threshold and trims the pool
+  to it (`cuMemPoolTrimTo`): the memory is returned at once, not at some
+  later synchronisation. After the last calculation the previous threshold is
+  back (0, unless another library of the process set one). An idle process
+  holds no more GPU memory than before, and a worker keeps at most its share.
+* Timings: the solve stage still ends with a synchronisation but no longer
+  contains a release. The single release at the end of a calculation (54 ms
+  for 5DK3) belongs to no stage.
+* `CudaBackend::pool_usage` (current used and reserved memory) and
+  `pool_release_threshold`, for diagnostics and tests.
+
+**Checks.**
+* Core `tests/retention.rs` (CPU, runs in CI) wraps the CPU backend in one
+  that records the calls:
+  * `polar_solvation` and `solve_focused` (3 grids, all preconditioners) make
+    one retain of `worker_device_bytes` before their first backend call and one
+    release after their last, with results bit-identical to the plain CPU
+    backend;
+  * a calculation that fails at its fine level still releases;
+  * in a batch on 2 workers every calculation holds on its own worker (4 holds
+    of the right sizes), with energies equal to sequential calls;
+  * a `MemoryHold` ends exactly once (`release` then drop, nested holds).
+* GPU `tests/retention.rs` (a test binary of its own, because the pool is
+  process-wide):
+  * the default pool returns freed memory at the next synchronisation;
+  * holds raise the threshold by their bytes, add up (also through the f32
+    twin) and keep freed memory;
+  * after the last hold the threshold is 0 and the reserved memory is back to
+    idle without a further synchronisation;
+  * after `polar_solvation` (`multigrid-f32`, Jacobi), `solve_focused`, a
+    failing calculation and a batch on 3 workers, threshold and pool usage are
+    back to idle;
+  * a threshold set by another library (48 MiB) is restored;
+  * the pool's reserved peak stays within `worker_device_bytes` (three times
+    that for the batch).
+* Ten mutations, all caught:
+  * no hold in `polar_solvation`, or none in `solve_focused`;
+  * a release between the two media;
+  * the estimate without slack;
+  * a double release;
+  * no trim;
+  * a release that does not subtract its bytes;
+  * a retain that does nothing;
+  * the threshold restored to 0 instead of its previous value;
+  * a trim before the stream's frees ran.
+* `tests/memory.rs` passes unchanged: the pool's peak of used memory still
+  equals `solve_device_bytes` to the byte.
+* The 13 fingerprint cases are bit-identical to the previous commit on CPU
+  and CUDA. The `cuda-12` build passes the GPU, memory and retention tests
+  with NVRTC 12.9. The 1YCR APBS comparison on CUDA passes with the same
+  energies (ΔΔG 422.8939 kcal/mol), and the Born table is unchanged.
+
+**Time per ΔG_polar** (s). A/B: the previous and the new build ran
+alternately, two runs each, with the median of 6 (1YCR) or 3 calculations
+per run. The RTX 2080 SUPER was shared with GROMACS at 26–91 % utilisation,
+and the 18 CPU threads had a load of 23–35 from other jobs. Energies are
+bit-identical in every row.
+
+| System | `bcfl` | Previous | New | Solve stage | Setup + assembly |
+|---|---|---|---|---|---|
+| 1YCR | `mdh` | 0.537 / 0.550 | 0.527 / 0.513 | 0.163 / 0.161 → 0.155 / 0.147 | 0.065 / 0.065 → 0.064 / 0.062 |
+| 1TII | `mdh` | 3.62 / 3.90 | 3.43 / 3.53 | 0.955 / 0.938 → 0.892 / 0.868 | 0.250 / 0.259 → 0.244 / 0.234 |
+| 5DK3 | `mdh` | 10.47 / 10.27 | 10.74 / 9.42 | 2.319 / 2.323 → 2.112 / 2.103 | 0.708 / 0.662 → 0.644 / 0.614 |
+| 1YCR | `sdh` | 0.351 / 0.353 | 0.325 / 0.341 | 0.162 / 0.158 → 0.146 / 0.145 | 0.065 / 0.064 → 0.061 / 0.063 |
+| 1TII | `sdh` | 1.737 / 1.728 | 1.660 / 1.670 | 0.948 / 0.960 → 0.867 / 0.879 | 0.252 / 0.248 → 0.243 / 0.242 |
+| 5DK3 | `sdh` | 4.055 / 4.082 | 3.896 / 3.860 | 2.302 / 2.312 → 2.125 / 2.095 | 0.667 / 0.685 → 0.641 / 0.641 |
+
+* With `mdh` the wall time is dominated by the host boundary. Under this load
+  it took 5.9–7.0 s for 5DK3 instead of 3.4 s, and its noise hides the
+  ~0.2 s saved.
+* With `sdh` the GPU stages dominate, and a calculation is 1.03–1.08× faster.
+* The release at the end of a calculation (wall time minus the stages) takes
+  0.004 s for 1YCR, 0.025 s for 1TII and 0.068 s for 5DK3.
+* MM-PBSA batches (1YCR, 6 frames, h = 0.5 Å) are within noise:
+  7.88 / 7.81 → 7.84 / 7.75 s with one worker and 5.08 / 5.17 → 4.84 / 5.26 s
+  with three. These batches are limited by the host stages.
+* The CPU path is unchanged: the hold is a no-op there. CPU timings under
+  this load (1YCR 5–10 s instead of 2.3 s) cannot show a difference.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

@@ -94,7 +94,9 @@ A backend provides:
   `assemble_operator` (κ̄²V and the inverse diagonal from the maps),
   `source_rhs` (b = 4π l_B q − A g on interior nodes), `operator_to_host`
   (grids too small to coarsen), `gather` (the values at a list of nodes),
-  and `upload_owned`/`synchronize`/`gather` with defaults.
+  and `upload_owned`/`synchronize`/`gather` with defaults;
+* memory: `retain_memory`/`release_memory` (no-ops by default), used through
+  `backend::MemoryHold` for the duration of one calculation.
 
 The kernels are written once, generic over `Real` (`f64`, `f32`; `real.rs`).
 CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`; the setup and
@@ -151,6 +153,18 @@ the Python `Solver` reads the free device memory and lets
 `batch::device_workers` cap the worker count. Each worker is given the largest
 calculation of the batch plus the pool's rounding, and 1/20 of the device
 stays free.
+
+All CUDA backends of a process allocate from the device's memory pool. By
+default the pool returns freed memory to the driver at the next
+synchronisation, so every focusing level would reserve its buffers again.
+`polar_solvation` and `solve_focused` therefore hold a `MemoryHold` of
+`worker_device_bytes` for their grid. The CUDA backend raises the pool's
+release threshold by the bytes of all calculations in progress on the
+device (a process-wide registry, so concurrent workers add up). A
+calculation that ends lowers the threshold by its bytes and trims the pool
+to the new threshold, so after the last one the previous threshold is back
+and the memory is returned. An idle process holds no more GPU memory than before, and a worker never keeps
+more than it was given by `device_workers`.
 
 ## CUDA runtime model
 

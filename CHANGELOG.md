@@ -74,6 +74,9 @@
   `grid::NodeSet`, `Grid::interpolate_with`, `Grid::boundary_position`, and
   `boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes}`
   (boundary values on the boundary nodes only, in `boundary_indices` order).
+- Memory retention on the backend: `Backend::retain_memory` and
+  `release_memory` (no-ops by default) and `backend::MemoryHold`;
+  `CudaBackend::pool_usage` and `pool_release_threshold` in `pbsolve-cuda`.
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
@@ -120,9 +123,22 @@
   8.9 → 8.2 s) and its process needs 0.5 GB less host memory; the CPU gains
   1–2 %. Boundary values are kept on the boundary nodes only.
   `timings["energy"]` now includes reading the potential at the charges, and
-  `timings["solve"]` no longer includes a download (it still includes the
-  release of the solver's GPU memory). `Solver.potential` and `solve_maps`
-  still return the whole finest potential.
+  `timings["solve"]` no longer includes a download. `Solver.potential` and
+  `solve_maps` still return the whole finest potential.
+- On CUDA a calculation (`polar_solvation`, `solve_focused`, and so batches
+  and MM-PBSA) keeps the GPU memory it frees between focusing levels and
+  returns it to the driver when it ends, also on an error. Before, the
+  device's memory pool returned the solver's buffers after every level and
+  reserved them again for the next one (51 ms per level for 5DK3). While a
+  calculation runs, the pool's release threshold is raised by what
+  `batch::device_workers` sets aside for it; concurrent calculations add up,
+  and the previous threshold is restored afterwards. An idle process holds no
+  more GPU memory than before. Results are identical bit for bit. The solve
+  stage is 1.05–1.10× faster, and a calculation 1.03–1.08× faster where the
+  GPU stages dominate (5DK3 with `sdh`: 4.07 → 3.88 s); with `mdh` the saving
+  (~0.2 s for 5DK3) is small next to the host boundary. `timings["solve"]` no
+  longer includes releasing GPU memory; the single release at the end of a
+  calculation (0.05 s for 5DK3) belongs to no stage.
 
 ### Fixed
 
