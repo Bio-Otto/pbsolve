@@ -173,8 +173,18 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   buffers freed between focusing levels (release threshold raised by the
   calculation's share) and returns them when the calculation ends. Solve
   stage 1.05–1.10× faster, results bit-identical.
-* *Next:* on CUDA the `mdh` boundary (host, 3.4 s for 5DK3) and the CG solve
-  are now the largest stages.
+* `mdh` boundary vectorised and overlapped (done): the exact sums run on
+  AVX2 (CPU boundary 1.18–1.24× faster). On CUDA the solvated state's surface
+  and outermost boundary are built while the reference state is solved. A
+  CUDA calculation is 1.21–1.25× faster (5DK3 6.60 → 5.28 s), and results
+  are bit-identical. A GPU `mdh` kernel would be slower than the host on
+  consumer GPUs (f64 at 1/32–1/64 rate, estimated ~4 s for 5DK3) and would
+  change the last bits (device `exp`). It remains an option for GPUs with
+  full-rate f64.
+* *Next:* overlap the solvated state's maps, operator and multigrid setup
+  with its boundary, which needs the right-hand side after the setup in
+  `pcg_on` (~0.4 s for 5DK3). Then fused kernels for the CG solve, now the
+  largest CUDA stage (2.0 s for 5DK3).
 
 ### v0.2 — Accuracy
 

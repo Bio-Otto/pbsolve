@@ -58,6 +58,7 @@ should update the status table below.
 | CUDA workers from free memory (unreleased) | The device memory of a calculation is counted exactly (estimate = memory-pool peak to the byte on every measured grid up to 19.4 M nodes, 3 preconditioners); batches run as many CUDA workers as fit in the free memory (at most 3 by default): 3 × 5DK3 now runs on 2 workers instead of failing with out-of-memory on an 8 GB card; 1YCR and 1TII keep 3 workers; every result bit-identical to the previous commit (CPU and CUDA); see *CUDA workers from the free device memory* |
 | Potentials read where needed (unreleased) | The solution stays on the backend: focusing reads it at the stencil nodes of the next level's boundary, the energy at the charged nodes; energies and potentials bit-identical to the full-potential path and to a host reference of the old pipeline (7 core cases, 4 GPU cases) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA calculation 1.06–1.10× faster on a shared GPU, 0.5 GB less host memory for 5DK3; see *Potentials read only where they are needed* |
 | GPU memory kept during a calculation (unreleased) | The CUDA memory pool keeps the buffers a calculation frees between focusing levels and returns them when it ends (release threshold raised by the calculation's `worker_device_bytes`, restored and trimmed at the end, also on errors): exactly one hold per calculation (core test with a recording backend, CI), threshold and pool usage back to idle after single, failing and concurrent calculations (GPU test), 10/10 mutations caught; every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; solve stage 1.05–1.10× faster, a calculation 1.03–1.08× with `sdh` on a shared GPU; see *GPU memory kept during a calculation* |
+| `mdh` boundary vectorised and overlapped (unreleased) | Exact `mdh` sums on AVX2 (bit-identical to the scalar sums and the direct `dh` sum) and, on CUDA, the solvated state's surface and outermost boundary built while the reference state is solved: every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds), also from a recording device backend with 1 and 3 threads (CI); 6/6 mutations caught; APBS 1YCR on CUDA unchanged; CUDA calculation 1.21–1.25× faster with `mdh` (5DK3 6.60 → 5.28 s), CPU boundary 1.18–1.24×; a GPU `mdh` kernel ruled out on consumer GPUs; see *The `mdh` boundary: vectorised and overlapped* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -967,8 +968,8 @@ threshold raised the wait was 0.
   `pool_release_threshold`, for diagnostics and tests.
 
 **Checks.**
-* Core `tests/retention.rs` (CPU, runs in CI) wraps the CPU backend in one
-  that records the calls:
+* Core `tests/pipeline.rs` (CPU, runs in CI; first named `retention.rs`)
+  wraps the CPU backend in one that records the calls:
   * `polar_solvation` and `solve_focused` (3 grids, all preconditioners) make
     one retain of `worker_device_bytes` before their first backend call and one
     release after their last, with results bit-identical to the plain CPU
@@ -1033,6 +1034,122 @@ bit-identical in every row.
   with three. These batches are limited by the host stages.
 * The CPU path is unchanged: the hold is a no-op there. CPU timings under
   this load (1YCR 5–10 s instead of 2.3 s) cannot show a difference.
+
+## The `mdh` boundary: vectorised and overlapped
+
+**Problem.** With the default `bcfl="mdh"` the boundary of the outermost
+level is the sum of the Debye–Hückel potentials of all atoms at every
+boundary node, on the host. For 5DK3 (20 179 atoms, coarse grid
+193 × 313 × 321, 442 370 boundary nodes) that is 8.9e9 terms per state. It
+took 3.45 s of a 6.6 s CUDA calculation (2.48 s solvated, 0.98 s reference,
+18 threads), while the GPU waited.
+
+**A GPU kernel was ruled out.** The RTX 2080 SUPER runs f64 at 1/32 of its
+f32 rate: 96 FP64 units at 1.8 GHz, about 1.7e11 f64 instructions/s. One
+term needs a square root, a division and (with salt) an `exp`, roughly 50
+f64 instructions with `exp` and 30 without. The 1.8e10 terms of 5DK3 would
+take an estimated ~2.6 s (solvated) + ~1.6 s (reference), longer than the
+host. Current consumer GPUs run f64 at 1/64. CUDA's `exp` (1 ulp) also
+differs from the host's libm in the last bit, so the results would change. A
+device kernel pays off only on GPUs with full-rate f64 (A100, H100, ~30× this
+card), and only as an option.
+
+**Change.** Both parts keep every result bit for bit.
+* AVX2: `DhSources::potentials` already summed four boundary nodes at once,
+  each in atom order. Where the CPU has AVX2 (checked at run time) the same
+  code is compiled with `#[target_feature(enable = "avx2")]`, and the four
+  nodes fill the lanes of a 256-bit register. Lane-wise subtraction,
+  multiplication, division and square root are IEEE operations that round
+  like the scalar ones, Rust never contracts them into FMAs, and `exp` stays
+  the scalar libm call per node. Without salt (the reference state) the term
+  has no `exp` and vectorises fully. `mdh-fast` uses the same sums at its
+  Chebyshev points.
+* Overlap: `polar_solvation` now solves the reference state first; the
+  states are independent, so the order changes no result. When the backend
+  runs on a device (`Backend::runs_on_device`, true for CUDA), the host
+  builds the solvated state's inputs (`StateInputs`: the molecular surface,
+  then the analytic boundary of the outermost level) while the reference
+  state is solved. This work runs in a rayon pool of its own with one thread
+  fewer than the caller's pool, created per calculation (0.35 ms median,
+  1.7 ms at most, for 17 threads).
+  * The first version spawned it into the caller's pool. The calculation
+    became only 1.13× faster, and the solve stage went from 2.0 to 4.4 s. A rayon thread that waits for its own tasks runs
+    queued ones meanwhile, so the thread driving the GPU picked up boundary
+    work.
+  * With a pool of its own the solve stage is unchanged.
+* Timings: the stage times stay sequential pieces of the wall time. Only the
+  wait for the background work after the reference state counts: as boundary
+  time up to what the boundary took (it is built last), beyond that as map
+  time.
+* On the CPU backend the calculation runs as before, with the reference state
+  first: its threads are busy anyway.
+* A probe on 5DK3 measured the reference state's GPU work at 0.92–0.98 s,
+  against 2.55 s for the solvated inputs in the background (0.21 s surface,
+  2.33 s boundary), so 1.6 s of waiting remains. With this structure the
+  estimated lower bound is ~4.9 s (measured 5.28 s). Overlapping the solvated state's
+  maps, operator and multigrid setup with its boundary would need the
+  right-hand side after the setup, a change to `pcg_on`.
+
+**Checks.**
+* `vectorised_mdh_terms_equal_the_scalar_ones_bit_for_bit`: 500 atoms (one
+  without radius, one without charge) at 4000 points from inside the solute to
+  400 Å away, for κ = 0.125 and 0.6 Å⁻¹, no salt and κ = 1e-300; the AVX2 sums
+  equal the scalar sums bit for bit. The run-time dispatch is checked too.
+  `mdh_equals_the_direct_sum_bit_for_bit` (against `dh` term by term) passes
+  through the AVX2 path.
+* Core `tests/pipeline.rs` (CI): a recording backend that claims to run on a
+  device gives the CPU backend's energies, residuals and iteration counts bit
+  for bit for `mdh`, `mdh-fast`, `sdh` and `zero`, in pools of 1 and 3
+  threads. Its stage times are non-negative and sum to less than the wall
+  time. The memory-hold tests pass with that backend too: a failing
+  calculation still releases, and batches on a device worker hold memory.
+* The GPU energy test asserts that the CUDA backend reports `runs_on_device`.
+* Six mutations, all caught:
+  * the AVX2 path with another κ;
+  * a reordered term (`/ w / d`);
+  * swapped lanes in the dispatch;
+  * the solvated inputs built for the reference medium, on every backend or
+    only on a device;
+  * the boundary of the background pool's threads built for the wrong medium.
+* The 13 fingerprint cases (energies, iterations, residuals), maps and MM-PBSA
+  species are bit-identical to the previous commit on CPU and CUDA. The
+  `cuda-12` build passes the GPU, memory and retention tests. The 1YCR APBS
+  comparison on CUDA passes with the same energies (ΔΔG 422.8939 kcal/mol).
+  The Born table is unchanged, and pytest passes (109, 2 skipped).
+
+**Time per ΔG_polar** (s). A/B: the previous and the new build ran
+alternately, two runs each, each the median of 6 (1YCR), 3 or 1 (5DK3, CPU)
+calculations. The RTX 2080 SUPER was shared at 81–99 % utilisation, and the
+18 CPU threads had a load of 8–22 from other jobs. Energies are bit-identical
+in every row.
+
+| Platform | System | `bcfl` | Previous | New | Speed-up | Boundary stage |
+|---|---|---|---|---|---|---|
+| CUDA | 1YCR | `mdh` | 0.304 / 0.301 | 0.250 / 0.251 | 1.21× | 0.063 / 0.064 → 0.031 / 0.035 |
+| CUDA | 1TII | `mdh` | 2.223 / 2.233 | 1.874 / 1.765 | 1.22× | 0.929 / 0.939 → 0.665 / 0.565 |
+| CUDA | 5DK3 | `mdh` | 6.578 / 6.629 | 5.282 / 5.275 | 1.25× | 3.454 / 3.485 → 2.382 / 2.360 |
+| CUDA | 1TII | `mdh-fast` | 1.491 / 1.495 | 1.298 / 1.293 | 1.15× | 0.204 / 0.197 → 0.122 / 0.119 |
+| CUDA | 5DK3 | `mdh-fast` | 3.546 / 3.543 | 3.037 / 3.055 | 1.16× | 0.413 / 0.437 → 0.182 / 0.181 |
+| CUDA | 1TII | `sdh` | 1.306 / 1.321 | 1.187 / 1.199 | 1.10× | 0.018 / 0.020 → 0.017 / 0.016 |
+| CUDA | 5DK3 | `sdh` | 3.142 / 3.151 | 2.903 / 2.901 | 1.08× | 0.035 / 0.042 → 0.033 / 0.031 |
+| CPU | 1YCR | `mdh` | 2.095 / 2.108 | 2.055 / 2.049 | 1.02× | 0.062 / 0.060 → 0.053 / 0.056 |
+| CPU | 1TII | `mdh` | 15.96 / 16.00 | 15.83 / 15.94 | 1.01× | 0.933 / 0.937 → 0.748 / 0.760 |
+| CPU | 5DK3 | `mdh` | 37.93 / 38.13 | 37.44 / 37.51 | 1.01× | 3.295 / 3.463 → 2.801 / 2.882 |
+
+* On CUDA the map stage also shrinks (5DK3 0.53 → 0.29 s), because the
+  solvated state's surface is built in the background. That is the whole gain
+  with `sdh`.
+* CPU boundary stage alone (median of 3, 2 and 1 calculations), `mdh` /
+  `mdh-fast`: 1YCR 0.062 / 0.041 → 0.052 / 0.038 s, 1TII 0.911 / 0.196 →
+  0.773 / 0.181 s, 5DK3 3.535 / 0.432 → 2.905 / 0.370 s. The solvated sum is
+  bound by the scalar `exp` (1.15×); the reference sum, without `exp`, gains
+  1.7×. A scratch benchmark of the sums alone, 5DK3: solvated 2.48 → 2.17 s,
+  reference 0.98 → 0.57 s.
+* MM-PBSA batches (1YCR, 6 frames, h = 0.5 Å, identical energies): CUDA,
+  1 worker 4.87 / 4.92 → 4.22 / 4.20 s (1.16×); 3 workers 3.32 / 3.29 →
+  3.28 / 3.18 s, within noise (the other workers already fill the GPU while
+  one computes its boundary). CPU 1 worker 36.7 / 37.1 → 37.3 / 36.9 s and
+  2 workers 27.4 / 27.3 → 27.4 / 26.7 s, unchanged.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

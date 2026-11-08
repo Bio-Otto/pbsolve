@@ -1,12 +1,15 @@
-//! Calculations retain their memory on the backend from start to end
-//! (`Backend::retain_memory` / `release_memory` through `MemoryHold`): a
-//! backend that records the calls around the CPU backend.
+//! How the pipeline uses its backend, seen through a backend that records
+//! the calls around the CPU backend: calculations retain memory from start to
+//! end (`Backend::retain_memory` / `release_memory` through `MemoryHold`),
+//! and a backend that claims to run on a device (`Backend::runs_on_device`)
+//! makes `polar_solvation` build the solvated state's inputs in the
+//! background without changing any result.
 
 use pbsolve_core::backend::MemoryHold;
 use pbsolve_core::batch::{polar_solvation_batch, worker_device_bytes, Job};
 use pbsolve_core::multigrid::{LevelOp, Stencil27, Transfer};
 use pbsolve_core::operator::StencilOperator;
-use pbsolve_core::pb::{polar_solvation, solve_focused, Medium};
+use pbsolve_core::pb::{polar_solvation, solve_focused, Medium, PolarSolvation};
 use pbsolve_core::surface::Sphere;
 use pbsolve_core::{
     Atom, Backend, BoundaryCondition, CpuBackend, CpuSingle, Grid, GridSpec, PbParams, Preconditioner, Result,
@@ -25,9 +28,17 @@ enum Event {
 struct Recorder {
     cpu: CpuBackend,
     events: Mutex<Vec<Event>>,
+    device: bool,
 }
 
 impl Recorder {
+    fn on_device() -> Self {
+        Self {
+            device: true,
+            ..Self::default()
+        }
+    }
+
     fn record(&self, e: Event) {
         let mut events = self.events.lock().unwrap();
         if !(e == Event::Work && events.last() == Some(&Event::Work)) {
@@ -109,6 +120,10 @@ impl Backend for Recorder {
         self.cpu.gershgorin_lmax(lower(level))
     }
 
+    fn runs_on_device(&self) -> bool {
+        self.device
+    }
+
     fn retain_memory(&self, bytes: u64) -> Result<()> {
         self.record(Event::Retain(bytes));
         self.cpu.retain_memory(bytes)
@@ -163,7 +178,12 @@ fn held(events: &[Event], bytes: u64) -> bool {
 
 #[test]
 fn a_calculation_retains_memory_from_its_first_to_its_last_backend_call() {
-    let rec = Recorder::default();
+    for rec in [Recorder::default(), Recorder::on_device()] {
+        calculations_hold_memory(&rec);
+    }
+}
+
+fn calculations_hold_memory(rec: &Recorder) {
     let atoms = atoms();
     for (dims, pc) in [
         ([33, 29, 37], Preconditioner::MultigridF32),
@@ -171,7 +191,7 @@ fn a_calculation_retains_memory_from_its_first_to_its_last_backend_call() {
         ([41, 41, 33], Preconditioner::Multigrid),
     ] {
         let bytes = worker_device_bytes([dims], pc);
-        let p = polar_solvation(&rec, &atoms, &params(pc), &spec(dims)).unwrap();
+        let p = polar_solvation(rec, &atoms, &params(pc), &spec(dims)).unwrap();
         // Both states (four levels) under one hold.
         assert_eq!(p.stats_solvated.len() + p.stats_reference.len(), 4);
         let events = rec.take();
@@ -180,7 +200,7 @@ fn a_calculation_retains_memory_from_its_first_to_its_last_backend_call() {
         let cpu = polar_solvation(&CpuBackend::default(), &atoms, &params(pc), &spec(dims)).unwrap();
         assert_eq!(p.energy_kt.to_bits(), cpu.energy_kt.to_bits());
 
-        let f = solve_focused(&rec, &spec(dims), &atoms, &params(pc), Medium::Solvated).unwrap();
+        let f = solve_focused(rec, &spec(dims), &atoms, &params(pc), Medium::Solvated).unwrap();
         let events = rec.take();
         assert!(held(&events, bytes), "{dims:?} {pc:?}: {events:?}");
         let cpu = solve_focused(
@@ -201,25 +221,28 @@ fn a_calculation_retains_memory_from_its_first_to_its_last_backend_call() {
 
 #[test]
 fn a_failing_calculation_releases_its_memory() {
-    let rec = Recorder::default();
     let dims = [33, 29, 37];
     let pc = Preconditioner::Multigrid;
-    // Inside the coarse grid, outside the fine one: the fine level fails.
+    // Inside the coarse grid, outside the fine one: the fine level fails
+    // (in the reference state, while the solvated inputs are being built in
+    // the background on a device).
     let mut atoms = atoms();
     atoms.push(Atom {
         position: [10.0, 0.0, 0.0],
         charge: 1.0,
         radius: 1.5,
     });
-    let err = polar_solvation(&rec, &atoms, &params(pc), &spec(dims)).unwrap_err();
-    assert!(err.to_string().contains("outside the interior"), "{err}");
-    let events = rec.take();
-    assert!(held(&events, worker_device_bytes([dims], pc)), "{events:?}");
+    for rec in [Recorder::default(), Recorder::on_device()] {
+        let err = polar_solvation(&rec, &atoms, &params(pc), &spec(dims)).unwrap_err();
+        assert!(err.to_string().contains("outside the interior"), "{err}");
+        let events = rec.take();
+        assert!(held(&events, worker_device_bytes([dims], pc)), "{events:?}");
+    }
 }
 
 #[test]
 fn every_calculation_of_a_batch_holds_memory_on_its_worker() {
-    let workers = [Recorder::default(), Recorder::default()];
+    let workers = [Recorder::default(), Recorder::on_device()];
     let refs: Vec<&Recorder> = workers.iter().collect();
     let atoms = atoms();
     let pc = Preconditioner::MultigridF32;
@@ -263,4 +286,45 @@ fn a_memory_hold_ends_exactly_once() {
         rec.take(),
         [Event::Retain(5), Event::Retain(7), Event::Release(7), Event::Release(5)]
     );
+}
+
+/// Everything of a result but the wall times, bit for bit.
+fn numerics(p: &PolarSolvation) -> Vec<u64> {
+    let mut v = vec![p.energy_kt.to_bits(), p.solvated_kt.to_bits(), p.reference_kt.to_bits()];
+    for s in p.stats_solvated.iter().chain(&p.stats_reference) {
+        v.extend([s.iterations as u64, s.relative_residual.to_bits(), s.levels as u64]);
+    }
+    v
+}
+
+/// On a device the solvated state's surface and outermost boundary are built
+/// in a pool of their own while the reference state is solved: every
+/// boundary condition gives the results of the CPU backend bit for bit, with
+/// one thread or several, and the stage times stay non-negative and within
+/// the wall time.
+#[test]
+fn building_the_solvated_inputs_in_the_background_changes_no_result() {
+    let atoms = atoms();
+    let dims = [33, 29, 37];
+    for bcfl in ["mdh", "mdh-fast", "sdh", "zero"] {
+        let params = PbParams {
+            bcfl: BoundaryCondition::parse(bcfl).unwrap(),
+            ..params(Preconditioner::MultigridF32)
+        };
+        let cpu = polar_solvation(&CpuBackend::default(), &atoms, &params, &spec(dims)).unwrap();
+        for threads in [1, 3] {
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+            let rec = Recorder::on_device();
+            let t = std::time::Instant::now();
+            let p = pool
+                .install(|| polar_solvation(&rec, &atoms, &params, &spec(dims)))
+                .unwrap();
+            let wall = t.elapsed().as_secs_f64();
+            assert_eq!(numerics(&p), numerics(&cpu), "{bcfl}, {threads} threads");
+            let t = p.timings;
+            let stages = [t.maps, t.boundary, t.assembly, t.setup, t.solve, t.energy];
+            assert!(stages.iter().all(|s| s.is_finite() && *s >= 0.0), "{bcfl}: {t:?}");
+            assert!(t.total() <= wall, "{bcfl}: stages {} s, wall {wall} s", t.total());
+        }
+    }
 }

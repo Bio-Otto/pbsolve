@@ -48,6 +48,10 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   points of face patches and interpolates between them. The degree comes from
   each patch's distance to the atoms and κ, and the error is ≤ 1e-10 of the
   summed term magnitudes. Patches near atoms are summed directly.
+  The exact sums interleave four boundary nodes. Where the CPU has AVX2 the
+  same code runs with the four nodes in the lanes of a 256-bit register:
+  lane-wise IEEE arithmetic rounds like the scalar code, Rust never forms
+  FMAs, and `exp` remains the scalar libm call, so the sums are bit-identical.
 * **Focusing** follows APBS `mg-auto`: two levels, or more when
   `h_fine/h_coarse < 0.25` (`ρ = (h_f/h_c)^{1/(n−1)}` per level); every level
   takes its boundary from the previous one by trilinear interpolation. Node
@@ -96,7 +100,9 @@ A backend provides:
   (grids too small to coarsen), `gather` (the values at a list of nodes),
   and `upload_owned`/`synchronize`/`gather` with defaults;
 * memory: `retain_memory`/`release_memory` (no-ops by default), used through
-  `backend::MemoryHold` for the duration of one calculation.
+  `backend::MemoryHold` for the duration of one calculation;
+* `runs_on_device` (false by default): whether the kernels leave the host's
+  threads idle, which lets the pipeline do host work in the background.
 
 The kernels are written once, generic over `Real` (`f64`, `f32`; `real.rs`).
 CUDA instantiates templates as `pb_*_f64` and `pb_*_f32`; the setup and
@@ -123,6 +129,16 @@ the charged nodes, with the same arithmetic as the full potential, so the
 results are bit-identical. Only `solve_focused` (potential maps) downloads
 the finest potential. The surface itself (SAS points) and the boundary
 values are computed on the host.
+
+`polar_solvation` solves the reference state first, then the solvated state;
+they are independent, so the order changes no result. On a device backend
+(`runs_on_device`) the host builds the solvated state's inputs (its molecular
+surface and the analytic boundary of its outermost level, with `mdh` the
+largest host stage) while the reference state is solved. This work runs in a
+rayon pool of its own with one thread fewer than the caller's pool. In the
+caller's pool, a thread that waits for its own tasks would run queued
+background tasks, and the device would wait for them. `timings` count only
+the wait for the background work.
 
 ## Concurrent calculations (trajectories, MM-PBSA)
 

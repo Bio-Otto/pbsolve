@@ -1050,6 +1050,10 @@ impl<T: CudaReal> Backend for Dev<T> {
         self.stream().synchronize().map_err(cuda_err("synchronize"))
     }
 
+    fn runs_on_device(&self) -> bool {
+        true
+    }
+
     fn retain_memory(&self, bytes: u64) -> Result<()> {
         self.retain(bytes)
     }

@@ -95,8 +95,33 @@ impl DhSources {
     /// `f64: Sum`, exactly like `iter().map(dh).sum()`. Interleaving the
     /// points only gives the CPU independent dependency chains (and reuses
     /// each atom's data), so the results are bit-identical.
+    ///
+    /// Where the CPU has AVX2 the same code runs with the points in the lanes
+    /// of 256-bit registers: lane-wise IEEE operations (subtraction,
+    /// multiplication, division, square root) round exactly like their scalar
+    /// forms, Rust never contracts them into FMAs, and `exp` stays the scalar
+    /// libm call per point, so both paths are bit-identical
+    /// (`vectorised_mdh_terms_equal_the_scalar_ones_bit_for_bit`).
     #[inline]
     fn potentials(&self, p: &[[f64; 3]; NODES], m: &BoundaryMedium) -> [f64; NODES] {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the CPU supports AVX2 (checked just above).
+            return unsafe { self.potentials_avx2(p, m) };
+        }
+        self.potentials_scalar(p, m)
+    }
+
+    /// [`Self::potentials`] compiled for AVX2.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn potentials_avx2(&self, p: &[[f64; 3]; NODES], m: &BoundaryMedium) -> [f64; NODES] {
+        self.potentials_scalar(p, m)
+    }
+
+    /// [`Self::potentials`] for the baseline instruction set.
+    #[inline(always)]
+    fn potentials_scalar(&self, p: &[[f64; 3]; NODES], m: &BoundaryMedium) -> [f64; NODES] {
         let zero: f64 = std::iter::empty::<f64>().sum();
         let mut acc = [zero; NODES];
         let atoms = self.position.iter().zip(&self.scale);
@@ -677,6 +702,39 @@ mod tests {
                 assert_eq!(g[c].to_bits(), want.to_bits(), "node {c}, kappa {}", m.kappa);
             }
             assert!(g.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    /// The AVX2 build of the `mdh` terms gives the scalar sums bit for bit,
+    /// with and without salt, at points near and far from the atoms.
+    #[test]
+    fn vectorised_mdh_terms_equal_the_scalar_ones_bit_for_bit() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("avx2") {
+                eprintln!("skipped: no AVX2");
+                return;
+            }
+            let mut atoms = cluster(500, [0.5, -1.0, 2.0], 30.0, 23);
+            atoms[3].radius = 0.0;
+            atoms[4].charge = 0.0;
+            let points = cluster(4000, [0.0; 3], 400.0, 29);
+            for m in [
+                medium(78.54, 2.0, 0.125),
+                medium(78.54, 2.0, 0.6),
+                medium(2.0, 2.0, 0.0),
+                medium(80.0, 1.0, 1e-300),
+            ] {
+                let src = DhSources::new(&atoms, &m);
+                for chunk in points.chunks_exact(NODES) {
+                    let p: [[f64; 3]; NODES] = std::array::from_fn(|l| chunk[l].position);
+                    let scalar = src.potentials_scalar(&p, &m);
+                    // SAFETY: AVX2 is available (checked above).
+                    let vector = unsafe { src.potentials_avx2(&p, &m) };
+                    assert_eq!(scalar.map(f64::to_bits), vector.map(f64::to_bits), "kappa {}", m.kappa);
+                    assert_eq!(src.potentials(&p, &m).map(f64::to_bits), vector.map(f64::to_bits));
+                }
+            }
         }
     }
 

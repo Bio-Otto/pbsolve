@@ -77,6 +77,9 @@
 - Memory retention on the backend: `Backend::retain_memory` and
   `release_memory` (no-ops by default) and `backend::MemoryHold`;
   `CudaBackend::pool_usage` and `pool_release_threshold` in `pbsolve-cuda`.
+- `Backend::runs_on_device` (false by default, true for CUDA): whether the
+  kernels leave the host's threads idle, so that the pipeline can do host
+  work in the background.
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
@@ -139,6 +142,19 @@
   (~0.2 s for 5DK3) is small next to the host boundary. `timings["solve"]` no
   longer includes releasing GPU memory; the single release at the end of a
   calculation (0.05 s for 5DK3) belongs to no stage.
+- The exact `mdh` boundary sums (also the points `mdh-fast` sums exactly)
+  run on AVX2 where the CPU has it: the same code with four boundary nodes in
+  the lanes of a 256-bit register. Results are identical bit for bit. On the
+  CPU the boundary stage is 1.18–1.24× faster (5DK3: 3.54 → 2.91 s).
+- `polar_solvation` solves the reference state first. On CUDA the host
+  builds the solvated state's molecular surface and outermost boundary while
+  the reference state is solved on the GPU, in a thread pool of its own.
+  The states are independent, so results are identical bit for bit. A CUDA
+  calculation is 1.21–1.25× faster with `mdh` (5DK3: 6.60 → 5.28 s),
+  1.15–1.16× with `mdh-fast` and 1.08–1.10× with `sdh`. MM-PBSA batches
+  are 1.16× faster on one CUDA worker, and the same within noise on three.
+  On CUDA, `timings["boundary"]` and `timings["maps"]` count only the wait for
+  the background work.
 
 ### Fixed
 

@@ -33,7 +33,10 @@ pub enum Medium {
 pub struct Timings {
     /// Dielectric and ion-accessibility maps (molecular surface).
     pub maps: f64,
-    /// Boundary values (analytic on the coarsest level, then focusing).
+    /// Boundary values (analytic on the coarsest level, then focusing). On a
+    /// device backend (CUDA), [`polar_solvation`] builds the solvated state's
+    /// analytic boundary (and its molecular surface, under `maps`) while the
+    /// reference state is solved; only the time spent waiting for it counts.
     pub boundary: f64,
     /// Charge spreading, operator and right-hand side assembly.
     pub assembly: f64,
@@ -308,34 +311,54 @@ fn focus_from<B: Backend>(be: &B, fine: &Grid, coarse: &LevelSolution<B>) -> Res
     focus_boundary_values(fine, &coarse.grid, |c| u[nodes.position(c).expect("a focusing node")])
 }
 
-/// Runs the focusing sequence of `spec` (APBS mg-auto, see
-/// [`GridSpec::levels`]): the outermost level uses the analytic boundary
-/// condition `bcfl`, every finer level takes its boundary from the previous
-/// one, read from the backend at the nodes it needs. `finish` turns the
-/// finest level's solution and node charges into the result.
+/// The host inputs of one state that do not depend on the backend: its
+/// molecular surface (solvated state only) and the analytic boundary values
+/// (condition `bcfl`) of its outermost level.
+struct StateInputs {
+    surf: Option<MolecularSurface>,
+    outer_boundary: Vec<f64>,
+}
+
+impl StateInputs {
+    /// Builds the inputs of `medium` for the focusing `levels` (surface
+    /// first, boundary last), adding their times to the `maps` and `boundary`
+    /// stages of `timings`.
+    fn new(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium: Medium, timings: &mut Timings) -> Self {
+        // The molecular surface depends only on the atoms: built once for all levels.
+        let t = Instant::now();
+        let surf = (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params));
+        timings.maps += t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let outer_boundary = analytic_boundary_values(&levels[0], atoms, params.bcfl, &boundary_medium(params, medium));
+        timings.boundary += t.elapsed().as_secs_f64();
+        Self { surf, outer_boundary }
+    }
+}
+
+/// Runs the focusing sequence `levels` (APBS mg-auto, see
+/// [`GridSpec::levels`]) of the state whose `inputs` are given: the outermost
+/// level takes their analytic boundary, every finer level takes its boundary
+/// from the previous one, read from the backend at the nodes it needs.
+/// `finish` turns the finest level's solution and node charges into the
+/// result. The stage times are added to `timings`.
 fn focused<B: Backend, T>(
     be: &B,
-    spec: &GridSpec,
+    levels: Vec<Grid>,
     atoms: &[Atom],
     params: &PbParams,
-    medium: Medium,
+    inputs: StateInputs,
+    mut timings: Timings,
     finish: impl FnOnce(LevelSolution<B>, NodeCharges, &mut Timings) -> Result<T>,
 ) -> Result<(T, Vec<SolveStats>, Timings)> {
-    params.validate()?;
-    let levels = spec.levels()?;
-    let bm = boundary_medium(params, medium);
+    let StateInputs { surf, outer_boundary } = inputs;
+    let mut outer_boundary = Some(outer_boundary);
     let mut stats = Vec::with_capacity(levels.len());
-    let mut timings = Timings::default();
-    // The molecular surface depends only on the atoms: built once for all levels.
-    let t = Instant::now();
-    let surf = (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params));
-    timings.maps += t.elapsed().as_secs_f64();
     let mut last: Option<(LevelSolution<B>, NodeCharges)> = None;
     for grid in levels {
         let t = Instant::now();
         let coarse = last.take();
         let g = match &coarse {
-            None => analytic_boundary_values(&grid, atoms, params.bcfl, &bm),
+            None => outer_boundary.take().expect("the outermost level comes first"),
             Some((coarse, _)) => focus_from(be, &grid, coarse)?,
         };
         timings.boundary += t.elapsed().as_secs_f64();
@@ -358,6 +381,50 @@ fn hold_memory<'a, B: Backend>(be: &'a B, spec: &GridSpec, params: &PbParams) ->
     MemoryHold::new(be, worker_device_bytes([spec.dims], params.preconditioner))
 }
 
+/// A pool for host work in the background of a device calculation, with the
+/// threads of the current pool but one, which stays free to drive the
+/// device. A pool of its own, because a rayon thread that waits for its own
+/// tasks runs queued ones meanwhile, and tasks sent to a busy pool queue
+/// behind its work: in one pool the device would wait for background tasks.
+/// None if the threads cannot be started (the work then runs in turn).
+fn background_pool() -> Option<rayon::ThreadPool> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(rayon::current_num_threads().saturating_sub(1).max(1))
+        .thread_name(|i| format!("pbsolve-background-{i}"))
+        .build()
+        .ok()
+}
+
+/// Runs `build` in `pool` while `foreground` runs on this thread and returns
+/// both results. Of `build`'s stage times only the wait for it after
+/// `foreground` is added to `timings`: as boundary time up to the time its
+/// boundary took (built last), beyond that as map time.
+fn in_background<F, I: Send>(
+    pool: &rayon::ThreadPool,
+    build: impl FnOnce(&mut Timings) -> I + Send,
+    foreground: impl FnOnce() -> F,
+    timings: &mut Timings,
+) -> (F, I) {
+    std::thread::scope(|s| {
+        let background = s.spawn(|| {
+            pool.install(|| {
+                let mut built = Timings::default();
+                (build(&mut built), built)
+            })
+        });
+        let out = foreground();
+        let done = Instant::now();
+        let (inputs, built) = background
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let waited = done.elapsed().as_secs_f64();
+        let boundary = waited.min(built.boundary);
+        timings.boundary += boundary;
+        timings.maps += waited - boundary;
+        (out, inputs)
+    })
+}
+
 /// Focusing solve over all levels of `spec` (APBS mg-auto sequence, see
 /// [`GridSpec::levels`]): the outermost level uses the analytic boundary
 /// condition `bcfl`, every finer level takes its boundary from the previous one.
@@ -368,13 +435,18 @@ pub fn solve_focused<B: Backend>(
     params: &PbParams,
     medium: Medium,
 ) -> Result<FieldSolution> {
+    params.validate()?;
+    let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
-    let ((grid, potential), stats, timings) = focused(be, spec, atoms, params, medium, |sol, _, timings| {
-        let t = Instant::now();
-        let field = sol.potential(be)?;
-        timings.solve += t.elapsed().as_secs_f64();
-        Ok(field)
-    })?;
+    let mut timings = Timings::default();
+    let inputs = StateInputs::new(&levels, atoms, params, medium, &mut timings);
+    let ((grid, potential), stats, timings) =
+        focused(be, levels, atoms, params, inputs, timings, |sol, _, timings| {
+            let t = Instant::now();
+            let field = sol.potential(be)?;
+            timings.solve += t.elapsed().as_secs_f64();
+            Ok(field)
+        })?;
     hold.release()?;
     Ok(FieldSolution {
         grid,
@@ -399,7 +471,9 @@ fn energy_at_charges<B: Backend>(be: &B, sol: &LevelSolution<B>, (nodes, charges
     Ok(0.5 * charges.iter().zip(&u).map(|(a, b)| a * b).sum::<f64>())
 }
 
-/// Polar (electrostatic) solvation free energy on the given grid.
+/// Polar (electrostatic) solvation free energy on the given grid. The
+/// reference state is solved first; on a device backend the host builds the
+/// solvated state's surface and outermost boundary meanwhile.
 pub fn polar_solvation<B: Backend>(
     be: &B,
     atoms: &[Atom],
@@ -412,10 +486,29 @@ pub fn polar_solvation<B: Backend>(
         timings.energy += t.elapsed().as_secs_f64();
         Ok(e)
     };
+    params.validate()?;
+    let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
-    let (solvated_kt, stats_solvated, mut timings) = focused(be, spec, atoms, params, Medium::Solvated, energy)?;
-    let (reference_kt, stats_reference, t) = focused(be, spec, atoms, params, Medium::Reference, energy)?;
-    timings += t;
+    // The states are independent, so their order does not change any result.
+    // The reference state is solved first. On a device backend the host
+    // builds the inputs of the solvated state meanwhile (see `in_background`):
+    // its molecular surface and the analytic boundary of its outermost level,
+    // which with `mdh` is the largest host stage.
+    let mut ref_timings = Timings::default();
+    let ref_inputs = StateInputs::new(&levels, atoms, params, Medium::Reference, &mut ref_timings);
+    let solvated_inputs = |timings: &mut Timings| StateInputs::new(&levels, atoms, params, Medium::Solvated, timings);
+    let reference = |levels| focused(be, levels, atoms, params, ref_inputs, ref_timings, energy);
+    let mut timings = Timings::default();
+    let (reference, inputs) = match be.runs_on_device().then(background_pool).flatten() {
+        Some(pool) => in_background(&pool, solvated_inputs, || reference(levels.clone()), &mut timings),
+        None => {
+            let reference = reference(levels.clone())?;
+            (Ok(reference), solvated_inputs(&mut timings))
+        }
+    };
+    let (reference_kt, stats_reference, ref_timings) = reference?;
+    let (solvated_kt, stats_solvated, mut timings) = focused(be, levels, atoms, params, inputs, timings, energy)?;
+    timings += ref_timings;
     hold.release()?;
     let energy_kt = solvated_kt - reference_kt;
     Ok(PolarSolvation {

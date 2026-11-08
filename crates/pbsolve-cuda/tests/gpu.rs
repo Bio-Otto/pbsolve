@@ -832,6 +832,8 @@ fn device_energies_from_the_charged_nodes_equal_the_full_potential_energies() {
         return;
     }
     let gpu = CudaBackend::new(0).unwrap();
+    // polar_solvation builds the solvated state's inputs in the background.
+    assert!(gpu.runs_on_device());
     let atoms = cluster(150, 23);
     let fine = [24.0, 22.0, 26.0];
     let spec = |coarse: [f64; 3]| GridSpec {

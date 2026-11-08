@@ -143,6 +143,13 @@ pub trait Backend {
     fn synchronize(&self) -> Result<()> {
         Ok(())
     }
+    /// Whether the kernels run on a device and leave the host's threads
+    /// mostly idle (CUDA). The pipeline then builds host-side inputs of a
+    /// later stage on those threads in the background. Results do not
+    /// depend on it. Default: false (kernels run on the host's threads).
+    fn runs_on_device(&self) -> bool {
+        false
+    }
     /// Keeps up to `bytes` more of the memory that a calculation frees
     /// reserved for its later allocations, until the matching
     /// [`release_memory`](Self::release_memory). A backend whose allocator
