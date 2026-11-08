@@ -7,15 +7,16 @@ use crate::backend::{Backend, MemoryHold};
 use crate::batch::worker_device_bytes;
 use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
 use crate::charge::{spread_charges, spread_charges_sparse};
-use crate::error::Result;
+use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::molecule::Atom;
 use crate::params::PbParams;
-use crate::solver::{pcg_on, SolveStats, SolverOptions};
+use crate::solver::{pcg_on, pcg_setup, SolveStats, SolverOptions};
 use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
 use rayon::prelude::*;
 use std::f64::consts::PI;
+use std::sync::mpsc;
 use std::time::Instant;
 
 /// Which dielectric/ionic environment to solve.
@@ -34,9 +35,9 @@ pub struct Timings {
     /// Dielectric and ion-accessibility maps (molecular surface).
     pub maps: f64,
     /// Boundary values (analytic on the coarsest level, then focusing). On a
-    /// device backend (CUDA), [`polar_solvation`] builds the solvated state's
-    /// analytic boundary (and its molecular surface, under `maps`) while the
-    /// reference state is solved; only the time spent waiting for it counts.
+    /// device backend (CUDA) the solvated state's analytic boundary (and its
+    /// molecular surface, under `maps`) is built in the background while the
+    /// device works; only the time spent waiting for it counts.
     pub boundary: f64,
     /// Charge spreading, operator and right-hand side assembly.
     pub assembly: f64,
@@ -168,49 +169,112 @@ pub fn solve_with_maps<B: Backend>(
         be.upload_owned(maps.eps_z)?,
         be.upload_owned(maps.kappa_sq)?,
     ];
-    let q = be.upload(node_charge)?;
     let boundary = grid.boundary_indices();
     let g: Vec<f64> = boundary.iter().map(|&c| g_ext[c]).collect();
     let lb0 = bjerrum_length_vacuum(temperature);
-    let (x, mut stats) = solve_assembled(be, grid, &boundary, &g, maps, q, lb0, opts)?;
+    let charges = || be.upload(node_charge);
+    let solved = solve_assembled(be, grid, &boundary, Pending::Ready(g), maps, charges, lb0, opts)?;
+    let mut stats = solved.stats;
     let t = Instant::now();
     let sol = LevelSolution::<B> {
         grid: grid.clone(),
-        x,
-        g,
+        x: solved.x,
+        g: solved.g,
     };
     let (_, u) = sol.potential(be)?;
     stats.solve_seconds += t.elapsed().as_secs_f64();
     Ok((u, stats))
 }
 
-/// Assembles the system of maps and node charges already on `be` (as
+/// A host input that is ready, or still being built in the background
+/// ([`with_background_inputs`]).
+enum Pending<T> {
+    Ready(T),
+    Later(mpsc::Receiver<T>),
+}
+
+impl<T> Pending<T> {
+    /// The value, once it is ready.
+    fn wait(self) -> Result<T> {
+        match self {
+            Self::Ready(value) => Ok(value),
+            Self::Later(rx) => rx
+                .recv()
+                .map_err(|_| PbError::Backend("the host work in the background stopped".into())),
+        }
+    }
+}
+
+/// The result of [`solve_assembled`].
+struct Solved<B: Backend> {
+    x: B::Vector,
+    /// The Dirichlet values on the boundary nodes.
+    g: Vec<f64>,
+    stats: SolveStats,
+    /// Seconds spent waiting for `g` from the background.
+    waited: f64,
+}
+
+/// Assembles the system of maps already on `be` (as
 /// [`crate::operator::StencilOperator::new`] and
 /// [`crate::operator::assemble_rhs`] do on the host) and solves it for x;
-/// u = x + g with g = `g` on the `boundary` nodes and 0 inside.
+/// u = x + g with g on the `boundary` nodes and 0 inside. `charges` puts the
+/// node charges on the backend. Boundary values still being built in the
+/// background are waited for only after the preconditioner is set up, as
+/// the setup does not need them; the results are the same either way.
 #[allow(clippy::too_many_arguments)]
 fn solve_assembled<B: Backend>(
     be: &B,
     grid: &Grid,
     boundary: &[usize],
-    g: &[f64],
+    g: Pending<Vec<f64>>,
     maps: [B::Vector; 4],
-    q: B::Vector,
+    charges: impl FnOnce() -> Result<B::Vector>,
     lb0: f64,
     opts: SolverOptions,
-) -> Result<(B::Vector, SolveStats)> {
+) -> Result<Solved<B>> {
     let n = grid.len();
     let (op, inv_diag) = be.assemble_operator(grid, maps)?;
     // b = 4π l_B0 q − A g on interior nodes, 0 on the boundary.
-    let mut b = be.zeros(n)?;
-    {
-        let g = be.scatter(n, boundary, g)?;
-        be.apply(&op, &g, &mut b)?;
+    let rhs = |g: &[f64], inv_diag: &B::Vector| -> Result<B::Vector> {
+        let mut b = be.zeros(n)?;
+        {
+            let g = be.scatter(n, boundary, g)?;
+            be.apply(&op, &g, &mut b)?;
+        }
+        let q = charges()?;
+        be.source_rhs(4.0 * PI * lb0, &q, inv_diag, &mut b)?;
+        Ok(b)
+    };
+    match g {
+        Pending::Ready(g) => {
+            let b = rhs(&g, &inv_diag)?;
+            be.synchronize()?;
+            let (x, stats) = pcg_on(be, grid.dims, &op, inv_diag, b, opts)?;
+            Ok(Solved {
+                x,
+                g,
+                stats,
+                waited: 0.0,
+            })
+        }
+        later => {
+            // The setup takes the inverse diagonal, which the right-hand side
+            // needs too. The copy takes the place b held during the setup, so
+            // the memory peak (in the iterations) does not change.
+            let mut d = be.zeros(n)?;
+            be.copy(&inv_diag, &mut d)?;
+            let prepared = pcg_setup(be, grid.dims, &op, inv_diag, opts)?;
+            let t = Instant::now();
+            let g = later.wait()?;
+            let waited = t.elapsed().as_secs_f64();
+            let b = rhs(&g, &d)?;
+            drop(d);
+            be.synchronize()?;
+            let (x, stats) = prepared.solve(be, &op, b)?;
+            Ok(Solved { x, g, stats, waited })
+        }
     }
-    be.source_rhs(4.0 * PI * lb0, &q, &inv_diag, &mut b)?;
-    drop(q);
-    be.synchronize()?;
-    pcg_on(be, grid.dims, &op, inv_diag, b, opts)
 }
 
 /// The solution of one level, still on the backend: u = x + g, with g the
@@ -264,11 +328,10 @@ type NodeCharges = (Vec<usize>, Vec<f64>);
 
 /// One LPBE solve on `grid` with Dirichlet values `g` (on
 /// `grid.boundary_indices()`). Also returns the node charges.
-#[allow(clippy::too_many_arguments)]
 fn solve_level<B: Backend>(
     be: &B,
     grid: Grid,
-    g: Vec<f64>,
+    g: Pending<Vec<f64>>,
     atoms: &[Atom],
     params: &PbParams,
     surf: Option<&MolecularSurface>,
@@ -281,14 +344,15 @@ fn solve_level<B: Backend>(
     timings.maps += t.elapsed().as_secs_f64();
     let t = Instant::now();
     let (nodes, charges) = spread_charges_sparse(&grid, atoms)?;
-    let q = be.scatter(grid.len(), &nodes, &charges)?;
     let opts = SolverOptions {
         tol: params.tol,
         max_iter: params.max_iter,
         preconditioner: params.preconditioner,
     };
     let lb0 = bjerrum_length_vacuum(params.temperature);
-    let (x, mut stats) = solve_assembled(be, &grid, &grid.boundary_indices(), &g, maps, q, lb0, opts)?;
+    let scatter = || be.scatter(grid.len(), &nodes, &charges);
+    let solved = solve_assembled(be, &grid, &grid.boundary_indices(), g, maps, scatter, lb0, opts)?;
+    let (x, g, mut stats) = (solved.x, solved.g, solved.stats);
     // The solver's buffers are freed at the next synchronisation (where no
     // calculation holds memory, the CUDA pool also returns them to the driver
     // then); that belongs to the solve.
@@ -296,9 +360,10 @@ fn solve_level<B: Backend>(
     be.synchronize()?;
     stats.solve_seconds += freeing.elapsed().as_secs_f64();
     let total = t.elapsed().as_secs_f64();
+    timings.boundary += solved.waited;
     timings.setup += stats.setup_seconds;
     timings.solve += stats.solve_seconds;
-    timings.assembly += (total - stats.setup_seconds - stats.solve_seconds).max(0.0);
+    timings.assembly += (total - solved.waited - stats.setup_seconds - stats.solve_seconds).max(0.0);
     Ok((LevelSolution { grid, x, g }, stats, (nodes, charges)))
 }
 
@@ -315,24 +380,40 @@ fn focus_from<B: Backend>(be: &B, fine: &Grid, coarse: &LevelSolution<B>) -> Res
 /// molecular surface (solvated state only) and the analytic boundary values
 /// (condition `bcfl`) of its outermost level.
 struct StateInputs {
-    surf: Option<MolecularSurface>,
-    outer_boundary: Vec<f64>,
+    surf: Pending<Option<MolecularSurface>>,
+    outer_boundary: Pending<Vec<f64>>,
+    /// Time spent building them in the foreground.
+    timings: Timings,
 }
 
 impl StateInputs {
-    /// Builds the inputs of `medium` for the focusing `levels` (surface
-    /// first, boundary last), adding their times to the `maps` and `boundary`
-    /// stages of `timings`.
-    fn new(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium: Medium, timings: &mut Timings) -> Self {
-        // The molecular surface depends only on the atoms: built once for all levels.
+    /// Builds the inputs of `medium` for the focusing `levels` now (surface
+    /// first, boundary last), timing them as `maps` and `boundary`.
+    fn build(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium: Medium) -> Self {
+        let mut timings = Timings::default();
         let t = Instant::now();
-        let surf = (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params));
+        let surf = surface_of(atoms, params, medium);
         timings.maps += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let outer_boundary = analytic_boundary_values(&levels[0], atoms, params.bcfl, &boundary_medium(params, medium));
+        let outer_boundary = outer_boundary_of(levels, atoms, params, medium);
         timings.boundary += t.elapsed().as_secs_f64();
-        Self { surf, outer_boundary }
+        Self {
+            surf: Pending::Ready(surf),
+            outer_boundary: Pending::Ready(outer_boundary),
+            timings,
+        }
     }
+}
+
+/// The molecular surface of the solvated state (None for the reference
+/// state). It depends only on the atoms: built once for all levels.
+fn surface_of(atoms: &[Atom], params: &PbParams, medium: Medium) -> Option<MolecularSurface> {
+    (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params))
+}
+
+/// The analytic boundary values of the outermost of the focusing `levels`.
+fn outer_boundary_of(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium: Medium) -> Vec<f64> {
+    analytic_boundary_values(&levels[0], atoms, params.bcfl, &boundary_medium(params, medium))
 }
 
 /// Runs the focusing sequence `levels` (APBS mg-auto, see
@@ -340,17 +421,24 @@ impl StateInputs {
 /// level takes their analytic boundary, every finer level takes its boundary
 /// from the previous one, read from the backend at the nodes it needs.
 /// `finish` turns the finest level's solution and node charges into the
-/// result. The stage times are added to `timings`.
+/// result. Time spent waiting for inputs from the background counts as map
+/// time (the surface) and boundary time (the boundary).
 fn focused<B: Backend, T>(
     be: &B,
-    levels: Vec<Grid>,
+    levels: &[Grid],
     atoms: &[Atom],
     params: &PbParams,
     inputs: StateInputs,
-    mut timings: Timings,
     finish: impl FnOnce(LevelSolution<B>, NodeCharges, &mut Timings) -> Result<T>,
 ) -> Result<(T, Vec<SolveStats>, Timings)> {
-    let StateInputs { surf, outer_boundary } = inputs;
+    let StateInputs {
+        surf,
+        outer_boundary,
+        mut timings,
+    } = inputs;
+    let t = Instant::now();
+    let surf = surf.wait()?;
+    timings.maps += t.elapsed().as_secs_f64();
     let mut outer_boundary = Some(outer_boundary);
     let mut stats = Vec::with_capacity(levels.len());
     let mut last: Option<(LevelSolution<B>, NodeCharges)> = None;
@@ -359,13 +447,13 @@ fn focused<B: Backend, T>(
         let coarse = last.take();
         let g = match &coarse {
             None => outer_boundary.take().expect("the outermost level comes first"),
-            Some((coarse, _)) => focus_from(be, &grid, coarse)?,
+            Some((coarse, _)) => Pending::Ready(focus_from(be, grid, coarse)?),
         };
         timings.boundary += t.elapsed().as_secs_f64();
         // The coarser level is released before this one allocates (freeing
         // memory belongs to no stage).
         drop(coarse);
-        let (sol, s, charges) = solve_level(be, grid, g, atoms, params, surf.as_ref(), &mut timings)?;
+        let (sol, s, charges) = solve_level(be, grid.clone(), g, atoms, params, surf.as_ref(), &mut timings)?;
         stats.push(s);
         last = Some((sol, charges));
     }
@@ -395,33 +483,43 @@ fn background_pool() -> Option<rayon::ThreadPool> {
         .ok()
 }
 
-/// Runs `build` in `pool` while `foreground` runs on this thread and returns
-/// both results. Of `build`'s stage times only the wait for it after
-/// `foreground` is added to `timings`: as boundary time up to the time its
-/// boundary took (built last), beyond that as map time.
-fn in_background<F, I: Send>(
+/// The pool for host work in the background of `be`'s calculations, if it
+/// runs on a device ([`Backend::runs_on_device`]).
+fn background_pool_for<B: Backend>(be: &B) -> Option<rayon::ThreadPool> {
+    be.runs_on_device().then(background_pool).flatten()
+}
+
+/// Builds the host inputs of the state `medium` in `pool` (its surface, then
+/// the boundary of its outermost level) while `run` uses them on this
+/// thread. The device thus assembles the maps, the operator and the
+/// preconditioner of the outermost level while its boundary is still being
+/// built. The background stops before the boundary if `run` no longer waits
+/// (it returned, for example with an error).
+fn with_background_inputs<R>(
     pool: &rayon::ThreadPool,
-    build: impl FnOnce(&mut Timings) -> I + Send,
-    foreground: impl FnOnce() -> F,
-    timings: &mut Timings,
-) -> (F, I) {
+    levels: &[Grid],
+    atoms: &[Atom],
+    params: &PbParams,
+    medium: Medium,
+    run: impl FnOnce(StateInputs) -> R,
+) -> R {
+    let (surf_tx, surf_rx) = mpsc::channel();
+    let (boundary_tx, boundary_rx) = mpsc::channel();
+    let inputs = StateInputs {
+        surf: Pending::Later(surf_rx),
+        outer_boundary: Pending::Later(boundary_rx),
+        timings: Timings::default(),
+    };
     std::thread::scope(|s| {
-        let background = s.spawn(|| {
+        s.spawn(|| {
             pool.install(|| {
-                let mut built = Timings::default();
-                (build(&mut built), built)
+                if surf_tx.send(surface_of(atoms, params, medium)).is_ok() {
+                    // An error here means `run` returned: nobody needs the values.
+                    let _ = boundary_tx.send(outer_boundary_of(levels, atoms, params, medium));
+                }
             })
         });
-        let out = foreground();
-        let done = Instant::now();
-        let (inputs, built) = background
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        let waited = done.elapsed().as_secs_f64();
-        let boundary = waited.min(built.boundary);
-        timings.boundary += boundary;
-        timings.maps += waited - boundary;
-        (out, inputs)
+        run(inputs)
     })
 }
 
@@ -438,15 +536,25 @@ pub fn solve_focused<B: Backend>(
     params.validate()?;
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
-    let mut timings = Timings::default();
-    let inputs = StateInputs::new(&levels, atoms, params, medium, &mut timings);
-    let ((grid, potential), stats, timings) =
-        focused(be, levels, atoms, params, inputs, timings, |sol, _, timings| {
-            let t = Instant::now();
-            let field = sol.potential(be)?;
-            timings.solve += t.elapsed().as_secs_f64();
-            Ok(field)
-        })?;
+    let field = |sol: LevelSolution<B>, _, timings: &mut Timings| {
+        let t = Instant::now();
+        let field = sol.potential(be)?;
+        timings.solve += t.elapsed().as_secs_f64();
+        Ok(field)
+    };
+    let ((grid, potential), stats, timings) = match background_pool_for(be) {
+        Some(pool) => with_background_inputs(&pool, &levels, atoms, params, medium, |inputs| {
+            focused(be, &levels, atoms, params, inputs, field)
+        })?,
+        None => focused(
+            be,
+            &levels,
+            atoms,
+            params,
+            StateInputs::build(&levels, atoms, params, medium),
+            field,
+        )?,
+    };
     hold.release()?;
     Ok(FieldSolution {
         grid,
@@ -473,7 +581,7 @@ fn energy_at_charges<B: Backend>(be: &B, sol: &LevelSolution<B>, (nodes, charges
 
 /// Polar (electrostatic) solvation free energy on the given grid. The
 /// reference state is solved first; on a device backend the host builds the
-/// solvated state's surface and outermost boundary meanwhile.
+/// solvated state's surface and outermost boundary in the background.
 pub fn polar_solvation<B: Backend>(
     be: &B,
     atoms: &[Atom],
@@ -490,24 +598,33 @@ pub fn polar_solvation<B: Backend>(
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
     // The states are independent, so their order does not change any result.
-    // The reference state is solved first. On a device backend the host
-    // builds the inputs of the solvated state meanwhile (see `in_background`):
-    // its molecular surface and the analytic boundary of its outermost level,
-    // which with `mdh` is the largest host stage.
-    let mut ref_timings = Timings::default();
-    let ref_inputs = StateInputs::new(&levels, atoms, params, Medium::Reference, &mut ref_timings);
-    let solvated_inputs = |timings: &mut Timings| StateInputs::new(&levels, atoms, params, Medium::Solvated, timings);
-    let reference = |levels| focused(be, levels, atoms, params, ref_inputs, ref_timings, energy);
-    let mut timings = Timings::default();
-    let (reference, inputs) = match be.runs_on_device().then(background_pool).flatten() {
-        Some(pool) => in_background(&pool, solvated_inputs, || reference(levels.clone()), &mut timings),
-        None => {
-            let reference = reference(levels.clone())?;
-            (Ok(reference), solvated_inputs(&mut timings))
-        }
-    };
-    let (reference_kt, stats_reference, ref_timings) = reference?;
-    let (solvated_kt, stats_solvated, mut timings) = focused(be, levels, atoms, params, inputs, timings, energy)?;
+    // The reference state, whose inputs are cheap (no surface, no `exp` in
+    // its boundary), is solved first. On a device backend the host builds
+    // the solvated state's surface and outermost boundary (with `mdh` the
+    // largest host stage) in the background meanwhile. The reference state's
+    // boundary is built before, with all threads, while the device has
+    // nothing to do: built in the background too, it would compete with the
+    // solvated inputs for the same threads.
+    let reference = StateInputs::build(&levels, atoms, params, Medium::Reference);
+    let ((reference_kt, stats_reference, ref_timings), (solvated_kt, stats_solvated, mut timings)) =
+        match background_pool_for(be) {
+            Some(pool) => with_background_inputs(
+                &pool,
+                &levels,
+                atoms,
+                params,
+                Medium::Solvated,
+                |solvated| -> Result<_> {
+                    let reference = focused(be, &levels, atoms, params, reference, energy)?;
+                    Ok((reference, focused(be, &levels, atoms, params, solvated, energy)?))
+                },
+            )?,
+            None => {
+                let reference = focused(be, &levels, atoms, params, reference, energy)?;
+                let solvated = StateInputs::build(&levels, atoms, params, Medium::Solvated);
+                (reference, focused(be, &levels, atoms, params, solvated, energy)?)
+            }
+        };
     timings += ref_timings;
     hold.release()?;
     let energy_kt = solvated_kt - reference_kt;
@@ -900,5 +1017,174 @@ mod tests {
         )
         .0;
         assert!((mg - jac).abs() < 1e-6 * jac.abs(), "{mg} vs {jac}");
+    }
+
+    /// Boundary values and where to send them.
+    type Gate = Option<(mpsc::Sender<Vec<f64>>, Vec<f64>)>;
+
+    /// Delegates to the CPU backend; on its first Galerkin product (the
+    /// multigrid setup) it sends the boundary values through `gate`.
+    struct GatedSetup {
+        cpu: CpuBackend,
+        gate: std::sync::Mutex<Gate>,
+    }
+
+    macro_rules! delegate {
+        ($(fn $name:ident(&self $(, $a:ident: $t:ty)*) -> $r:ty;)*) => {$(
+            fn $name(&self $(, $a: $t)*) -> $r {
+                self.cpu.$name($($a),*)
+            }
+        )*};
+    }
+
+    impl Backend for GatedSetup {
+        type Vector = <CpuBackend as Backend>::Vector;
+        type Operator = <CpuBackend as Backend>::Operator;
+        type Coarse = <CpuBackend as Backend>::Coarse;
+        type Single = crate::cpu::CpuSingle;
+
+        delegate! {
+            fn platform(&self) -> &'static str;
+            fn device_name(&self) -> String;
+            fn single(&self) -> Result<crate::cpu::CpuSingle>;
+            fn demote(&self, x: &Self::Vector, y: &mut <crate::cpu::CpuSingle as Backend>::Vector) -> Result<()>;
+            fn promote(&self, x: &<crate::cpu::CpuSingle as Backend>::Vector, y: &mut Self::Vector) -> Result<()>;
+            fn prepare(&self, op: std::sync::Arc<crate::operator::StencilOperator>) -> Result<Self::Operator>;
+            fn prepare_coarse(&self, op: std::sync::Arc<crate::multigrid::Stencil27>) -> Result<Self::Coarse>;
+            fn upload(&self, host: &[f64]) -> Result<Self::Vector>;
+            fn zeros(&self, n: usize) -> Result<Self::Vector>;
+            fn download(&self, v: &Self::Vector) -> Result<Vec<f64>>;
+            fn read(&self, v: &Self::Vector, host: &mut [f64]) -> Result<()>;
+            fn write(&self, host: &[f64], v: &mut Self::Vector) -> Result<()>;
+            fn apply(&self, op: &Self::Operator, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+            fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+            fn dot(&self, a: &Self::Vector, b: &Self::Vector) -> Result<f64>;
+            fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+            fn xpay(&self, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
+            fn axpby(&self, alpha: f64, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
+            fn scale(&self, alpha: f64, d: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+            fn copy(&self, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+            fn restrict(&self, t: &crate::multigrid::Transfer, fine: &Self::Vector, coarse: &mut Self::Vector) -> Result<()>;
+            fn prolong_add(&self, t: &crate::multigrid::Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()>;
+            fn coarse_to_host(&self, op: &Self::Coarse) -> Result<crate::multigrid::Stencil27>;
+            fn demote_operator(&self, op: &Self::Operator) -> Result<<crate::cpu::CpuSingle as Backend>::Operator>;
+            fn demote_coarse(&self, op: &Self::Coarse) -> Result<<crate::cpu::CpuSingle as Backend>::Coarse>;
+            fn scatter(&self, n: usize, idx: &[usize], values: &[f64]) -> Result<Self::Vector>;
+            fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)>;
+            fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+            fn operator_to_host(&self, op: &Self::Operator) -> Result<crate::operator::StencilOperator>;
+        }
+
+        fn mark_maps(
+            &self,
+            grid: &Grid,
+            shifts: &[[f64; 3]],
+            fill: f64,
+            passes: &[(&[crate::surface::Sphere], f64)],
+        ) -> Result<Vec<Self::Vector>> {
+            self.cpu.mark_maps(grid, shifts, fill, passes)
+        }
+
+        fn galerkin(
+            &self,
+            t: &crate::multigrid::Transfer,
+            fine: crate::multigrid::LevelOp<'_, Self>,
+        ) -> Result<(Self::Coarse, Self::Vector)> {
+            if let Some((tx, g)) = self.gate.lock().unwrap().take() {
+                tx.send(g).unwrap();
+            }
+            self.cpu.galerkin(t, lower(fine))
+        }
+
+        fn gershgorin_lmax(&self, level: crate::multigrid::LevelOp<'_, Self>) -> Result<f64> {
+            self.cpu.gershgorin_lmax(lower(level))
+        }
+    }
+
+    fn lower(op: crate::multigrid::LevelOp<'_, GatedSetup>) -> crate::multigrid::LevelOp<'_, CpuBackend> {
+        match op {
+            crate::multigrid::LevelOp::Fine(o) => crate::multigrid::LevelOp::Fine(o),
+            crate::multigrid::LevelOp::Coarse(c) => crate::multigrid::LevelOp::Coarse(c),
+        }
+    }
+
+    /// The problem of [`pending_boundary_values_are_waited_for_after_the_setup`].
+    struct GateCase {
+        atoms: Vec<Atom>,
+        params: PbParams,
+        grid: Grid,
+        g: Vec<f64>,
+        charges: NodeCharges,
+    }
+
+    /// Solves the outermost level of `case` with boundary values that are
+    /// ready or (`pending`) arrive at the first Galerkin product.
+    fn solve_gated(case: &GateCase, pc: Preconditioner, pending: bool) -> (Vec<f64>, usize) {
+        let (tx, rx) = mpsc::channel();
+        let be = GatedSetup {
+            cpu: CpuBackend::new(),
+            gate: std::sync::Mutex::new(pending.then(|| (tx, case.g.clone()))),
+        };
+        let g = if pending {
+            Pending::Later(rx)
+        } else {
+            Pending::Ready(case.g.clone())
+        };
+        let maps = CoefficientMaps::solvated(&case.grid, &case.atoms, &case.params);
+        let maps = [maps.eps_x, maps.eps_y, maps.eps_z, maps.kappa_sq].map(|m| be.upload(&m).unwrap());
+        let (nodes, charges) = &case.charges;
+        let scatter = || be.scatter(case.grid.len(), nodes, charges);
+        let opts = SolverOptions {
+            preconditioner: pc,
+            ..SolverOptions::new(case.params.tol, case.params.max_iter)
+        };
+        let lb0 = bjerrum_length_vacuum(case.params.temperature);
+        let boundary = case.grid.boundary_indices();
+        let solved = solve_assembled(&be, &case.grid, &boundary, g, maps, scatter, lb0, opts).unwrap();
+        (be.download(&solved.x).unwrap(), solved.stats.iterations)
+    }
+
+    /// Boundary values still being built in the background are waited for
+    /// only after the multigrid setup: here they arrive during the setup (a
+    /// wait before it would never end), and the solution equals the one
+    /// from values that were ready, bit for bit.
+    #[test]
+    fn pending_boundary_values_are_waited_for_after_the_setup() {
+        let atoms = small_protein();
+        let params = PbParams {
+            pdie: 2.0,
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
+        let grid = GridSpec::auto(&atoms, 0.5, 1.7, 12.0)
+            .unwrap()
+            .levels()
+            .unwrap()
+            .remove(0);
+        let g = analytic_boundary_values(&grid, &atoms, params.bcfl, &boundary_medium(&params, Medium::Solvated));
+        let charges = spread_charges_sparse(&grid, &atoms).unwrap();
+        let case = std::sync::Arc::new(GateCase {
+            atoms,
+            params,
+            grid,
+            g,
+            charges,
+        });
+        for pc in [Preconditioner::MultigridF32, Preconditioner::Multigrid] {
+            let ready = solve_gated(&case, pc, false);
+            // In a thread of its own: a wait before the setup would hang.
+            let (done_tx, done_rx) = mpsc::channel();
+            let shared = case.clone();
+            std::thread::spawn(move || done_tx.send(solve_gated(&shared, pc, true)).unwrap());
+            let pending = done_rx
+                .recv_timeout(std::time::Duration::from_secs(120))
+                .expect("the boundary values were waited for before the setup");
+            assert!(ready.1 > 0);
+            assert_eq!(pending.1, ready.1, "{pc:?}");
+            assert!(
+                pending.0.iter().zip(&ready.0).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "{pc:?}"
+            );
+        }
     }
 }

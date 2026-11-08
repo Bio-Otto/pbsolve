@@ -59,6 +59,7 @@ should update the status table below.
 | Potentials read where needed (unreleased) | The solution stays on the backend: focusing reads it at the stencil nodes of the next level's boundary, the energy at the charged nodes; energies and potentials bit-identical to the full-potential path and to a host reference of the old pipeline (7 core cases, 4 GPU cases) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); CUDA calculation 1.06–1.10× faster on a shared GPU, 0.5 GB less host memory for 5DK3; see *Potentials read only where they are needed* |
 | GPU memory kept during a calculation (unreleased) | The CUDA memory pool keeps the buffers a calculation frees between focusing levels and returns them when it ends (release threshold raised by the calculation's `worker_device_bytes`, restored and trimmed at the end, also on errors): exactly one hold per calculation (core test with a recording backend, CI), threshold and pool usage back to idle after single, failing and concurrent calculations (GPU test), 10/10 mutations caught; every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; solve stage 1.05–1.10× faster, a calculation 1.03–1.08× with `sdh` on a shared GPU; see *GPU memory kept during a calculation* |
 | `mdh` boundary vectorised and overlapped (unreleased) | Exact `mdh` sums on AVX2 (bit-identical to the scalar sums and the direct `dh` sum) and, on CUDA, the solvated state's surface and outermost boundary built while the reference state is solved: every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds), also from a recording device backend with 1 and 3 threads (CI); 6/6 mutations caught; APBS 1YCR on CUDA unchanged; CUDA calculation 1.21–1.25× faster with `mdh` (5DK3 6.60 → 5.28 s), CPU boundary 1.18–1.24×; a GPU `mdh` kernel ruled out on consumer GPUs; see *The `mdh` boundary: vectorised and overlapped* |
+| Solvated setup before its boundary (unreleased) | On CUDA the solvated state's outermost level builds maps, operator and multigrid before waiting for its boundary from the background (`pcg_setup` + `PreparedPcg::solve` = `pcg_on` bit for bit, also for b = 0): a test backend that delivers the boundary only during the setup proves the order; every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); 5/5 mutations caught; APBS 1YCR on CUDA unchanged; CUDA `mdh` 1.05–1.06× (5DK3 5.42 → 5.10 s); see *Solvated setup before its boundary* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -1150,6 +1151,88 @@ in every row.
   3.28 / 3.18 s, within noise (the other workers already fill the GPU while
   one computes its boundary). CPU 1 worker 36.7 / 37.1 → 37.3 / 36.9 s and
   2 workers 27.4 / 27.3 → 27.4 / 26.7 s, unchanged.
+
+## Solvated setup before its boundary
+
+**Problem.** After the previous step a 5DK3 calculation on CUDA still waited
+about 1.6 s for the solvated state's outermost boundary, which the host
+builds in the background. Only the right-hand side of that level needs the
+boundary values. The level's maps, operator and multigrid setup (about
+0.25 s for 5DK3) waited as well.
+
+**Change.**
+* `solver::pcg_setup` sets up the preconditioner before the right-hand side
+  is known; `PreparedPcg::solve` then runs the iterations. Together they
+  compute what `pcg_on` computes, including the b = 0 case (no iterations, one
+  level reported); `pcg_on` itself is unchanged.
+* The pipeline passes host inputs as `Pending` values: ready, or still being
+  built in the background and delivered through a channel. A level whose
+  boundary is pending runs maps → operator → multigrid setup → wait → right-hand
+  side → iterations. The setup consumes the inverse diagonal, which the
+  right-hand side needs too, so a copy is kept. The copy takes the place b
+  held during the setup, and `tests/memory.rs` confirms that the memory peak
+  is unchanged (to the byte).
+* The background sends the solvated surface, then its outermost boundary.
+  If the calculation fails while the surface is being built, the boundary is
+  skipped. `solve_focused` on CUDA uses the same path for its single state.
+* A first version also built the reference state's boundary in the
+  background, to hide the reference setup as well. Measured on 5DK3, the
+  background chain grew from 3.1 to 3.4 s (17 threads instead of 18, and
+  competition with the host work of the reference state), and the calculation
+  became no faster. The reference boundary is therefore built first, with all
+  threads, while the GPU has nothing to do yet.
+* Timings: the wait at the level counts as boundary time, the wait for the
+  surface as map time.
+
+**Checks.**
+* `pending_boundary_values_are_waited_for_after_the_setup`: a test backend
+  sends the boundary values from inside its first Galerkin product, so they
+  arrive during the setup. A wait before the setup would never end; the test
+  times out after 120 s if it does. The solution equals the one from ready
+  values bit for bit (`multigrid-f32` and `multigrid`).
+* `a_prepared_solve_equals_pcg_on`: three preconditioners, with b ≠ 0 and
+  b = 0, the same solution, iterations, residual and levels.
+* Core `tests/pipeline.rs`:
+  * the recording backend checks the call order. On a device, the solvated
+    outermost level (and that of `solve_focused`) runs its Galerkin products
+    before `source_rhs`. The reference state, the focusing levels and every
+    level on the CPU build the right-hand side first;
+  * a molecule without charges now runs through the device path too.
+* Five mutations, all caught:
+  * no copy of the inverse diagonal;
+  * the wait moved before the setup;
+  * no b = 0 branch in `PreparedPcg::solve`;
+  * the background built for the reference medium;
+  * the background boundary built on the wrong level.
+* The 13 fingerprint cases, maps and MM-PBSA species are bit-identical to the
+  previous commit on CPU and CUDA. The `cuda-12` build passes the GPU, memory
+  and retention tests. The 1YCR APBS comparison on CUDA passes with the same
+  energies (ΔΔG 422.8939 kcal/mol). The Born table is unchanged, and pytest
+  passes (109, 2 skipped).
+
+**Time** (s). A/B against the previous commit: alternating builds, two runs
+each, each the median of 6 (1YCR) or 3 calculations. The GPU was shared at
+81–98 % utilisation, and the CPU load was 7–19. Energies and potentials are
+bit-identical in every row.
+
+| Calculation | System | Previous | New | Boundary stage |
+|---|---|---|---|---|
+| CUDA, `mdh` | 1YCR | 0.254 / 0.251 | 0.248 / 0.249 | 0.031 / 0.033 → 0.036 / 0.027 |
+| CUDA, `mdh` | 1TII | 1.761 / 1.746 | 1.665 / 1.690 | 0.577 / 0.539 → 0.507 / 0.501 |
+| CUDA, `mdh` | 5DK3 | 5.425 / 5.344 | 5.041 / 5.086 | 2.542 / 2.474 → 2.088 / 2.227 |
+| CUDA, `Solver.potential` | 1TII | 1.637 / 1.645 | 1.557 / 1.590 | |
+| CUDA, `Solver.potential` | 5DK3 | 4.656 / 4.881 | 4.641 / 4.531 | |
+
+* A longer run on 5DK3 (5 alternations, 15 calculations per build) gave
+  medians of 5.42 → 5.10 s (1.06×) and boundary waits of 2.47 → 2.19 s.
+  Setup and maps of one level of 5DK3 take about 0.25 s, so most of the
+  hidden setup appears in the wall time.
+* Unchanged within noise: `sdh` and `mdh-fast` on CUDA (their boundaries take
+  0.03–0.19 s, so little waiting is left to hide); the CPU (1YCR 2.07 /
+  2.07 → 2.08 / 2.04 s, 1TII 15.75 / 15.81 → 15.79 / 15.78 s); MM-PBSA
+  batches of 1YCR on CUDA (1 worker 4.17 / 4.17 → 4.19 / 4.24 s, 3 workers
+  3.21 / 3.27 → 3.21 / 3.34 s) and on the CPU (2 workers 26.8 / 26.6 →
+  27.0 / 26.6 s).
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 

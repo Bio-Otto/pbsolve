@@ -134,11 +134,20 @@ values are computed on the host.
 they are independent, so the order changes no result. On a device backend
 (`runs_on_device`) the host builds the solvated state's inputs (its molecular
 surface and the analytic boundary of its outermost level, with `mdh` the
-largest host stage) while the reference state is solved. This work runs in a
-rayon pool of its own with one thread fewer than the caller's pool. In the
-caller's pool, a thread that waits for its own tasks would run queued
-background tasks, and the device would wait for them. `timings` count only
-the wait for the background work.
+largest host stage) while the reference state is solved. The reference
+state's own boundary is cheap and is built before, with all threads, while
+the device is idle. The background work runs in a rayon pool of its own with
+one thread fewer than the caller's pool. In the caller's pool, a thread that
+waits for its own tasks would run queued background tasks, and the device
+would wait for them.
+
+The inputs come through channels, one value at a time. The outermost level
+of the solvated state needs its boundary values only for the right-hand
+side. Before waiting for them it assembles its maps and operator and sets up
+its multigrid (`solver::pcg_setup`, then `PreparedPcg::solve`, which together
+compute what `pcg_on` computes). `solve_focused` does the same for its one
+state. `timings` count only the waits: for the surface as map time, for the
+boundary as boundary time.
 
 ## Concurrent calculations (trajectories, MM-PBSA)
 

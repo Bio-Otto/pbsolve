@@ -155,6 +155,13 @@
   are 1.16× faster on one CUDA worker, and the same within noise on three.
   On CUDA, `timings["boundary"]` and `timings["maps"]` count only the wait for
   the background work.
+- On CUDA the outermost level of the solvated state (and of `solve_focused`)
+  assembles its maps and operator and sets up its multigrid while its
+  boundary is still being built in the background. It waits for the boundary
+  only when the right-hand side needs it. Results are identical bit for bit.
+  A calculation with `mdh` is 1.05–1.06× faster (5DK3: 5.42 → 5.10 s, median
+  of 15), and `Solver.potential` 1.03–1.04×. `timings["boundary"]` now counts
+  the wait at that point, and `timings["maps"]` the wait for the surface.
 
 ### Fixed
 

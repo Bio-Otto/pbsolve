@@ -181,10 +181,13 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   consumer GPUs (f64 at 1/32–1/64 rate, estimated ~4 s for 5DK3) and would
   change the last bits (device `exp`). It remains an option for GPUs with
   full-rate f64.
-* *Next:* overlap the solvated state's maps, operator and multigrid setup
-  with its boundary, which needs the right-hand side after the setup in
-  `pcg_on` (~0.4 s for 5DK3). Then fused kernels for the CG solve, now the
-  largest CUDA stage (2.0 s for 5DK3).
+* Solvated setup before its boundary (done): on CUDA the solvated state's
+  outermost level builds its maps, operator and multigrid while its boundary
+  is still being built (`pcg_setup`, `PreparedPcg::solve`), bit-identical.
+  `mdh` calculations are 1.05–1.06× faster.
+* *Next:* fused kernels for the CG solve, now the largest CUDA stage (2.0 s
+  for 5DK3). The host `mdh` sum (~3 s for 5DK3) still bounds CUDA
+  calculations with the default boundary.
 
 ### v0.2 — Accuracy
 

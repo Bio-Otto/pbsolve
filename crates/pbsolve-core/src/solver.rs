@@ -192,89 +192,152 @@ pub fn pcg_on<B: Backend>(
     opts: SolverOptions,
 ) -> Result<(B::Vector, SolveStats)> {
     let start = Instant::now();
-    let n = dims.iter().product();
     let bnorm = be.dot(&b, &b)?.sqrt();
     if bnorm == 0.0 {
-        return Ok((
-            be.zeros(n)?,
-            SolveStats {
-                iterations: 0,
-                relative_residual: 0.0,
-                preconditioner: opts.preconditioner,
-                levels: 1,
-                setup_seconds: start.elapsed().as_secs_f64(),
-                solve_seconds: 0.0,
-            },
-        ));
+        return zero_solution(be, dims, opts, start);
     }
-    let mut pre = Precond::build(be, dims, op, inv_diag, opts.preconditioner)?;
-    let flexible = pre.is_flexible();
-    let (preconditioner, levels) = pre.kind();
+    let mut prepared = pcg_setup(be, dims, op, inv_diag, opts)?;
+    prepared.setup_seconds = start.elapsed().as_secs_f64();
+    prepared.iterate(be, op, b, bnorm)
+}
+
+/// The preconditioner of [`pcg_on`] set up before the right-hand side is
+/// known ([`pcg_setup`]); [`Self::solve`] runs the iterations. Together they
+/// compute what `pcg_on` computes, bit for bit.
+pub(crate) struct PreparedPcg<B: Backend> {
+    dims: [usize; 3],
+    pre: Precond<B>,
+    opts: SolverOptions,
+    setup_seconds: f64,
+}
+
+/// Sets up the preconditioner of `op` (a grid of `dims`, inverse diagonal
+/// `inv_diag`) for [`PreparedPcg::solve`].
+pub(crate) fn pcg_setup<B: Backend>(
+    be: &B,
+    dims: [usize; 3],
+    op: &B::Operator,
+    inv_diag: B::Vector,
+    opts: SolverOptions,
+) -> Result<PreparedPcg<B>> {
+    let start = Instant::now();
+    let pre = Precond::build(be, dims, op, inv_diag, opts.preconditioner)?;
     // Queued setup work (f32 copies) belongs to the setup time.
     be.synchronize()?;
-    let setup_seconds = start.elapsed().as_secs_f64();
-    let iterating = Instant::now();
-
-    let mut x = be.zeros(n)?;
-    let mut r = b;
-    let mut z = be.zeros(n)?;
-    let mut q = be.zeros(n)?;
-    let mut p = be.zeros(n)?;
-    pre.apply(be, op, &r, &mut z)?;
-    be.copy(&z, &mut p)?;
-    let mut rz = be.dot(&r, &z)?;
-
-    let mut rel = 1.0;
-    for it in 1..=opts.max_iter {
-        be.apply(op, &p, &mut q)?;
-        let pq = be.dot(&p, &q)?;
-        if pq.is_nan() || pq <= 0.0 {
-            return Err(PbError::Backend(format!(
-                "operator is not positive definite (pᵀAp = {pq:.3e} at iteration {it})"
-            )));
-        }
-        let alpha = rz / pq;
-        be.axpy(alpha, &p, &mut x)?;
-        be.axpy(-alpha, &q, &mut r)?;
-        // Flexible CG also needs r_{k+1}ᵀz_k (z still holds z_k): fused with ‖r‖².
-        let (rr, rz_prev) = if flexible {
-            be.dot2(&r, &r, &z)?
-        } else {
-            (be.dot(&r, &r)?, 0.0)
-        };
-        rel = rr.sqrt() / bnorm;
-        if rel < opts.tol {
-            return Ok((
-                x,
-                SolveStats {
-                    iterations: it,
-                    relative_residual: rel,
-                    preconditioner,
-                    levels,
-                    setup_seconds,
-                    solve_seconds: iterating.elapsed().as_secs_f64(),
-                },
-            ));
-        }
-        // Flexible CG (Golub & Ye 1999; Notay 2000): Polak–Ribière
-        // β = r_{k+1}ᵀ(z_{k+1} − z_k) / r_kᵀz_k keeps the search directions
-        // conjugate when the preconditioner is slightly non-symmetric. For an
-        // exactly symmetric one r_{k+1}ᵀz_k = 0 and this is plain PCG.
-        pre.apply(be, op, &r, &mut z)?;
-        let rz_new = be.dot(&r, &z)?;
-        if rz_new.is_nan() || rz_new <= 0.0 {
-            return Err(PbError::Backend(format!(
-                "preconditioner is not positive definite (rᵀz = {rz_new:.3e} at iteration {it})"
-            )));
-        }
-        let beta = if flexible { (rz_new - rz_prev) / rz } else { rz_new / rz };
-        rz = rz_new;
-        be.xpay(&z, beta, &mut p)?;
-    }
-    Err(PbError::NotConverged {
-        iterations: opts.max_iter,
-        residual: rel,
+    Ok(PreparedPcg {
+        dims,
+        pre,
+        opts,
+        setup_seconds: start.elapsed().as_secs_f64(),
     })
+}
+
+/// x = 0 for b = 0 (no preconditioner is reported, as none was needed).
+fn zero_solution<B: Backend>(
+    be: &B,
+    dims: [usize; 3],
+    opts: SolverOptions,
+    start: Instant,
+) -> Result<(B::Vector, SolveStats)> {
+    Ok((
+        be.zeros(dims.iter().product())?,
+        SolveStats {
+            iterations: 0,
+            relative_residual: 0.0,
+            preconditioner: opts.preconditioner,
+            levels: 1,
+            setup_seconds: start.elapsed().as_secs_f64(),
+            solve_seconds: 0.0,
+        },
+    ))
+}
+
+impl<B: Backend> PreparedPcg<B> {
+    /// Solves A x = b as [`pcg_on`] does; `setup_seconds` includes the setup.
+    pub(crate) fn solve(self, be: &B, op: &B::Operator, b: B::Vector) -> Result<(B::Vector, SolveStats)> {
+        let start = Instant::now();
+        let bnorm = be.dot(&b, &b)?.sqrt();
+        if bnorm == 0.0 {
+            let (x, mut stats) = zero_solution(be, self.dims, self.opts, start)?;
+            stats.setup_seconds += self.setup_seconds;
+            return Ok((x, stats));
+        }
+        self.iterate(be, op, b, bnorm)
+    }
+
+    /// The CG iterations for b with ‖b‖ = `bnorm` > 0.
+    fn iterate(self, be: &B, op: &B::Operator, b: B::Vector, bnorm: f64) -> Result<(B::Vector, SolveStats)> {
+        let Self {
+            dims,
+            mut pre,
+            opts,
+            setup_seconds,
+        } = self;
+        let n = dims.iter().product();
+        let flexible = pre.is_flexible();
+        let (preconditioner, levels) = pre.kind();
+        let iterating = Instant::now();
+        let mut x = be.zeros(n)?;
+        let mut r = b;
+        let mut z = be.zeros(n)?;
+        let mut q = be.zeros(n)?;
+        let mut p = be.zeros(n)?;
+        pre.apply(be, op, &r, &mut z)?;
+        be.copy(&z, &mut p)?;
+        let mut rz = be.dot(&r, &z)?;
+
+        let mut rel = 1.0;
+        for it in 1..=opts.max_iter {
+            be.apply(op, &p, &mut q)?;
+            let pq = be.dot(&p, &q)?;
+            if pq.is_nan() || pq <= 0.0 {
+                return Err(PbError::Backend(format!(
+                    "operator is not positive definite (pᵀAp = {pq:.3e} at iteration {it})"
+                )));
+            }
+            let alpha = rz / pq;
+            be.axpy(alpha, &p, &mut x)?;
+            be.axpy(-alpha, &q, &mut r)?;
+            // Flexible CG also needs r_{k+1}ᵀz_k (z still holds z_k): fused with ‖r‖².
+            let (rr, rz_prev) = if flexible {
+                be.dot2(&r, &r, &z)?
+            } else {
+                (be.dot(&r, &r)?, 0.0)
+            };
+            rel = rr.sqrt() / bnorm;
+            if rel < opts.tol {
+                return Ok((
+                    x,
+                    SolveStats {
+                        iterations: it,
+                        relative_residual: rel,
+                        preconditioner,
+                        levels,
+                        setup_seconds,
+                        solve_seconds: iterating.elapsed().as_secs_f64(),
+                    },
+                ));
+            }
+            // Flexible CG (Golub & Ye 1999; Notay 2000): Polak–Ribière
+            // β = r_{k+1}ᵀ(z_{k+1} − z_k) / r_kᵀz_k keeps the search directions
+            // conjugate when the preconditioner is slightly non-symmetric. For an
+            // exactly symmetric one r_{k+1}ᵀz_k = 0 and this is plain PCG.
+            pre.apply(be, op, &r, &mut z)?;
+            let rz_new = be.dot(&r, &z)?;
+            if rz_new.is_nan() || rz_new <= 0.0 {
+                return Err(PbError::Backend(format!(
+                    "preconditioner is not positive definite (rᵀz = {rz_new:.3e} at iteration {it})"
+                )));
+            }
+            let beta = if flexible { (rz_new - rz_prev) / rz } else { rz_new / rz };
+            rz = rz_new;
+            be.xpay(&z, beta, &mut p)?;
+        }
+        Err(PbError::NotConverged {
+            iterations: opts.max_iter,
+            residual: rel,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -433,5 +496,46 @@ mod tests {
         let per_node = |pc| solve_device_bytes([193, 313, 321], pc) as f64 / n as f64;
         assert!((131.0..132.0).contains(&per_node(Preconditioner::MultigridF32)));
         assert!((142.0..143.0).contains(&per_node(Preconditioner::Multigrid)));
+    }
+
+    /// Setting up first and solving later ([`pcg_setup`], [`PreparedPcg::solve`])
+    /// gives what `pcg_on` gives, bit for bit, also for b = 0.
+    #[test]
+    fn a_prepared_solve_equals_pcg_on() {
+        let be = CpuBackend::new();
+        let (op, b) = system(33);
+        let dims = op.dims;
+        for pc in [
+            Preconditioner::MultigridF32,
+            Preconditioner::Multigrid,
+            Preconditioner::Jacobi,
+        ] {
+            let opts = SolverOptions {
+                preconditioner: pc,
+                ..SolverOptions::new(1e-8, 500)
+            };
+            for b in [b.clone(), vec![0.0; b.len()]] {
+                let dop = be.prepare(op.clone()).unwrap();
+                let direct = pcg_on(
+                    &be,
+                    dims,
+                    &dop,
+                    be.upload(&op.inv_diag).unwrap(),
+                    be.upload(&b).unwrap(),
+                    opts,
+                );
+                let (x, s) = direct.unwrap();
+                let prepared = pcg_setup(&be, dims, &dop, be.upload(&op.inv_diag).unwrap(), opts).unwrap();
+                let (y, t) = prepared.solve(&be, &dop, be.upload(&b).unwrap()).unwrap();
+                let (x, y) = (be.download(&x).unwrap(), be.download(&y).unwrap());
+                assert!(x.iter().zip(&y).all(|(a, b)| a.to_bits() == b.to_bits()), "{pc:?}");
+                assert_eq!(
+                    (s.iterations, s.relative_residual.to_bits(), s.preconditioner, s.levels),
+                    (t.iterations, t.relative_residual.to_bits(), t.preconditioner, t.levels),
+                    "{pc:?}"
+                );
+                assert!(t.setup_seconds >= 0.0 && t.solve_seconds >= 0.0);
+            }
+        }
     }
 }

@@ -2,8 +2,9 @@
 //! the calls around the CPU backend: calculations retain memory from start to
 //! end (`Backend::retain_memory` / `release_memory` through `MemoryHold`),
 //! and a backend that claims to run on a device (`Backend::runs_on_device`)
-//! makes `polar_solvation` build the solvated state's inputs in the
-//! background without changing any result.
+//! makes the pipeline build host inputs (the solvated surface and outermost
+//! boundary) in the background and set up the outermost level before its
+//! boundary is ready, without changing any result.
 
 use pbsolve_core::backend::MemoryHold;
 use pbsolve_core::batch::{polar_solvation_batch, worker_device_bytes, Job};
@@ -28,6 +29,8 @@ enum Event {
 struct Recorder {
     cpu: CpuBackend,
     events: Mutex<Vec<Event>>,
+    /// The name of every backend call, in order.
+    calls: Mutex<Vec<&'static str>>,
     device: bool,
 }
 
@@ -49,6 +52,15 @@ impl Recorder {
     fn take(&self) -> Vec<Event> {
         std::mem::take(&mut *self.events.lock().unwrap())
     }
+
+    fn call(&self, name: &'static str) {
+        self.record(Event::Work);
+        self.calls.lock().unwrap().push(name);
+    }
+
+    fn take_calls(&self) -> Vec<&'static str> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
 }
 
 fn lower<'a>(op: LevelOp<'a, Recorder>) -> LevelOp<'a, CpuBackend> {
@@ -61,7 +73,7 @@ fn lower<'a>(op: LevelOp<'a, Recorder>) -> LevelOp<'a, CpuBackend> {
 macro_rules! delegate {
     ($(fn $name:ident(&self $(, $a:ident: $t:ty)*) -> $r:ty;)*) => {$(
         fn $name(&self $(, $a: $t)*) -> $r {
-            self.record(Event::Work);
+            self.call(stringify!($name));
             self.cpu.$name($($a),*)
         }
     )*};
@@ -111,12 +123,12 @@ impl Backend for Recorder {
     }
 
     fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)> {
-        self.record(Event::Work);
+        self.call("galerkin");
         self.cpu.galerkin(t, lower(fine))
     }
 
     fn gershgorin_lmax(&self, level: LevelOp<'_, Self>) -> Result<f64> {
-        self.record(Event::Work);
+        self.call("gershgorin_lmax");
         self.cpu.gershgorin_lmax(lower(level))
     }
 
@@ -298,33 +310,88 @@ fn numerics(p: &PolarSolvation) -> Vec<u64> {
 }
 
 /// On a device the solvated state's surface and outermost boundary are built
-/// in a pool of their own while the reference state is solved: every
-/// boundary condition gives the results of the CPU backend bit for bit, with
-/// one thread or several, and the stage times stay non-negative and within
-/// the wall time.
+/// in a pool of their own while the device works: every boundary
+/// condition, and a molecule without charges, gives the results of the CPU
+/// backend bit for bit, with one thread or several, and the stage times stay
+/// non-negative and within the wall time.
 #[test]
-fn building_the_solvated_inputs_in_the_background_changes_no_result() {
+fn building_inputs_in_the_background_changes_no_result() {
     let atoms = atoms();
     let dims = [33, 29, 37];
-    for bcfl in ["mdh", "mdh-fast", "sdh", "zero"] {
+    // Without charges b = 0 on every level (no iterations, one level reported).
+    let neutral: Vec<Atom> = atoms.iter().map(|a| Atom { charge: 0.0, ..*a }).collect();
+    for (bcfl, atoms) in [
+        ("mdh", &atoms),
+        ("mdh-fast", &atoms),
+        ("sdh", &atoms),
+        ("zero", &atoms),
+        ("mdh", &neutral),
+    ] {
         let params = PbParams {
             bcfl: BoundaryCondition::parse(bcfl).unwrap(),
             ..params(Preconditioner::MultigridF32)
         };
-        let cpu = polar_solvation(&CpuBackend::default(), &atoms, &params, &spec(dims)).unwrap();
+        let cpu = polar_solvation(&CpuBackend::default(), atoms, &params, &spec(dims)).unwrap();
         for threads in [1, 3] {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
             let rec = Recorder::on_device();
             let t = std::time::Instant::now();
             let p = pool
-                .install(|| polar_solvation(&rec, &atoms, &params, &spec(dims)))
+                .install(|| polar_solvation(&rec, atoms, &params, &spec(dims)))
                 .unwrap();
             let wall = t.elapsed().as_secs_f64();
             assert_eq!(numerics(&p), numerics(&cpu), "{bcfl}, {threads} threads");
+            if atoms[0].charge == 0.0 {
+                let stats = p.stats_solvated.iter().chain(&p.stats_reference);
+                assert!(stats.into_iter().all(|s| s.iterations == 0 && s.levels == 1));
+            }
             let t = p.timings;
             let stages = [t.maps, t.boundary, t.assembly, t.setup, t.solve, t.energy];
             assert!(stages.iter().all(|s| s.is_finite() && *s >= 0.0), "{bcfl}: {t:?}");
             assert!(t.total() <= wall, "{bcfl}: stages {} s, wall {wall} s", t.total());
         }
+    }
+}
+
+/// The calls of each level, split at its operator assembly.
+fn levels_of(calls: &[&'static str]) -> Vec<Vec<&'static str>> {
+    let mut levels: Vec<Vec<&'static str>> = Vec::new();
+    for &c in calls {
+        if c == "assemble_operator" {
+            levels.push(Vec::new());
+        }
+        if let Some(level) = levels.last_mut() {
+            level.push(c);
+        }
+    }
+    levels
+}
+
+/// Whether a level sets up its multigrid before it builds its right-hand side.
+fn setup_first(level: &[&'static str]) -> bool {
+    let at = |name| level.iter().position(|&c| c == name).unwrap();
+    at("galerkin") < at("source_rhs")
+}
+
+/// On a device the outermost level of the solvated state (and of a single
+/// `solve_focused` state) assembles its operator and sets up its multigrid
+/// before it builds the right-hand side, the first step that needs the
+/// boundary still being built in the background. The reference state, whose
+/// boundary is built first, the focusing levels, whose boundary is ready,
+/// and every level on the CPU build the right-hand side first.
+#[test]
+fn on_a_device_the_outermost_setup_runs_before_its_boundary_is_needed() {
+    let atoms = atoms();
+    let dims = [33, 29, 37];
+    let params = params(Preconditioner::MultigridF32);
+    for (rec, outer_first) in [(Recorder::on_device(), true), (Recorder::default(), false)] {
+        polar_solvation(&rec, &atoms, &params, &spec(dims)).unwrap();
+        let levels = levels_of(&rec.take_calls());
+        let order: Vec<bool> = levels.iter().map(|l| setup_first(l)).collect();
+        // Two states (reference first), two levels each.
+        assert_eq!(order, [false, false, outer_first, false], "device {}", rec.device);
+        solve_focused(&rec, &spec(dims), &atoms, &params, Medium::Solvated).unwrap();
+        let order: Vec<bool> = levels_of(&rec.take_calls()).iter().map(|l| setup_first(l)).collect();
+        assert_eq!(order, [outer_first, false], "device {}", rec.device);
     }
 }
