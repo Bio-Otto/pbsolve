@@ -83,6 +83,12 @@
 - `PolarResult.timings` gives the seconds spent per stage: maps, boundary,
   assembly, setup, solve and energy. `SolveStats` gains `setup_seconds` and
   `solve_seconds`; `PolarSolvation` and `FieldSolution` gain `timings`.
+- Documentation site (not published yet): Sphinx with MyST and furo, built
+  from the existing pages (`docs/*.md`, `CHANGELOG.md`, the README), the
+  tutorial notebook with its stored outputs, and an API reference read from
+  the sources and `_core.pyi` (nothing is executed). Configuration for Read
+  the Docs (`.readthedocs.yaml`) and a GitHub Actions workflow that builds it
+  with warnings as errors and can publish it to GitHub Pages.
 
 ### Changed
 

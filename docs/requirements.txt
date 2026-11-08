@@ -1,0 +1,8 @@
+# Documentation build (Read the Docs, GitHub Pages, local); see docs/conf.py.
+# Pinned to releases at least 14 days old when chosen (2026-11-08).
+sphinx==9.1.1
+myst-nb==1.4.0
+myst-parser==5.1.0
+sphinx-autoapi==3.8.1
+furo==2025.12.19
+sphinx-copybutton==0.5.2

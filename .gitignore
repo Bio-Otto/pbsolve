@@ -7,3 +7,5 @@ __pycache__/
 .pytest_cache/
 THIRDPARTY.yml
 examples/tutorial_output/
+docs/_build/
+docs/tutorial.ipynb

@@ -4,7 +4,7 @@ Status: draft for v0.1–v1.0, written after v0.0.1 (November 2026).
 Each item states **why** (the scientific or engineering gap, with literature),
 **what** we build, and **how we will know it works** (acceptance evidence).
 Items are implemented from the published equations; see
-[Licensing guardrails](#licensing-guardrails) before reading other codes.
+[Licensing guardrails](#7-licensing-guardrails) before reading other codes.
 
 ## 1. Where pbsolve should stand
 

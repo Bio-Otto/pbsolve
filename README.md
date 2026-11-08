@@ -2,6 +2,7 @@
 
 **Fast Poisson–Boltzmann electrostatics and solvation energies — Rust core, CPU/CUDA backends, Python API.**
 
+<!-- docs-intro-start -->
 pbsolve computes electrostatic potentials and polar solvation energies of
 biomolecules from the Poisson–Boltzmann equation, on the CPU or on NVIDIA GPUs,
 and plugs directly into simulation and MM-PBSA workflows. The current release
@@ -30,9 +31,11 @@ solution methods and integrations can be added.
   and common trajectory formats, plus built-in preparation of PDB files.
 * **Validated and reproducible** — checked against analytic results and
   established tools (`docs/VALIDATION.md`); deterministic on every platform.
+<!-- docs-intro-end -->
 
 ## Install
 
+<!-- docs-install-start -->
 ```bash
 conda install -c conda-forge pbsolve        # once published; picks CUDA or CPU automatically
 # from source
@@ -46,6 +49,7 @@ Check the installation (like `python -m openmm.testInstallation`):
 pbsolve test        # Born ion on every available platform + cross-platform agreement
 pbsolve info        # build / CUDA status and the reason if CUDA is unavailable
 ```
+<!-- docs-install-end -->
 
 ## Input files
 

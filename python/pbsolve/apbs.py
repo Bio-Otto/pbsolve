@@ -666,7 +666,7 @@ class ComparisonReport:
 
     def passed(self, energy_rtol: float = 1e-3) -> bool:
         """Grids identical, maps (if compared) identical up to ties, injection
-        potential within 1e-4 of the potential scale, and |ΔG| relative
+        potential within 1e-4 of the potential scale, and ``|ΔG|`` relative
         difference ≤ ``energy_rtol``."""
         if self.grid_issues:
             return False
