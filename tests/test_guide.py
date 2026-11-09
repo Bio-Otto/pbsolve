@@ -8,13 +8,14 @@
 
 The examples run in a temporary directory that links ``tests`` from the
 repository, so their paths work and their output files land there. To keep
-the suite fast, ``pbsolve.Solver`` defaults to ``fadd=12.0`` here (as in the
-other tests); the examples pass everything else as written.
+the suite fast (CI runners are slow), ``pbsolve.Solver`` builds coarse
+automatic grids here: a fine spacing of at least 1 Å and ``fadd=12.0``
+unless an example sets ``fadd``. The examples still exercise every call they
+show; only the numbers they print differ from a run at full resolution.
 """
 
 from __future__ import annotations
 
-import functools
 import os
 import re
 import subprocess
@@ -38,6 +39,19 @@ def python_blocks(page: str) -> list[str]:
     return [body for lang, body in FENCE.findall(text) if lang == "python"]
 
 
+COARSEST_SPACING = 1.0  # Å
+
+
+def coarse_solver(**kwargs):
+    """``pbsolve.Solver`` with coarse automatic grids (see the module docstring)."""
+    kwargs["grid_spacing"] = max(kwargs.get("grid_spacing", COARSEST_SPACING), COARSEST_SPACING)
+    kwargs.setdefault("fadd", 12.0)
+    return SOLVER(**kwargs)
+
+
+SOLVER = pbsolve.Solver
+
+
 @pytest.mark.parametrize("page", PAGES)
 def test_the_examples_of_the_guide_run(page, tmp_path, monkeypatch):
     blocks = python_blocks(page)
@@ -45,7 +59,7 @@ def test_the_examples_of_the_guide_run(page, tmp_path, monkeypatch):
         pytest.skip(f"{page}.md has no runnable examples")
     (tmp_path / "tests").symlink_to(REPO / "tests", target_is_directory=True)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(pbsolve, "Solver", functools.partial(pbsolve.Solver, fadd=12.0))
+    monkeypatch.setattr(pbsolve, "Solver", coarse_solver)
     namespace: dict = {"__name__": f"guide_{page}"}
     for n, block in enumerate(blocks, 1):
         try:
