@@ -185,9 +185,13 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   outermost level builds its maps, operator and multigrid while its boundary
   is still being built (`pcg_setup`, `PreparedPcg::solve`), bit-identical.
   `mdh` calculations are 1.05–1.06× faster.
-* *Next:* fused kernels for the CG solve, now the largest CUDA stage (2.0 s
-  for 5DK3). The host `mdh` sum (~3 s for 5DK3) still bounds CUDA
-  calculations with the default boundary.
+* Fused multigrid smoother (done): the V-cycle's residual and Chebyshev
+  updates run as one pass (CPU) or kernel (CUDA) each, bit-identical; CPU
+  calculations 1.17–1.25×, the CUDA solve stage 1.17–1.26×.
+* *Next:* fuse the CG vector updates and dot products at the f64 level
+  (x, r, ‖r‖² and the f32 copy of r in one pass), and measure the CUDA
+  smoother gain on an idle GPU. The host `mdh` sum (~3 s for 5DK3) still
+  bounds CUDA calculations with the default boundary.
 
 ### v0.2 — Accuracy
 

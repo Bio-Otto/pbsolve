@@ -81,6 +81,67 @@ pub trait Backend {
     /// fine ← fine + P coarse ([`crate::multigrid::prolong_add`]).
     fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()>;
 
+    // Steps of the multigrid smoother ([`crate::multigrid`]). Each one is a
+    // sequence of the operations above; the defaults run that sequence
+    // ([`residual_by_steps`], [`chebyshev_first_by_steps`],
+    // [`chebyshev_next_by_steps`]). A backend may fuse it into one pass if it
+    // evaluates every element with the same expressions, so that the results
+    // are identical bit for bit; the scratch vector `t` may then be left
+    // untouched, and callers must not read it afterwards.
+
+    /// Residual of a level: r_i ← s_i + (−1)·(A x)_i, where s = `b`, or s = `r`
+    /// itself when `b` is `None`. As `apply` (or `apply_coarse`) into `t`,
+    /// `copy(b, r)` and `axpy(−1, t, r)`.
+    fn residual(
+        &self,
+        op: LevelOp<'_, Self>,
+        x: &Self::Vector,
+        b: Option<&Self::Vector>,
+        t: &mut Self::Vector,
+        r: &mut Self::Vector,
+    ) -> Result<()>
+    where
+        Self: Sized,
+    {
+        residual_by_steps(self, op, x, b, t, r)
+    }
+    /// First Chebyshev step: d_i ← (s·w_i)·r_i, then x_i ← d_i (`overwrite`)
+    /// or x_i ← x_i + 1·d_i. As `scale(s, w, r, d)` and `copy(d, x)` or
+    /// `axpy(1, d, x)`.
+    fn chebyshev_first(
+        &self,
+        s: f64,
+        w: &Self::Vector,
+        r: &Self::Vector,
+        d: &mut Self::Vector,
+        x: &mut Self::Vector,
+        overwrite: bool,
+    ) -> Result<()>
+    where
+        Self: Sized,
+    {
+        chebyshev_first_by_steps(self, s, w, r, d, x, overwrite)
+    }
+    /// Later Chebyshev step: t_i ← (c1·w_i)·r_i, d_i ← 1·t_i + c2·d_i,
+    /// x_i ← x_i + 1·d_i. As `scale(c1, w, r, t)`, `axpby(1, t, c2, d)` and
+    /// `axpy(1, d, x)`.
+    #[allow(clippy::too_many_arguments)]
+    fn chebyshev_next(
+        &self,
+        c1: f64,
+        w: &Self::Vector,
+        r: &Self::Vector,
+        c2: f64,
+        t: &mut Self::Vector,
+        d: &mut Self::Vector,
+        x: &mut Self::Vector,
+    ) -> Result<()>
+    where
+        Self: Sized,
+    {
+        chebyshev_next_by_steps(self, c1, w, r, c2, t, d, x)
+    }
+
     // Multigrid setup ([`crate::multigrid::Levels::build`]). Only f64
     // backends build hierarchies; their twins return an error.
 
@@ -198,6 +259,61 @@ impl<B: Backend> Drop for MemoryHold<'_, B> {
             let _ = be.release_memory(self.bytes);
         }
     }
+}
+
+/// [`Backend::residual`] as its sequence of operations (the default, and the
+/// reference fused implementations are tested against).
+pub fn residual_by_steps<B: Backend>(
+    be: &B,
+    op: LevelOp<'_, B>,
+    x: &B::Vector,
+    b: Option<&B::Vector>,
+    t: &mut B::Vector,
+    r: &mut B::Vector,
+) -> Result<()> {
+    match op {
+        LevelOp::Fine(o) => be.apply(o, x, t)?,
+        LevelOp::Coarse(o) => be.apply_coarse(o, x, t)?,
+    }
+    if let Some(b) = b {
+        be.copy(b, r)?;
+    }
+    be.axpy(-1.0, t, r)
+}
+
+/// [`Backend::chebyshev_first`] as its sequence of operations.
+pub fn chebyshev_first_by_steps<B: Backend>(
+    be: &B,
+    s: f64,
+    w: &B::Vector,
+    r: &B::Vector,
+    d: &mut B::Vector,
+    x: &mut B::Vector,
+    overwrite: bool,
+) -> Result<()> {
+    be.scale(s, w, r, d)?;
+    if overwrite {
+        be.copy(d, x)
+    } else {
+        be.axpy(1.0, d, x)
+    }
+}
+
+/// [`Backend::chebyshev_next`] as its sequence of operations.
+#[allow(clippy::too_many_arguments)]
+pub fn chebyshev_next_by_steps<B: Backend>(
+    be: &B,
+    c1: f64,
+    w: &B::Vector,
+    r: &B::Vector,
+    c2: f64,
+    t: &mut B::Vector,
+    d: &mut B::Vector,
+    x: &mut B::Vector,
+) -> Result<()> {
+    be.scale(c1, w, r, t)?;
+    be.axpby(1.0, t, c2, d)?;
+    be.axpy(1.0, d, x)
 }
 
 /// Checks the arguments of [`Backend::scatter`]: as many values as indices,

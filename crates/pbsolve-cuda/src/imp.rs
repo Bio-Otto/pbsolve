@@ -154,6 +154,12 @@ struct Kernels {
     prolong: CudaFunction,
     demote: CudaFunction,
     promote: CudaFunction,
+    residual: CudaFunction,
+    residual_update: CudaFunction,
+    residual27: CudaFunction,
+    residual27_update: CudaFunction,
+    cheb_first: CudaFunction,
+    cheb_next: CudaFunction,
 }
 
 /// Multigrid setup and assembly kernels (f64 only).
@@ -208,6 +214,12 @@ impl Kernels {
             prolong: f(format!("pb_prolong_add_{s}"))?,
             demote: f(format!("pb_convert_{s}_f32"))?,
             promote: f(format!("pb_convert_f32_{s}"))?,
+            residual: f(format!("pb_residual_{s}"))?,
+            residual_update: f(format!("pb_residual_update_{s}"))?,
+            residual27: f(format!("pb_residual27_{s}"))?,
+            residual27_update: f(format!("pb_residual27_update_{s}"))?,
+            cheb_first: f(format!("pb_cheb_first_{s}"))?,
+            cheb_next: f(format!("pb_cheb_next_{s}"))?,
         })
     }
 }
@@ -753,6 +765,99 @@ impl<T: CudaReal> Backend for Dev<T> {
         b.arg(&n).arg(&beta).arg(x).arg(y);
         // SAFETY: argument list matches the kernel signature.
         unsafe { b.launch(Self::grid_for(x.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_xpay"))?;
+        Ok(())
+    }
+
+    // The smoother steps fused into one kernel each (pb_residual*,
+    // pb_cheb_first, pb_cheb_next), with the expressions of the separate
+    // kernels, so the results equal the step-by-step defaults bit for bit.
+    // The scratch vector `t` is not used.
+
+    fn residual(
+        &self,
+        op: LevelOp<'_, Self>,
+        x: &Self::Vector,
+        b: Option<&Self::Vector>,
+        _t: &mut Self::Vector,
+        r: &mut Self::Vector,
+    ) -> Result<()> {
+        let (n, name) = match (op, b) {
+            (LevelOp::Fine(op), b) => {
+                let [nx, ny, nz] = op.dims;
+                let [cx, cy, cz] = op.coef;
+                let f = if b.is_some() {
+                    &self.k.residual
+                } else {
+                    &self.k.residual_update
+                };
+                let mut l = self.stream().launch_builder(f);
+                l.arg(&nx).arg(&ny).arg(&nz).arg(&cx).arg(&cy).arg(&cz);
+                l.arg(&op.eps_x).arg(&op.eps_y).arg(&op.eps_z).arg(&op.kvol).arg(x);
+                if let Some(b) = b {
+                    l.arg(b);
+                }
+                l.arg(&mut *r);
+                // SAFETY: argument list matches pb_residual(_update); buffers have length n.
+                unsafe { l.launch(Self::grid_for(op.n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_residual"))?;
+                (op.n, "pb_residual")
+            }
+            (LevelOp::Coarse(op), b) => {
+                let [nx, ny, nz] = op.dims;
+                let f = if b.is_some() {
+                    &self.k.residual27
+                } else {
+                    &self.k.residual27_update
+                };
+                let mut l = self.stream().launch_builder(f);
+                l.arg(&nx).arg(&ny).arg(&nz).arg(&op.coef).arg(x);
+                if let Some(b) = b {
+                    l.arg(b);
+                }
+                l.arg(&mut *r);
+                // SAFETY: argument list matches pb_residual27(_update); coef has 27 n values.
+                unsafe { l.launch(Self::grid_for(op.n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_residual27"))?;
+                (op.n, "pb_residual27")
+            }
+        };
+        debug_assert!(x.len() == n && r.len() == n, "{name}: vector lengths");
+        Ok(())
+    }
+
+    fn chebyshev_first(
+        &self,
+        s: f64,
+        w: &Self::Vector,
+        r: &Self::Vector,
+        d: &mut Self::Vector,
+        x: &mut Self::Vector,
+        overwrite: bool,
+    ) -> Result<()> {
+        let n = r.len() as i64;
+        let s = T::from_f64(s);
+        let overwrite = i32::from(overwrite);
+        let mut b = self.stream().launch_builder(&self.k.cheb_first);
+        b.arg(&n).arg(&s).arg(w).arg(r).arg(d).arg(x).arg(&overwrite);
+        // SAFETY: argument list matches the kernel signature.
+        unsafe { b.launch(Self::grid_for(r.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_cheb_first"))?;
+        Ok(())
+    }
+
+    fn chebyshev_next(
+        &self,
+        c1: f64,
+        w: &Self::Vector,
+        r: &Self::Vector,
+        c2: f64,
+        _t: &mut Self::Vector,
+        d: &mut Self::Vector,
+        x: &mut Self::Vector,
+    ) -> Result<()> {
+        let n = r.len() as i64;
+        let (c1, c2) = (T::from_f64(c1), T::from_f64(c2));
+        let mut b = self.stream().launch_builder(&self.k.cheb_next);
+        b.arg(&n).arg(&c1).arg(w).arg(r).arg(&c2).arg(d).arg(x);
+        // SAFETY: argument list matches the kernel signature.
+        unsafe { b.launch(Self::grid_for(r.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_cheb_next"))?;
         Ok(())
     }
 

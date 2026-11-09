@@ -876,3 +876,103 @@ fn device_energies_from_the_charged_nodes_equal_the_full_potential_energies() {
     }
     assert_eq!(levels, [1, 2, 2, 3]);
 }
+
+/// Each fused smoother step on the GPU (one kernel) equals the same step run
+/// operation by operation on the GPU and on the CPU, in both precisions, on
+/// the fine 7-point and a coarse 27-point operator.
+#[test]
+fn fused_smoother_steps_on_the_gpu_equal_their_sequences() {
+    use pbsolve_core::backend::{chebyshev_first_by_steps, chebyshev_next_by_steps, residual_by_steps};
+    use pbsolve_core::multigrid::{Chebyshev, Hierarchy, LevelOp};
+    if !gpu_present("fused_smoother_steps_on_the_gpu_equal_their_sequences") {
+        return;
+    }
+    let (op, _) = system();
+    let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+    let coarse = h.coarse[0].clone();
+    let gpu = CudaBackend::new(0).unwrap();
+
+    /// Every step on `be`, fused and by steps: the bits of every output, in
+    /// (fused, by steps) pairs.
+    fn run<B: Backend>(
+        be: &B,
+        op: &Arc<StencilOperator>,
+        coarse: &Arc<pbsolve_core::multigrid::Stencil27>,
+    ) -> Vec<Vec<u64>> {
+        let fine = be.prepare(op.clone()).unwrap();
+        let co = be.prepare_coarse(coarse.clone()).unwrap();
+        let vec = |len: usize, seed: usize| be.upload(&system_like(len + 31 * seed)[31 * seed..]).unwrap();
+        let down = |v: &B::Vector| bits(&be.download(v).unwrap());
+        let mut out = Vec::new();
+        for (level, len) in [
+            (LevelOp::<B>::Fine(&fine), op.len()),
+            (LevelOp::Coarse(&co), coarse.len()),
+        ] {
+            let (x, b) = (vec(len, 1), vec(len, 2));
+            for from_b in [true, false] {
+                let src = from_b.then_some(&b);
+                let (mut t, mut r) = (vec(len, 3), vec(len, 4));
+                be.residual(level, &x, src, &mut t, &mut r).unwrap();
+                out.push(down(&r));
+                let (mut t, mut r) = (vec(len, 3), vec(len, 4));
+                residual_by_steps(be, level, &x, src, &mut t, &mut r).unwrap();
+                out.push(down(&r));
+            }
+            let (w, r) = (vec(len, 5), vec(len, 6));
+            for overwrite in [true, false] {
+                let (mut d1, mut x1) = (vec(len, 7), vec(len, 8));
+                be.chebyshev_first(0.37, &w, &r, &mut d1, &mut x1, overwrite).unwrap();
+                let (mut d2, mut x2) = (vec(len, 7), vec(len, 8));
+                chebyshev_first_by_steps(be, 0.37, &w, &r, &mut d2, &mut x2, overwrite).unwrap();
+                out.extend([down(&d1), down(&d2), down(&x1), down(&x2)]);
+            }
+            let (mut t1, mut d1, mut x1) = (vec(len, 9), vec(len, 10), vec(len, 11));
+            be.chebyshev_next(0.81, &w, &r, -0.29, &mut t1, &mut d1, &mut x1)
+                .unwrap();
+            let (mut t2, mut d2, mut x2) = (vec(len, 9), vec(len, 10), vec(len, 11));
+            chebyshev_next_by_steps(be, 0.81, &w, &r, -0.29, &mut t2, &mut d2, &mut x2).unwrap();
+            out.extend([down(&d1), down(&d2), down(&x1), down(&x2)]);
+        }
+        out
+    }
+
+    let cpu = CpuBackend::new();
+    for (name, on_gpu, on_cpu) in [
+        ("f64", run(&gpu, &op, &coarse), run(&cpu, &op, &coarse)),
+        (
+            "f32",
+            run(&gpu.single().unwrap(), &op, &coarse),
+            run(&cpu.single().unwrap(), &op, &coarse),
+        ),
+    ] {
+        // Fused and step-by-step results come in pairs.
+        for (k, pair) in on_gpu.chunks(2).enumerate() {
+            assert!(pair[0] == pair[1], "{name}: GPU fused != GPU steps (output {k})");
+        }
+        assert!(on_gpu == on_cpu, "{name}: GPU != CPU");
+    }
+}
+
+/// A whole V-cycle (fused smoother) gives the same bits on the GPU as on the
+/// CPU, in both precisions.
+#[test]
+fn gpu_vcycle_equals_the_cpu_vcycle_bit_for_bit() {
+    use pbsolve_core::multigrid::{Chebyshev, Hierarchy, MultigridPreconditioner};
+    if !gpu_present("gpu_vcycle_equals_the_cpu_vcycle_bit_for_bit") {
+        return;
+    }
+    let (op, b) = system();
+    fn vcycle<B: Backend>(be: &B, op: &Arc<StencilOperator>, b: &[f64]) -> Vec<u64> {
+        let h = Hierarchy::build(op, Chebyshev::default()).unwrap().unwrap();
+        let mut m = MultigridPreconditioner::new(be, op, h).unwrap();
+        let dev = be.prepare(op.clone()).unwrap();
+        let mut z = be.zeros(b.len()).unwrap();
+        m.apply(be, &dev, &be.upload(b).unwrap(), &mut z).unwrap();
+        bits(&be.download(&z).unwrap())
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let cpu = CpuBackend::new();
+    assert!(vcycle(&gpu, &op, &b) == vcycle(&cpu, &op, &b), "f64");
+    let (g32, c32) = (gpu.single().unwrap(), cpu.single().unwrap());
+    assert!(vcycle(&g32, &op, &b) == vcycle(&c32, &op, &b), "f32");
+}

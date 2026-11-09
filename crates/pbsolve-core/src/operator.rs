@@ -155,29 +155,57 @@ pub fn apply7<T: Real>(
     x: &[T],
     y: &mut [T],
 ) {
+    apply7_with(dims, coef, eps_x, eps_y, eps_z, kvol, x, y, |_, _, v| v);
+}
+
+/// `out[c] ← combine(out[c], c, v_c)` for every node c, where v_c is the value
+/// [`apply7`] writes: (A x)_c on interior nodes, 0 on boundary nodes. With
+/// `combine = |_, _, v| v` this is `apply7`; the multigrid residuals
+/// ([`crate::backend::Backend::residual`]) use it to fuse A x with the update.
+#[allow(clippy::too_many_arguments)]
+pub fn apply7_with<T: Real, F>(
+    dims: [usize; 3],
+    coef: [T; 3],
+    eps_x: &[T],
+    eps_y: &[T],
+    eps_z: &[T],
+    kvol: &[T],
+    x: &[T],
+    out: &mut [T],
+    combine: F,
+) where
+    F: Fn(T, usize, T) -> T + Sync,
+{
     let [nx, ny, nz] = dims;
     let (sx, sy, sz) = (1usize, nx, nx * ny);
     let [cx, cy, cz] = coef;
-    y.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+    out.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+        let base = k * nx * ny;
         if k == 0 || k == nz - 1 {
-            plane.fill(T::ZERO);
+            for (m, o) in plane.iter_mut().enumerate() {
+                *o = combine(*o, base + m, T::ZERO);
+            }
             return;
         }
         for j in 0..ny {
+            let first = base + j * nx;
             let row = &mut plane[j * nx..(j + 1) * nx];
             if j == 0 || j == ny - 1 {
-                row.fill(T::ZERO);
+                for (i, o) in row.iter_mut().enumerate() {
+                    *o = combine(*o, first + i, T::ZERO);
+                }
                 continue;
             }
-            row[0] = T::ZERO;
-            row[nx - 1] = T::ZERO;
-            for (i, out) in row.iter_mut().enumerate().take(nx - 1).skip(1) {
-                let c = i + nx * (j + ny * k);
+            row[0] = combine(row[0], first, T::ZERO);
+            row[nx - 1] = combine(row[nx - 1], first + nx - 1, T::ZERO);
+            for (i, o) in row.iter_mut().enumerate().take(nx - 1).skip(1) {
+                let c = first + i;
                 let xc = x[c];
-                *out = cx * (eps_x[c - sx] * (xc - x[c - sx]) + eps_x[c] * (xc - x[c + sx]))
+                let v = cx * (eps_x[c - sx] * (xc - x[c - sx]) + eps_x[c] * (xc - x[c + sx]))
                     + cy * (eps_y[c - sy] * (xc - x[c - sy]) + eps_y[c] * (xc - x[c + sy]))
                     + cz * (eps_z[c - sz] * (xc - x[c - sz]) + eps_z[c] * (xc - x[c + sz]))
                     + kvol[c] * xc;
+                *o = combine(*o, c, v);
             }
         }
     });

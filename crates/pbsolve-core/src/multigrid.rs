@@ -263,23 +263,33 @@ impl<T: Real> Coarse27<T> {
 
 /// y = A x for a 27-point operator in any precision (CUDA: `pb_apply27`).
 pub fn apply27<T: Real>(dims: [usize; 3], coef: &[T], x: &[T], y: &mut [T]) {
+    apply27_with(dims, coef, x, y, |_, _, v| v);
+}
+
+/// `out[c] ← combine(out[c], c, v_c)` for every node c, where v_c is the value
+/// [`apply27`] writes ((A x)_c, 0 on boundary nodes); see
+/// [`crate::operator::apply7_with`].
+pub fn apply27_with<T: Real, F>(dims: [usize; 3], coef: &[T], x: &[T], out: &mut [T], combine: F)
+where
+    F: Fn(T, usize, T) -> T + Sync,
+{
     let [nx, ny, _] = dims;
     let n = dims.iter().product::<usize>();
     let off = stencil_offsets(dims);
-    y.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+    out.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
         for j in 0..ny {
             for i in 0..nx {
-                let out = &mut plane[i + nx * j];
+                let o = &mut plane[i + nx * j];
+                let c = i + nx * (j + ny * k);
                 if !is_interior(i, j, k, dims) {
-                    *out = T::ZERO;
+                    *o = combine(*o, c, T::ZERO);
                     continue;
                 }
-                let c = i + nx * (j + ny * k);
                 let mut acc = T::ZERO;
-                for (o, d) in off.iter().enumerate() {
-                    acc += coef[o * n + c] * x[(c as isize + d) as usize];
+                for (m, d) in off.iter().enumerate() {
+                    acc += coef[m * n + c] * x[(c as isize + d) as usize];
                 }
-                *out = acc;
+                *o = combine(*o, c, acc);
             }
         }
     });
@@ -759,7 +769,18 @@ pub enum LevelOp<'a, B: Backend> {
     Coarse(&'a B::Coarse),
 }
 
+// Copy without requiring `B: Copy` (a derive would): it only holds a reference.
+impl<B: Backend> Clone for LevelOp<'_, B> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<B: Backend> Copy for LevelOp<'_, B> {}
+
 impl<B: Backend> LevelOp<'_, B> {
+    /// y = A x (the step-by-step reference of the smoother in the tests).
+    #[cfg(test)]
     fn apply(&self, be: &B, x: &B::Vector, y: &mut B::Vector) -> Result<()> {
         match self {
             Self::Fine(op) => be.apply(op, x, y),
@@ -893,11 +914,9 @@ fn vcycle<B: Backend>(
     let Some((next, rest)) = below.split_first_mut() else {
         return coarsest.solve(be, b, x);
     };
-    smooth(be, cheb, &op, work, x, b, true)?;
+    smooth(be, cheb, op, work, x, b, true)?;
     // r = b - A x, restricted to the next level's right-hand side.
-    op.apply(be, x, &mut work.t)?;
-    be.copy(b, &mut work.r)?;
-    be.axpy(-1.0, &work.t, &mut work.r)?;
+    be.residual(op, x, Some(b), &mut work.t, &mut work.r)?;
     be.restrict(&transfers[0], &work.r, &mut next.b)?;
     let CoarseLevel {
         op: nop,
@@ -917,15 +936,21 @@ fn vcycle<B: Backend>(
         coarsest,
     )?;
     be.prolong_add(&transfers[0], nx, x)?;
-    smooth(be, cheb, &op, work, x, b, false)
+    smooth(be, cheb, op, work, x, b, false)
 }
 
 /// Chebyshev smoothing of A x = b with D⁻¹ scaling (Saad, Iterative Methods,
 /// Alg. 12.1). With `zero_init` the incoming `x` is ignored.
+///
+/// Written with the fused smoother steps of [`Backend`]: per degree one
+/// residual update and one vector pass. The operations and their order are
+/// those of the step-by-step form (the test reference `smooth_by_steps`):
+/// with `zero_init` the residual starts as `b` itself, which the step-by-step
+/// form copied into `r` first.
 fn smooth<B: Backend>(
     be: &B,
     cheb: Chebyshev,
-    op: &LevelOp<'_, B>,
+    op: LevelOp<'_, B>,
     w: &mut Work<B>,
     x: &mut B::Vector,
     b: &B::Vector,
@@ -937,26 +962,29 @@ fn smooth<B: Backend>(
     let delta = 0.5 * (lmax - lmin);
     let sigma = theta / delta;
     let mut rho = 1.0 / sigma;
-    be.copy(b, &mut w.r)?;
-    if !zero_init {
-        op.apply(be, x, &mut w.t)?;
-        be.axpy(-1.0, &w.t, &mut w.r)?;
+    if cheb.degree == 0 {
+        return Ok(()); // no smoothing: x is left as it is, as before
     }
-    be.scale(1.0 / theta, &w.inv_diag, &w.r, &mut w.d)?;
-    for k in 0..cheb.degree {
-        if zero_init && k == 0 {
-            be.copy(&w.d, x)?;
-        } else {
-            be.axpy(1.0, &w.d, x)?;
-        }
-        if k + 1 == cheb.degree {
-            break;
-        }
-        op.apply(be, &w.d, &mut w.t)?;
-        be.axpy(-1.0, &w.t, &mut w.r)?;
+    if zero_init {
+        be.chebyshev_first(1.0 / theta, &w.inv_diag, b, &mut w.d, x, true)?;
+    } else {
+        be.residual(op, x, Some(b), &mut w.t, &mut w.r)?;
+        be.chebyshev_first(1.0 / theta, &w.inv_diag, &w.r, &mut w.d, x, false)?;
+    }
+    for k in 1..cheb.degree {
+        // r ← r − A d; with zero_init the residual so far is b.
+        let src = (zero_init && k == 1).then_some(b);
+        be.residual(op, &w.d, src, &mut w.t, &mut w.r)?;
         let rho_new = 1.0 / (2.0 * sigma - rho);
-        be.scale(2.0 * rho_new / delta, &w.inv_diag, &w.r, &mut w.t)?;
-        be.axpby(1.0, &w.t, rho_new * rho, &mut w.d)?;
+        be.chebyshev_next(
+            2.0 * rho_new / delta,
+            &w.inv_diag,
+            &w.r,
+            rho_new * rho,
+            &mut w.t,
+            &mut w.d,
+            x,
+        )?;
         rho = rho_new;
     }
     Ok(())
@@ -1386,6 +1414,202 @@ mod tests {
 
     fn bits(v: &[f64]) -> Vec<u64> {
         v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    // ------------------------------------------------ fused smoother steps
+
+    /// The smoother as written before the fused steps, every operation on its
+    /// own: the reference `smooth` must reproduce bit for bit.
+    fn smooth_by_steps<B: Backend>(
+        be: &B,
+        cheb: Chebyshev,
+        op: &LevelOp<'_, B>,
+        w: &mut Work<B>,
+        x: &mut B::Vector,
+        b: &B::Vector,
+        zero_init: bool,
+    ) -> Result<()> {
+        let lmax = w.lmax;
+        let lmin = lmax / cheb.ratio;
+        let theta = 0.5 * (lmax + lmin);
+        let delta = 0.5 * (lmax - lmin);
+        let sigma = theta / delta;
+        let mut rho = 1.0 / sigma;
+        be.copy(b, &mut w.r)?;
+        if !zero_init {
+            op.apply(be, x, &mut w.t)?;
+            be.axpy(-1.0, &w.t, &mut w.r)?;
+        }
+        be.scale(1.0 / theta, &w.inv_diag, &w.r, &mut w.d)?;
+        for k in 0..cheb.degree {
+            if zero_init && k == 0 {
+                be.copy(&w.d, x)?;
+            } else {
+                be.axpy(1.0, &w.d, x)?;
+            }
+            if k + 1 == cheb.degree {
+                break;
+            }
+            op.apply(be, &w.d, &mut w.t)?;
+            be.axpy(-1.0, &w.t, &mut w.r)?;
+            let rho_new = 1.0 / (2.0 * sigma - rho);
+            be.scale(2.0 * rho_new / delta, &w.inv_diag, &w.r, &mut w.t)?;
+            be.axpby(1.0, &w.t, rho_new * rho, &mut w.d)?;
+            rho = rho_new;
+        }
+        Ok(())
+    }
+
+    /// `vcycle` as written before the fused steps.
+    #[allow(clippy::too_many_arguments)]
+    fn vcycle_by_steps<B: Backend>(
+        be: &B,
+        cheb: Chebyshev,
+        op: LevelOp<'_, B>,
+        work: &mut Work<B>,
+        x: &mut B::Vector,
+        b: &B::Vector,
+        below: &mut [CoarseLevel<B>],
+        transfers: &[Transfer],
+        coarsest: &mut Coarsest<'_>,
+    ) -> Result<()> {
+        let Some((next, rest)) = below.split_first_mut() else {
+            return coarsest.solve(be, b, x);
+        };
+        smooth_by_steps(be, cheb, &op, work, x, b, true)?;
+        op.apply(be, x, &mut work.t)?;
+        be.copy(b, &mut work.r)?;
+        be.axpy(-1.0, &work.t, &mut work.r)?;
+        be.restrict(&transfers[0], &work.r, &mut next.b)?;
+        let CoarseLevel {
+            op: nop,
+            work: nwork,
+            x: nx,
+            b: nb,
+        } = next;
+        vcycle_by_steps(
+            be,
+            cheb,
+            LevelOp::Coarse(nop),
+            nwork,
+            nx,
+            nb,
+            rest,
+            &transfers[1..],
+            coarsest,
+        )?;
+        be.prolong_add(&transfers[0], nx, x)?;
+        smooth_by_steps(be, cheb, &op, work, x, b, false)
+    }
+
+    impl<B: Backend> MultigridPreconditioner<B> {
+        /// [`Self::apply`] through [`vcycle_by_steps`].
+        fn apply_by_steps(&mut self, be: &B, op: &B::Operator, r: &B::Vector, z: &mut B::Vector) -> Result<()> {
+            let mut coarse = Coarsest {
+                chol: &self.coarsest,
+                host_b: &mut self.host_b,
+                host_x: &mut self.host_x,
+            };
+            vcycle_by_steps(
+                be,
+                self.smoother,
+                LevelOp::Fine(op),
+                &mut self.fine,
+                z,
+                r,
+                &mut self.levels,
+                &self.transfers,
+                &mut coarse,
+            )
+        }
+    }
+
+    /// One V-cycle of the fused smoother and of the step-by-step one on `be`.
+    fn both_vcycles<B: Backend>(be: &B, dims: [usize; 3], cheb: Chebyshev, seed: u64) -> (Vec<u64>, Vec<u64>) {
+        let op = Arc::new(molecule_operator(dims, 0.35));
+        let dev = be.prepare(op.clone()).unwrap();
+        let r = be.upload(&interior_random(dims, seed)).unwrap();
+        let run = |steps: bool| {
+            let h = Hierarchy::build(&op, cheb).unwrap().unwrap();
+            let mut m = MultigridPreconditioner::new(be, &op, h).unwrap();
+            let mut z = be.zeros(dims.iter().product()).unwrap();
+            // Twice: the result must not depend on what the work vectors hold.
+            for _ in 0..2 {
+                if steps {
+                    m.apply_by_steps(be, &dev, &r, &mut z).unwrap();
+                } else {
+                    m.apply(be, &dev, &r, &mut z).unwrap();
+                }
+            }
+            bits(&be.download(&z).unwrap())
+        };
+        (run(false), run(true))
+    }
+
+    /// The fused smoother steps change no bit of a V-cycle, in f64 and f32,
+    /// for every smoother degree and with semi-coarsening.
+    #[test]
+    fn the_fused_smoother_equals_the_step_by_step_smoother() {
+        use crate::cpu::CpuSingle;
+        for dims in [[41, 41, 41], [66, 41, 6], [50, 37, 29]] {
+            for degree in [1, 2, 3] {
+                let cheb = Chebyshev { degree, ratio: 10.0 };
+                let (fused, steps) = both_vcycles(&CpuBackend::new(), dims, cheb, 21);
+                assert!(fused == steps, "f64 {dims:?} degree {degree}");
+                let (fused, steps) = both_vcycles(&CpuSingle::new(), dims, cheb, 22);
+                assert!(fused == steps, "f32 {dims:?} degree {degree}");
+                assert!(fused.iter().any(|&b| b != 0));
+            }
+        }
+    }
+
+    /// Each fused step of the CPU backends equals its step-by-step default,
+    /// on the fine 7-point and a coarse 27-point operator.
+    #[test]
+    fn fused_smoother_steps_equal_their_sequences() {
+        use crate::backend::{chebyshev_first_by_steps, chebyshev_next_by_steps, residual_by_steps};
+        use crate::cpu::CpuSingle;
+        fn check<B: Backend>(be: &B) {
+            let dims = [23, 19, 17];
+            let op = Arc::new(molecule_operator(dims, 0.6));
+            let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+            let fine = be.prepare(op.clone()).unwrap();
+            let coarse = be.prepare_coarse(h.coarse[0].clone()).unwrap();
+            let nc = h.coarse[0].len();
+            let n = op.len();
+            let vec = |len: usize, seed: u64| be.upload(&pseudo_random(len, seed)).unwrap();
+            let down = |v: &B::Vector| bits(&be.download(v).unwrap());
+            for (level, len) in [(LevelOp::<B>::Fine(&fine), n), (LevelOp::Coarse(&coarse), nc)] {
+                let (x, b) = (vec(len, 1), vec(len, 2));
+                for from_b in [true, false] {
+                    let src = from_b.then_some(&b);
+                    let (mut t1, mut r1) = (vec(len, 3), vec(len, 4));
+                    let (mut t2, mut r2) = (vec(len, 3), vec(len, 4));
+                    be.residual(level, &x, src, &mut t1, &mut r1).unwrap();
+                    residual_by_steps(be, level, &x, src, &mut t2, &mut r2).unwrap();
+                    assert!(down(&r1) == down(&r2), "residual, from b: {from_b}");
+                }
+                let (w, r) = (vec(len, 5), vec(len, 6));
+                for overwrite in [true, false] {
+                    let (mut d1, mut x1) = (vec(len, 7), vec(len, 8));
+                    let (mut d2, mut x2) = (vec(len, 7), vec(len, 8));
+                    be.chebyshev_first(0.37, &w, &r, &mut d1, &mut x1, overwrite).unwrap();
+                    chebyshev_first_by_steps(be, 0.37, &w, &r, &mut d2, &mut x2, overwrite).unwrap();
+                    assert!(
+                        down(&d1) == down(&d2) && down(&x1) == down(&x2),
+                        "first, overwrite: {overwrite}"
+                    );
+                }
+                let (mut t1, mut d1, mut x1) = (vec(len, 9), vec(len, 10), vec(len, 11));
+                let (mut t2, mut d2, mut x2) = (vec(len, 9), vec(len, 10), vec(len, 11));
+                be.chebyshev_next(0.81, &w, &r, -0.29, &mut t1, &mut d1, &mut x1)
+                    .unwrap();
+                chebyshev_next_by_steps(be, 0.81, &w, &r, -0.29, &mut t2, &mut d2, &mut x2).unwrap();
+                assert!(down(&d1) == down(&d2) && down(&x1) == down(&x2), "next");
+            }
+        }
+        check(&CpuBackend::new());
+        check(&CpuSingle::new());
     }
 
     /// Levels built through the backend interface equal the host hierarchy

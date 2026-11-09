@@ -10,7 +10,7 @@ use crate::backend::Backend;
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::multigrid::{self, Coarse27, LevelMatrix, LevelOp, Stencil27, Transfer};
-use crate::operator::{Stencil7, StencilOperator};
+use crate::operator::{apply7_with, Stencil7, StencilOperator};
 use crate::real::Real;
 use crate::surface::{self, CoefficientMaps, Sphere};
 use rayon::prelude::*;
@@ -29,6 +29,15 @@ pub trait CpuReal: Real {
     fn prepare_coarse(op: Arc<Stencil27>) -> Self::Coarse;
     fn apply(op: &Self::Op, x: &[Self], y: &mut [Self]);
     fn apply_coarse(op: &Self::Coarse, x: &[Self], y: &mut [Self]);
+    /// [`crate::operator::apply7_with`] / [`multigrid::apply27_with`] of the
+    /// operators (fused residuals).
+    fn apply_with<F: Fn(Self, usize, Self) -> Self + Sync>(op: &Self::Op, x: &[Self], out: &mut [Self], f: F);
+    fn apply_coarse_with<F: Fn(Self, usize, Self) -> Self + Sync>(
+        op: &Self::Coarse,
+        x: &[Self],
+        out: &mut [Self],
+        f: F,
+    );
     /// The f64 matrices behind the operators (multigrid setup); `None` for
     /// rounded copies.
     fn fine_matrix(op: &Self::Op) -> Option<&StencilOperator>;
@@ -57,6 +66,12 @@ impl CpuReal for f64 {
     }
     fn apply_coarse(op: &Self::Coarse, x: &[f64], y: &mut [f64]) {
         op.apply(x, y)
+    }
+    fn apply_with<F: Fn(f64, usize, f64) -> f64 + Sync>(op: &Self::Op, x: &[f64], out: &mut [f64], f: F) {
+        apply7_with(op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, out, f)
+    }
+    fn apply_coarse_with<F: Fn(f64, usize, f64) -> f64 + Sync>(op: &Self::Coarse, x: &[f64], out: &mut [f64], f: F) {
+        multigrid::apply27_with(op.dims, &op.coef, x, out, f)
     }
     fn fine_matrix(op: &Self::Op) -> Option<&StencilOperator> {
         Some(op)
@@ -92,6 +107,12 @@ impl CpuReal for f32 {
     }
     fn apply_coarse(op: &Self::Coarse, x: &[f32], y: &mut [f32]) {
         op.apply(x, y)
+    }
+    fn apply_with<F: Fn(f32, usize, f32) -> f32 + Sync>(op: &Self::Op, x: &[f32], out: &mut [f32], f: F) {
+        apply7_with(op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, out, f)
+    }
+    fn apply_coarse_with<F: Fn(f32, usize, f32) -> f32 + Sync>(op: &Self::Coarse, x: &[f32], out: &mut [f32], f: F) {
+        multigrid::apply27_with(op.dims, &op.coef, x, out, f)
     }
     fn fine_matrix(_: &Self::Op) -> Option<&StencilOperator> {
         None
@@ -294,6 +315,74 @@ impl<T: CpuReal> Backend for Cpu<T> {
 
     fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()> {
         multigrid::prolong_add(t, coarse, fine);
+        Ok(())
+    }
+
+    // The smoother steps in one pass each, with the expressions of the
+    // separate operations (`axpy`: y + α·x; `scale`: (α·d)·x; `axpby`:
+    // α·x + β·y), so the results equal the step-by-step defaults bit for bit.
+
+    fn residual(
+        &self,
+        op: LevelOp<'_, Self>,
+        x: &Self::Vector,
+        b: Option<&Self::Vector>,
+        _t: &mut Self::Vector,
+        r: &mut Self::Vector,
+    ) -> Result<()> {
+        let minus_one = T::from_f64(-1.0);
+        match (op, b) {
+            (LevelOp::Fine(o), Some(b)) => T::apply_with(o, x, r, |_, c, v| b[c] + minus_one * v),
+            (LevelOp::Fine(o), None) => T::apply_with(o, x, r, |r, _, v| r + minus_one * v),
+            (LevelOp::Coarse(o), Some(b)) => T::apply_coarse_with(o, x, r, |_, c, v| b[c] + minus_one * v),
+            (LevelOp::Coarse(o), None) => T::apply_coarse_with(o, x, r, |r, _, v| r + minus_one * v),
+        }
+        Ok(())
+    }
+
+    fn chebyshev_first(
+        &self,
+        s: f64,
+        w: &Self::Vector,
+        r: &Self::Vector,
+        d: &mut Self::Vector,
+        x: &mut Self::Vector,
+        overwrite: bool,
+    ) -> Result<()> {
+        let (s, one) = (T::from_f64(s), T::from_f64(1.0));
+        d.par_iter_mut()
+            .zip(x.par_iter_mut())
+            .zip(w.par_iter().zip(r.par_iter()))
+            .for_each(|((d, x), (w, r))| {
+                *d = (s * *w) * *r;
+                if overwrite {
+                    *x = *d;
+                } else {
+                    *x += one * *d;
+                }
+            });
+        Ok(())
+    }
+
+    fn chebyshev_next(
+        &self,
+        c1: f64,
+        w: &Self::Vector,
+        r: &Self::Vector,
+        c2: f64,
+        _t: &mut Self::Vector,
+        d: &mut Self::Vector,
+        x: &mut Self::Vector,
+    ) -> Result<()> {
+        let (c1, c2, one) = (T::from_f64(c1), T::from_f64(c2), T::from_f64(1.0));
+        d.par_iter_mut()
+            .zip(x.par_iter_mut())
+            .zip(w.par_iter().zip(r.par_iter()))
+            .for_each(|((d, x), (w, r))| {
+                let t = (c1 * *w) * *r;
+                *d = one * t + c2 * *d;
+                *x += one * *d;
+            });
         Ok(())
     }
 

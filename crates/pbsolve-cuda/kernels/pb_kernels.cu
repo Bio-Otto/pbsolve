@@ -9,6 +9,30 @@
 
 #define BLOCK 256
 
+// (A x)_c of the 7-point operator, 0 on boundary nodes: the value pb_apply
+// writes, also used by the fused residuals.
+template <typename T>
+__device__ __forceinline__ T stencil7_at(
+    const long long c, const int nx, const int ny, const int nz,
+    const T cx, const T cy, const T cz,
+    const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,
+    const T* __restrict__ kvol, const T* __restrict__ x)
+{
+    const long long sy = nx;
+    const long long sz = (long long)nx * ny;
+    const int i = (int)(c % nx);
+    const int j = (int)((c / nx) % ny);
+    const int k = (int)(c / sz);
+    if (i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1) {
+        return T(0);
+    }
+    const T xc = x[c];
+    return cx * (ex[c - 1] * (xc - x[c - 1]) + ex[c] * (xc - x[c + 1]))
+         + cy * (ey[c - sy] * (xc - x[c - sy]) + ey[c] * (xc - x[c + sy]))
+         + cz * (ez[c - sz] * (xc - x[c - sz]) + ez[c] * (xc - x[c + sz]))
+         + kvol[c] * xc;
+}
+
 template <typename T>
 __device__ void apply_impl(
     const int nx, const int ny, const int nz,
@@ -17,56 +41,51 @@ __device__ void apply_impl(
     const T* __restrict__ kvol, const T* __restrict__ x, T* __restrict__ y)
 {
     const long long n = (long long)nx * ny * nz;
-    const long long sy = nx;
-    const long long sz = (long long)nx * ny;
     const long long stride = (long long)blockDim.x * gridDim.x;
     for (long long c = (long long)blockIdx.x * blockDim.x + threadIdx.x; c < n; c += stride) {
-        const int i = (int)(c % nx);
-        const int j = (int)((c / nx) % ny);
-        const int k = (int)(c / sz);
-        if (i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1) {
-            y[c] = T(0);
-            continue;
-        }
-        const T xc = x[c];
-        y[c] = cx * (ex[c - 1] * (xc - x[c - 1]) + ex[c] * (xc - x[c + 1]))
-             + cy * (ey[c - sy] * (xc - x[c - sy]) + ey[c] * (xc - x[c + sy]))
-             + cz * (ez[c - sz] * (xc - x[c - sz]) + ez[c] * (xc - x[c + sz]))
-             + kvol[c] * xc;
+        y[c] = stencil7_at<T>(c, nx, ny, nz, cx, cy, cz, ex, ey, ez, kvol, x);
     }
 }
 
-// 27-point operator (multigrid coarse levels), coefficients stored per offset:
-// coef[o*n + c], o = (dx+1) + 3*(dy+1) + 9*(dz+1). Same summation order as
-// apply27 on the CPU.
+// (A x)_c of a 27-point operator (multigrid coarse levels), 0 on boundary
+// nodes. Coefficients are stored per offset: coef[o*n + c],
+// o = (dx+1) + 3*(dy+1) + 9*(dz+1). Same summation order as apply27 on the CPU.
+template <typename T>
+__device__ __forceinline__ T stencil27_at(
+    const long long c, const int nx, const int ny, const int nz,
+    const T* __restrict__ coef, const T* __restrict__ x)
+{
+    const long long n = (long long)nx * ny * nz;
+    const long long sy = nx;
+    const long long sz = (long long)nx * ny;
+    const int i = (int)(c % nx);
+    const int j = (int)((c / nx) % ny);
+    const int k = (int)(c / sz);
+    if (i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1) {
+        return T(0);
+    }
+    T acc = T(0);
+    int o = 0;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                acc += coef[o * n + c] * x[c + dx + dy * sy + dz * sz];
+                ++o;
+            }
+        }
+    }
+    return acc;
+}
+
 template <typename T>
 __device__ void apply27_impl(
     const int nx, const int ny, const int nz,
     const T* __restrict__ coef, const T* __restrict__ x, T* __restrict__ y)
 {
     const long long n = (long long)nx * ny * nz;
-    const long long sy = nx;
-    const long long sz = (long long)nx * ny;
     const long long stride = (long long)blockDim.x * gridDim.x;
     for (long long c = (long long)blockIdx.x * blockDim.x + threadIdx.x; c < n; c += stride) {
-        const int i = (int)(c % nx);
-        const int j = (int)((c / nx) % ny);
-        const int k = (int)(c / sz);
-        if (i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1) {
-            y[c] = T(0);
-            continue;
-        }
-        T acc = T(0);
-        int o = 0;
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    acc += coef[o * n + c] * x[c + dx + dy * sy + dz * sz];
-                    ++o;
-                }
-            }
-        }
-        y[c] = acc;
+        y[c] = stencil27_at<T>(c, nx, ny, nz, coef, x);
     }
 }
 
@@ -278,7 +297,53 @@ __device__ void dot2_partial_impl(
     extern "C" __global__ void pb_prolong_add_##S(                                                       \
         const int nx, const int ny, const int nz, const int mx, const int my, const int mz,              \
         const int cx, const int cy, const int cz, const T* __restrict__ coarse, T* __restrict__ fine)    \
-    { prolong_add_impl<T>(nx, ny, nz, mx, my, mz, cx, cy, cz, coarse, fine); }
+    { prolong_add_impl<T>(nx, ny, nz, mx, my, mz, cx, cy, cz, coarse, fine); }                          \
+    /* Fused multigrid smoother steps (Backend::residual, chebyshev_first,                             \
+       chebyshev_next): each element as the separate kernels compute it.                                \
+       r = b + (-1) * (A x)   (apply, copy, axpy) */                                                       \
+    extern "C" __global__ void pb_residual_##S(                                                          \
+        const int nx, const int ny, const int nz, const T cx, const T cy, const T cz,                    \
+        const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,                    \
+        const T* __restrict__ kvol, const T* __restrict__ x, const T* __restrict__ b,                    \
+        T* __restrict__ r)                                                                               \
+    { const long long n = (long long)nx * ny * nz;                                                       \
+      GRID_STRIDE_LOOP(c, n) {                                                                           \
+          r[c] = b[c] + T(-1) * stencil7_at<T>(c, nx, ny, nz, cx, cy, cz, ex, ey, ez, kvol, x); } }      \
+    /* r = r + (-1) * (A x)   (apply, axpy) */                                                             \
+    extern "C" __global__ void pb_residual_update_##S(                                                   \
+        const int nx, const int ny, const int nz, const T cx, const T cy, const T cz,                    \
+        const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,                    \
+        const T* __restrict__ kvol, const T* __restrict__ x, T* __restrict__ r)                          \
+    { const long long n = (long long)nx * ny * nz;                                                       \
+      GRID_STRIDE_LOOP(c, n) {                                                                           \
+          r[c] = r[c] + T(-1) * stencil7_at<T>(c, nx, ny, nz, cx, cy, cz, ex, ey, ez, kvol, x); } }      \
+    extern "C" __global__ void pb_residual27_##S(                                                        \
+        const int nx, const int ny, const int nz, const T* __restrict__ coef,                            \
+        const T* __restrict__ x, const T* __restrict__ b, T* __restrict__ r)                             \
+    { const long long n = (long long)nx * ny * nz;                                                       \
+      GRID_STRIDE_LOOP(c, n) { r[c] = b[c] + T(-1) * stencil27_at<T>(c, nx, ny, nz, coef, x); } }         \
+    extern "C" __global__ void pb_residual27_update_##S(                                                 \
+        const int nx, const int ny, const int nz, const T* __restrict__ coef,                            \
+        const T* __restrict__ x, T* __restrict__ r)                                                      \
+    { const long long n = (long long)nx * ny * nz;                                                       \
+      GRID_STRIDE_LOOP(c, n) { r[c] = r[c] + T(-1) * stencil27_at<T>(c, nx, ny, nz, coef, x); } }         \
+    /* d = (s * w) * r; x = d (overwrite) or x = x + 1 * d   (scale, copy or axpy) */                      \
+    extern "C" __global__ void pb_cheb_first_##S(const long long n, const T s,                          \
+        const T* __restrict__ w, const T* __restrict__ r, T* __restrict__ d, T* __restrict__ x,          \
+        const int overwrite)                                                                             \
+    { GRID_STRIDE_LOOP(c, n) {                                                                           \
+          const T dc = (s * w[c]) * r[c];                                                                \
+          d[c] = dc;                                                                                     \
+          x[c] = overwrite ? dc : x[c] + T(1) * dc; } }                                                  \
+    /* t = (c1 * w) * r; d = 1 * t + c2 * d; x = x + 1 * d   (scale, axpby, axpy) */                       \
+    extern "C" __global__ void pb_cheb_next_##S(const long long n, const T c1,                          \
+        const T* __restrict__ w, const T* __restrict__ r, const T c2, T* __restrict__ d,                 \
+        T* __restrict__ x)                                                                               \
+    { GRID_STRIDE_LOOP(c, n) {                                                                           \
+          const T t = (c1 * w[c]) * r[c];                                                                \
+          const T dc = T(1) * t + c2 * d[c];                                                             \
+          d[c] = dc;                                                                                     \
+          x[c] = x[c] + T(1) * dc; } }
 
 PB_KERNELS(double, f64)
 PB_KERNELS(float, f32)

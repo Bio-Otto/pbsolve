@@ -179,6 +179,13 @@
   A calculation with `mdh` is 1.05–1.06× faster (5DK3: 5.42 → 5.10 s, median
   of 15), and `Solver.potential` 1.03–1.04×. `timings["boundary"]` now counts
   the wait at that point, and `timings["maps"]` the wait for the surface.
+- The multigrid smoother runs each of its steps (the residual and the first
+  and later Chebyshev updates) as one pass on the CPU and one kernel on CUDA,
+  instead of up to four separate operations; the new `Backend` methods
+  `residual`, `chebyshev_first` and `chebyshev_next` default to those
+  operations. Results are identical bit for bit. A calculation is 1.17–1.25×
+  faster on the CPU; on CUDA the solve stage is 1.17–1.26× faster and a
+  calculation 1.05–1.11× (measured on a shared GPU).
 
 ### Fixed
 

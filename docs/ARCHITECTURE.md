@@ -86,6 +86,13 @@ A backend provides:
 * `dot` and the fused `dot2`, both deterministic;
 * the element-wise updates `axpy`, `xpay`, `axpby`, `scale` (diagonal
   scaling) and `copy`;
+* the multigrid smoother steps `residual` (r ← b − A x, or r ← r − A x),
+  `chebyshev_first` and `chebyshev_next`, with defaults that run them as
+  sequences of the operations above (`backend::*_by_steps`). The CPU and
+  CUDA backends fuse each step into one pass (one kernel) that evaluates
+  every element with the same expressions: smoothing and residual move about
+  30 % less data (10 instead of 23 kernels per level), and the results stay
+  identical bit for bit;
 * a single-precision twin (`type Single`, `single()`) on the same device and
   stream, with `demote`/`promote` to convert vectors;
 * the multigrid setup (f64 backends only): `galerkin` (Galerkin operator and
