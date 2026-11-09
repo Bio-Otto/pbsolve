@@ -1,0 +1,120 @@
+# Trajectories and MM-PBSA
+
+Trajectory analysis and MM-PBSA need many PB calculations. pbsolve runs
+several of them at once, each on its own share of the CPU threads or on its
+own CUDA stream, which keeps the CPU and the GPU busy. The results are
+identical, bit for bit, to running the calculations one after another.
+
+## Many calculations at once
+
+{py:meth}`~pbsolve.Solver.polar_solvation_batch` takes the frames of a
+trajectory (one atom set, many coordinate sets) and returns ΔG_polar per
+frame; {py:meth}`~pbsolve.Solver.polar_solvation_many` takes any list of
+systems and returns a `PolarResult` per system, in input order.
+
+```python
+import numpy as np
+import pbsolve
+
+mol = pbsolve.io.load("tests/data/1ycr_amber_opt_pdb2pqr.pqr")
+coords, charges, radii = mol.coords, mol.charges, mol.radii
+solver = pbsolve.Solver(ionic_strength=0.15)
+
+# two "frames": the structure and a slightly perturbed copy
+rng = np.random.default_rng(1)
+frames = np.stack([coords, coords + rng.normal(scale=0.05, size=coords.shape)])
+energies = solver.polar_solvation_batch(frames, charges, radii)  # kcal/mol per frame
+
+peptide = mol.select("chain B")
+grid = solver.make_grid(coords, radii)
+results = solver.polar_solvation_many(
+    [(coords, charges, radii), (coords[peptide], charges[peptide], radii[peptide])],
+    grid=grid,  # one grid for all; or a list with one grid per system; or None
+)
+print(energies, [r.energy for r in results])
+```
+
+`workers` sets how many calculations run at once: by default 2 on the CPU
+and 3 on CUDA, where pbsolve starts no more than fit in the free GPU memory
+({py:meth}`~pbsolve.Solver.batch_workers`). It changes the speed, never the
+results. With `grid=None` every frame gets its own automatic grid.
+
+## MM-PBSA solvation terms
+
+In the single-trajectory protocol, receptor and ligand are cut out of each
+complex frame. {py:func}`pbsolve.pbsa_solvation_frames` computes the polar
+(PB) and non-polar (γ·SASA + β, see [the model](model.md#non-polar-term))
+solvation energies of complex, receptor and ligand, all three on the
+complex's grid so that discretisation errors cancel in the difference:
+
+```python
+ligand = np.nonzero(mol.select("chain B"))[0]  # atom indices
+results = pbsolve.pbsa_solvation_frames(solver, frames, charges, radii, ligand)
+
+terms = results[0]  # a PBSAFrame
+print(f"ΔG_polar {terms.delta_polar:.2f}  ΔG_nonpolar {terms.delta_nonpolar:.2f}  "
+      f"ΔG_solv {terms.delta_solvation:.2f} kcal/mol")
+print(terms.complex.polar, terms.receptor.nonpolar, terms.ligand.total)
+print(terms.as_dict())  # flat dict, e.g. for a CSV row
+```
+
+The receptor defaults to all atoms that are not ligand (`receptor_atoms`
+overrides it). {py:func}`pbsolve.pbsa_solvation_frame` does the same for a
+single frame. pbsolve provides the solvation terms; the binding free energy
+adds the gas-phase energy ΔE_MM from your force field:
+ΔG_bind ≈ ΔE_MM + ΔG_solv.
+
+A call solves all the frames it is given together, so pass a long trajectory
+in chunks of a few frames per worker, as `pbsolve mmpbsa` does. With files
+from a simulation (charges and radii from an Amber topology; water and
+monovalent ions removed):
+
+```{code-block} python
+mol = pbsolve.io.load("complex.prmtop")
+solute = ~mol.solvent_mask()
+sub = mol.subset(solute)
+ligand = np.nonzero(sub.select("resname LIG"))[0]
+
+chunk = []
+for xyz in pbsolve.io.frames(mol, "md.nc", step=10, atoms=solute):
+    chunk.append(xyz)
+    if len(chunk) == 12:
+        results = pbsolve.pbsa_solvation_frames(
+            solver, chunk, sub.charges, sub.radii, ligand
+        )
+        print([terms.delta_solvation for terms in results])
+        chunk.clear()
+# ... and the last, shorter chunk
+```
+
+## From the command line
+
+`pbsolve mmpbsa` does all of this for a topology and a trajectory, and writes
+the per-frame terms to a CSV file:
+
+```bash
+pbsolve mmpbsa complex.prmtop md.nc --ligand "resname LIG" --step 10 \
+    --ionic-strength 0.15 --csv terms.csv
+```
+
+See [the command line](cli.md#pbsolve-mmpbsa) for every option.
+
+## With OpenMM
+
+{py:class}`pbsolve.openmm_bridge.OpenMMPBSA` takes the charges from an OpenMM
+`System` (one `NonbondedForce`) and radii by element scheme (default
+`mbondi2`) from its `Topology`. The System must describe the solute only,
+without explicit water or ions.
+
+```{code-block} python
+import pbsolve
+from pbsolve.openmm_bridge import OpenMMPBSA
+
+pbsa = OpenMMPBSA(system, topology, ligand_atoms=ligand_indices,
+                  solver=pbsolve.Solver(ionic_strength=0.15))
+for positions in trajectory_positions:   # OpenMM Quantity, or an array in Å
+    terms = pbsa.frame(positions)        # PBSAFrame
+    dg_bind = delta_e_mm + terms.delta_solvation
+```
+
+`examples/mmpbsa_openmm.py` in the repository is a complete script.

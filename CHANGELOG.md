@@ -95,6 +95,11 @@
   read by the documentation site and editors) and `help()` on the compiled
   module show the same text; `tests/test_docstrings.py` keeps them
   identical and the stubs complete.
+- User guide on the documentation site (`docs/guide`): physical model, grids
+  and focusing, linear solver, CPU and GPU, trajectories and MM-PBSA, input
+  files and structure preparation, command line, comparison with APBS. Its
+  Python examples run in the test suite (`tests/test_guide.py`), which also
+  checks the command-line page against the options of every command.
 
 ### Changed
 

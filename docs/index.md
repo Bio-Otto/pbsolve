@@ -20,7 +20,8 @@ print(result.energy, "kcal/mol on", result.platform)
 ```
 
 The [tutorial](tutorial) goes from installation to MM-PBSA and a comparison
-with APBS.
+with APBS; the [user guide](guide/index) explains the settings and tools by
+topic.
 
 ```{toctree}
 :maxdepth: 1
@@ -28,6 +29,7 @@ with APBS.
 
 installation
 tutorial
+guide/index
 reference
 ```
 
