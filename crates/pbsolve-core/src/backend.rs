@@ -142,6 +142,54 @@ pub trait Backend {
         chebyshev_next_by_steps(self, c1, w, r, c2, t, d, x)
     }
 
+    // Steps of the CG iteration ([`crate::solver`]), under the same rule as
+    // the smoother steps: the defaults run the sequence ([`apply_dot_by_steps`],
+    // [`cg_update_by_steps`], [`promote_dot_by_steps`]); a backend that fuses
+    // one must evaluate every element with the same expressions and reduce
+    // every dot product exactly as its `dot` (and `dot2`) does, so that the
+    // results are identical bit for bit.
+
+    /// q ← A p; returns p·q. As `apply(op, p, q)` and `dot(p, q)`.
+    fn apply_dot(&self, op: &Self::Operator, p: &Self::Vector, q: &mut Self::Vector) -> Result<f64>
+    where
+        Self: Sized,
+    {
+        apply_dot_by_steps(self, op, p, q)
+    }
+    /// CG update: x_i ← x_i + α·p_i and r_i ← r_i + (−α)·q_i; returns
+    /// (r·r, r·z) with the new r, or (r·r, 0) when `z` is `None`; with
+    /// `rounded`, also rounded_i ← round_f32(r_i). As `axpy(α, p, x)`,
+    /// `axpy(−α, q, r)`, `dot2(r, r, z)` or `dot(r, r)`, and `demote(r, rounded)`.
+    #[allow(clippy::too_many_arguments)]
+    fn cg_update(
+        &self,
+        alpha: f64,
+        p: &Self::Vector,
+        q: &Self::Vector,
+        x: &mut Self::Vector,
+        r: &mut Self::Vector,
+        z: Option<&Self::Vector>,
+        rounded: Option<&mut <Self::Single as Backend>::Vector>,
+    ) -> Result<(f64, f64)>
+    where
+        Self: Sized,
+    {
+        cg_update_by_steps(self, alpha, p, q, x, r, z, rounded)
+    }
+    /// z_i ← z32_i (exact widening); returns r·z. As `promote(z32, z)` and
+    /// `dot(r, z)`.
+    fn promote_dot(
+        &self,
+        z32: &<Self::Single as Backend>::Vector,
+        r: &Self::Vector,
+        z: &mut Self::Vector,
+    ) -> Result<f64>
+    where
+        Self: Sized,
+    {
+        promote_dot_by_steps(self, z32, r, z)
+    }
+
     // Multigrid setup ([`crate::multigrid::Levels::build`]). Only f64
     // backends build hierarchies; their twins return an error.
 
@@ -314,6 +362,129 @@ pub fn chebyshev_next_by_steps<B: Backend>(
     be.scale(c1, w, r, t)?;
     be.axpby(1.0, t, c2, d)?;
     be.axpy(1.0, d, x)
+}
+
+/// [`Backend::apply_dot`] as its sequence of operations.
+pub fn apply_dot_by_steps<B: Backend>(be: &B, op: &B::Operator, p: &B::Vector, q: &mut B::Vector) -> Result<f64> {
+    be.apply(op, p, q)?;
+    be.dot(p, q)
+}
+
+/// [`Backend::cg_update`] as its sequence of operations.
+#[allow(clippy::too_many_arguments)]
+pub fn cg_update_by_steps<B: Backend>(
+    be: &B,
+    alpha: f64,
+    p: &B::Vector,
+    q: &B::Vector,
+    x: &mut B::Vector,
+    r: &mut B::Vector,
+    z: Option<&B::Vector>,
+    rounded: Option<&mut <B::Single as Backend>::Vector>,
+) -> Result<(f64, f64)> {
+    be.axpy(alpha, p, x)?;
+    be.axpy(-alpha, q, r)?;
+    let sums = match z {
+        Some(z) => be.dot2(r, r, z)?,
+        None => (be.dot(r, r)?, 0.0),
+    };
+    if let Some(rounded) = rounded {
+        be.demote(r, rounded)?;
+    }
+    Ok(sums)
+}
+
+/// [`Backend::promote_dot`] as its sequence of operations.
+pub fn promote_dot_by_steps<B: Backend>(
+    be: &B,
+    z32: &<B::Single as Backend>::Vector,
+    r: &B::Vector,
+    z: &mut B::Vector,
+) -> Result<f64> {
+    be.promote(z32, z)?;
+    be.dot(r, z)
+}
+
+/// `B` with every fused step ([`Backend::residual`],
+/// [`Backend::chebyshev_first`], [`Backend::chebyshev_next`],
+/// [`Backend::apply_dot`], [`Backend::cg_update`], [`Backend::promote_dot`])
+/// run as its sequence of operations, in its single-precision twin too;
+/// every other call goes to `B`. It is the reference a backend's fused steps
+/// are compared with, also over whole solves: both must agree bit for bit.
+#[derive(Clone, Debug, Default)]
+pub struct Stepwise<B>(pub B);
+
+fn lower<'a, B: Backend>(op: LevelOp<'a, Stepwise<B>>) -> LevelOp<'a, B> {
+    match op {
+        LevelOp::Fine(o) => LevelOp::Fine(o),
+        LevelOp::Coarse(o) => LevelOp::Coarse(o),
+    }
+}
+
+macro_rules! delegate {
+    ($(fn $name:ident(&self $(, $a:ident: $t:ty)*) -> $r:ty;)*) => {$(
+        fn $name(&self $(, $a: $t)*) -> $r {
+            self.0.$name($($a),*)
+        }
+    )*};
+}
+
+impl<B: Backend> Backend for Stepwise<B> {
+    type Vector = B::Vector;
+    type Operator = B::Operator;
+    type Coarse = B::Coarse;
+    type Single = Stepwise<B::Single>;
+
+    delegate! {
+        fn platform(&self) -> &'static str;
+        fn device_name(&self) -> String;
+        fn demote(&self, x: &Self::Vector, y: &mut <B::Single as Backend>::Vector) -> Result<()>;
+        fn promote(&self, x: &<B::Single as Backend>::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn prepare(&self, op: Arc<StencilOperator>) -> Result<Self::Operator>;
+        fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse>;
+        fn upload(&self, host: &[f64]) -> Result<Self::Vector>;
+        fn upload_owned(&self, host: Vec<f64>) -> Result<Self::Vector>;
+        fn zeros(&self, n: usize) -> Result<Self::Vector>;
+        fn download(&self, v: &Self::Vector) -> Result<Vec<f64>>;
+        fn read(&self, v: &Self::Vector, host: &mut [f64]) -> Result<()>;
+        fn write(&self, host: &[f64], v: &mut Self::Vector) -> Result<()>;
+        fn apply(&self, op: &Self::Operator, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn dot(&self, a: &Self::Vector, b: &Self::Vector) -> Result<f64>;
+        fn dot2(&self, a: &Self::Vector, b: &Self::Vector, c: &Self::Vector) -> Result<(f64, f64)>;
+        fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn xpay(&self, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
+        fn axpby(&self, alpha: f64, x: &Self::Vector, beta: f64, y: &mut Self::Vector) -> Result<()>;
+        fn scale(&self, alpha: f64, d: &Self::Vector, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn copy(&self, x: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn restrict(&self, t: &Transfer, fine: &Self::Vector, coarse: &mut Self::Vector) -> Result<()>;
+        fn prolong_add(&self, t: &Transfer, coarse: &Self::Vector, fine: &mut Self::Vector) -> Result<()>;
+        fn coarse_to_host(&self, op: &Self::Coarse) -> Result<Stencil27>;
+        fn demote_operator(&self, op: &Self::Operator) -> Result<<B::Single as Backend>::Operator>;
+        fn demote_coarse(&self, op: &Self::Coarse) -> Result<<B::Single as Backend>::Coarse>;
+        fn mark_maps(&self, grid: &Grid, shifts: &[[f64; 3]], fill: f64, passes: &[(&[Sphere], f64)]) -> Result<Vec<Self::Vector>>;
+        fn scatter(&self, n: usize, idx: &[usize], values: &[f64]) -> Result<Self::Vector>;
+        fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)>;
+        fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
+        fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>>;
+        fn synchronize(&self) -> Result<()>;
+        fn runs_on_device(&self) -> bool;
+        fn retain_memory(&self, bytes: u64) -> Result<()>;
+        fn release_memory(&self, bytes: u64) -> Result<()>;
+    }
+
+    fn single(&self) -> Result<Self::Single> {
+        Ok(Stepwise(self.0.single()?))
+    }
+
+    fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)> {
+        self.0.galerkin(t, lower(fine))
+    }
+
+    fn gershgorin_lmax(&self, level: LevelOp<'_, Self>) -> Result<f64> {
+        self.0.gershgorin_lmax(lower(level))
+    }
 }
 
 /// Checks the arguments of [`Backend::scatter`]: as many values as indices,

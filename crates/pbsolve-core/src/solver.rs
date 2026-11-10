@@ -108,6 +108,31 @@ impl<B: Backend> Precond<B> {
         }
     }
 
+    /// The f32 copy of the residual that mixed precision applies its
+    /// V-cycle to; [`Backend::cg_update`] rounds the residual into it.
+    fn rounded_residual(&mut self) -> Option<&mut <B::Single as Backend>::Vector> {
+        match self {
+            Self::Mixed(m) => Some(&mut m.r),
+            Self::Jacobi(_) | Self::Multigrid(_) => None,
+        }
+    }
+
+    /// z = M⁻¹ r; returns r·z. Mixed precision reads r from
+    /// [`rounded_residual`](Self::rounded_residual), which must hold it.
+    fn apply_dot(&mut self, be: &B, op: &B::Operator, r: &B::Vector, z: &mut B::Vector) -> Result<f64> {
+        match self {
+            Self::Jacobi(inv_diag) => be.scale(1.0, inv_diag, r, z)?,
+            Self::Multigrid(m) => m.apply(be, op, r, z)?,
+            Self::Mixed(m) => {
+                m.mg.apply(&m.single, &m.op, &m.r, &mut m.z)?;
+                return be.promote_dot(&m.z, r, z);
+            }
+        }
+        be.dot(r, z)
+    }
+
+    /// z = M⁻¹ r as the step-by-step CG applied it (the reference of the tests).
+    #[cfg(test)]
     fn apply(&mut self, be: &B, op: &B::Operator, r: &B::Vector, z: &mut B::Vector) -> Result<()> {
         match self {
             Self::Jacobi(inv_diag) => be.scale(1.0, inv_diag, r, z),
@@ -282,28 +307,34 @@ impl<B: Backend> PreparedPcg<B> {
         let mut z = be.zeros(n)?;
         let mut q = be.zeros(n)?;
         let mut p = be.zeros(n)?;
-        pre.apply(be, op, &r, &mut z)?;
+        if let Some(rounded) = pre.rounded_residual() {
+            be.demote(&r, rounded)?;
+        }
+        let mut rz = pre.apply_dot(be, op, &r, &mut z)?;
         be.copy(&z, &mut p)?;
-        let mut rz = be.dot(&r, &z)?;
 
+        // Each step below is one pass over the vectors where the backend
+        // fuses it (`apply_dot`, `cg_update`, `promote_dot`).
         let mut rel = 1.0;
         for it in 1..=opts.max_iter {
-            be.apply(op, &p, &mut q)?;
-            let pq = be.dot(&p, &q)?;
+            let pq = be.apply_dot(op, &p, &mut q)?;
             if pq.is_nan() || pq <= 0.0 {
                 return Err(PbError::Backend(format!(
                     "operator is not positive definite (pᵀAp = {pq:.3e} at iteration {it})"
                 )));
             }
             let alpha = rz / pq;
-            be.axpy(alpha, &p, &mut x)?;
-            be.axpy(-alpha, &q, &mut r)?;
-            // Flexible CG also needs r_{k+1}ᵀz_k (z still holds z_k): fused with ‖r‖².
-            let (rr, rz_prev) = if flexible {
-                be.dot2(&r, &r, &z)?
-            } else {
-                (be.dot(&r, &r)?, 0.0)
-            };
+            // x += αp, r −= αq and ‖r‖²; flexible CG also needs r_{k+1}ᵀz_k (z
+            // still holds z_k), and mixed precision the residual in f32.
+            let (rr, rz_prev) = be.cg_update(
+                alpha,
+                &p,
+                &q,
+                &mut x,
+                &mut r,
+                flexible.then_some(&z),
+                pre.rounded_residual(),
+            )?;
             rel = rr.sqrt() / bnorm;
             if rel < opts.tol {
                 return Ok((
@@ -322,8 +353,7 @@ impl<B: Backend> PreparedPcg<B> {
             // β = r_{k+1}ᵀ(z_{k+1} − z_k) / r_kᵀz_k keeps the search directions
             // conjugate when the preconditioner is slightly non-symmetric. For an
             // exactly symmetric one r_{k+1}ᵀz_k = 0 and this is plain PCG.
-            pre.apply(be, op, &r, &mut z)?;
-            let rz_new = be.dot(&r, &z)?;
+            let rz_new = pre.apply_dot(be, op, &r, &mut z)?;
             if rz_new.is_nan() || rz_new <= 0.0 {
                 return Err(PbError::Backend(format!(
                     "preconditioner is not positive definite (rᵀz = {rz_new:.3e} at iteration {it})"
@@ -343,6 +373,7 @@ impl<B: Backend> PreparedPcg<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::Stepwise;
     use crate::charge::spread_charges;
     use crate::cpu::CpuBackend;
     use crate::grid::Grid;
@@ -353,6 +384,10 @@ mod tests {
     use crate::units::bjerrum_length_vacuum;
 
     fn system(n: usize) -> (Arc<StencilOperator>, Vec<f64>) {
+        system_on([n; 3])
+    }
+
+    fn system_on(dims: [usize; 3]) -> (Arc<StencilOperator>, Vec<f64>) {
         let mut s: u64 = 77;
         let mut rnd = || {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -370,7 +405,7 @@ mod tests {
             ..PbParams::default()
         }
         .with_salt(0.15, 2.0);
-        let grid = Grid::centered([0.0; 3], [26.0; 3], [n; 3]).unwrap();
+        let grid = Grid::centered([0.0; 3], [26.0; 3], dims).unwrap();
         let op = Arc::new(StencilOperator::new(
             &grid,
             CoefficientMaps::solvated(&grid, &atoms, &params),
@@ -391,6 +426,89 @@ mod tests {
             ..SolverOptions::new(tol, 500)
         };
         pcg(&CpuBackend::new(), op.clone(), b, opts).unwrap()
+    }
+
+    impl<B: Backend> PreparedPcg<B> {
+        /// The CG iterations as they ran before their steps were fused
+        /// (verbatim): the reference of the tests below.
+        fn iterate_by_steps(
+            self,
+            be: &B,
+            op: &B::Operator,
+            b: B::Vector,
+            bnorm: f64,
+        ) -> Result<(B::Vector, SolveStats)> {
+            let Self {
+                dims,
+                mut pre,
+                opts,
+                setup_seconds,
+            } = self;
+            let n = dims.iter().product();
+            let flexible = pre.is_flexible();
+            let (preconditioner, levels) = pre.kind();
+            let iterating = Instant::now();
+            let mut x = be.zeros(n)?;
+            let mut r = b;
+            let mut z = be.zeros(n)?;
+            let mut q = be.zeros(n)?;
+            let mut p = be.zeros(n)?;
+            pre.apply(be, op, &r, &mut z)?;
+            be.copy(&z, &mut p)?;
+            let mut rz = be.dot(&r, &z)?;
+
+            let mut rel = 1.0;
+            for it in 1..=opts.max_iter {
+                be.apply(op, &p, &mut q)?;
+                let pq = be.dot(&p, &q)?;
+                if pq.is_nan() || pq <= 0.0 {
+                    return Err(PbError::Backend(format!(
+                        "operator is not positive definite (pᵀAp = {pq:.3e} at iteration {it})"
+                    )));
+                }
+                let alpha = rz / pq;
+                be.axpy(alpha, &p, &mut x)?;
+                be.axpy(-alpha, &q, &mut r)?;
+                // Flexible CG also needs r_{k+1}ᵀz_k (z still holds z_k): fused with ‖r‖².
+                let (rr, rz_prev) = if flexible {
+                    be.dot2(&r, &r, &z)?
+                } else {
+                    (be.dot(&r, &r)?, 0.0)
+                };
+                rel = rr.sqrt() / bnorm;
+                if rel < opts.tol {
+                    return Ok((
+                        x,
+                        SolveStats {
+                            iterations: it,
+                            relative_residual: rel,
+                            preconditioner,
+                            levels,
+                            setup_seconds,
+                            solve_seconds: iterating.elapsed().as_secs_f64(),
+                        },
+                    ));
+                }
+                // Flexible CG (Golub & Ye 1999; Notay 2000): Polak–Ribière
+                // β = r_{k+1}ᵀ(z_{k+1} − z_k) / r_kᵀz_k keeps the search directions
+                // conjugate when the preconditioner is slightly non-symmetric. For an
+                // exactly symmetric one r_{k+1}ᵀz_k = 0 and this is plain PCG.
+                pre.apply(be, op, &r, &mut z)?;
+                let rz_new = be.dot(&r, &z)?;
+                if rz_new.is_nan() || rz_new <= 0.0 {
+                    return Err(PbError::Backend(format!(
+                        "preconditioner is not positive definite (rᵀz = {rz_new:.3e} at iteration {it})"
+                    )));
+                }
+                let beta = if flexible { (rz_new - rz_prev) / rz } else { rz_new / rz };
+                rz = rz_new;
+                be.xpay(&z, beta, &mut p)?;
+            }
+            Err(PbError::NotConverged {
+                iterations: opts.max_iter,
+                residual: rel,
+            })
+        }
     }
 
     fn true_residual(op: &StencilOperator, x: &[f64], b: &[f64]) -> f64 {
@@ -500,6 +618,182 @@ mod tests {
 
     /// Setting up first and solving later ([`pcg_setup`], [`PreparedPcg::solve`])
     /// gives what `pcg_on` gives, bit for bit, also for b = 0.
+    fn bits(v: &[f64]) -> Vec<u64> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
+
+    /// The solution and statistics of a solve, or the residual it stopped at.
+    fn outcome<B: Backend>(be: &B, r: Result<(B::Vector, SolveStats)>) -> (Vec<u64>, usize, u64) {
+        match r {
+            Ok((x, s)) => (
+                bits(&be.download(&x).unwrap()),
+                s.iterations,
+                s.relative_residual.to_bits(),
+            ),
+            Err(PbError::NotConverged { iterations, residual }) => (Vec::new(), iterations, residual.to_bits()),
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn fused_and_stepwise<B: Backend>(
+        be: &B,
+        stepwise: &Stepwise<B>,
+        op: &Arc<StencilOperator>,
+        b: &[f64],
+        opts: SolverOptions,
+    ) {
+        let label = format!(
+            "{:?} {:?} tol {:e} max {}",
+            op.dims, opts.preconditioner, opts.tol, opts.max_iter
+        );
+        let dop = be.prepare(op.clone()).unwrap();
+        let inv = || be.upload(&op.inv_diag).unwrap();
+        let fused = pcg_on(be, op.dims, &dop, inv(), be.upload(b).unwrap(), opts);
+        let bv = be.upload(b).unwrap();
+        let bnorm = be.dot(&bv, &bv).unwrap().sqrt();
+        let prepared = pcg_setup(be, op.dims, &dop, inv(), opts).unwrap();
+        let old = prepared.iterate_by_steps(be, &dop, bv, bnorm);
+        let sop = stepwise.prepare(op.clone()).unwrap();
+        let reference = pcg_on(
+            stepwise,
+            op.dims,
+            &sop,
+            stepwise.upload(&op.inv_diag).unwrap(),
+            stepwise.upload(b).unwrap(),
+            opts,
+        );
+        let fused = outcome(be, fused);
+        assert!(fused == outcome(be, old), "fused CG ≠ step-by-step iteration: {label}");
+        assert!(fused == outcome(stepwise, reference), "fused CG ≠ Stepwise: {label}");
+    }
+
+    /// The CG iteration with its fused steps equals the iteration before the
+    /// fusion and a solve through `Stepwise` (whose twin runs the smoother
+    /// step by step too) bit for bit: every preconditioner, converged and
+    /// stopped at `max_iter`, on grids of less than one to several
+    /// dot-product chunks with chunk boundaries inside rows. [9, 11, 8] is too
+    /// small for multigrid (Jacobi fallback).
+    #[test]
+    fn the_fused_cg_iteration_equals_the_step_by_step_iteration() {
+        for dims in [[17, 17, 17], [41, 41, 41], [66, 41, 6], [50, 37, 29], [9, 11, 8]] {
+            let (op, b) = system_on(dims);
+            for pc in [
+                Preconditioner::MultigridF32,
+                Preconditioner::Multigrid,
+                Preconditioner::Jacobi,
+            ] {
+                for (tol, max_iter) in [(1e-10, 1000), (1e-30, 3)] {
+                    let opts = SolverOptions {
+                        preconditioner: pc,
+                        ..SolverOptions::new(tol, max_iter)
+                    };
+                    fused_and_stepwise(&CpuBackend::new(), &Stepwise(CpuBackend::new()), &op, &b, opts);
+                }
+            }
+        }
+    }
+
+    /// A random 7-point operator (positive face and κ̄²V coefficients).
+    fn random_operator(dims: [usize; 3], seed: u64) -> Arc<StencilOperator> {
+        use crate::multigrid::tests::pseudo_random;
+        let n = dims.iter().product();
+        let positive = |s: u64, scale: f64| pseudo_random(n, s).iter().map(|v| scale * (v + 0.5) + 0.05).collect();
+        Arc::new(StencilOperator::from_parts(
+            dims,
+            [0.83, 1.21, 0.64],
+            positive(seed, 79.0),
+            positive(seed + 1, 79.0),
+            positive(seed + 2, 79.0),
+            positive(seed + 3, 3.0),
+        ))
+    }
+
+    /// Lengths around the CPU chunk (2¹⁴) and grids whose rows straddle it.
+    pub(crate) const STEP_DIMS: [[usize; 3]; 6] = [
+        [5, 4, 3],
+        [66, 41, 6],
+        [130, 7, 20],
+        [41, 41, 41],
+        [128, 128, 1],
+        [3, 3, 1821],
+    ];
+
+    /// Each fused CG step equals its sequence of operations bit for bit (f64
+    /// and the f32 twin), also for a sum of −0.0 terms.
+    #[test]
+    fn fused_cg_steps_equal_their_sequences() {
+        use crate::backend::{apply_dot_by_steps, cg_update_by_steps, promote_dot_by_steps};
+        use crate::cpu::CpuSingle;
+        use crate::multigrid::tests::pseudo_random;
+        fn check<B: Backend>(be: &B) {
+            let single = be.single().unwrap();
+            for dims in STEP_DIMS {
+                let n: usize = dims.iter().product();
+                let label = format!("{} {dims:?}", std::any::type_name::<B>());
+                let vec = |seed: u64| be.upload(&pseudo_random(n, seed)).unwrap();
+                let vec32 = |seed: u64| single.upload(&pseudo_random(n, seed)).unwrap();
+                let down = |v: &B::Vector| bits(&be.download(v).unwrap());
+                let down32 = |v: &<B::Single as Backend>::Vector| bits(&single.download(v).unwrap());
+
+                let op = be.prepare(random_operator(dims, 11)).unwrap();
+                let p = vec(1);
+                let (mut q1, mut q2) = (vec(2), vec(2));
+                let d1 = be.apply_dot(&op, &p, &mut q1).unwrap();
+                let d2 = apply_dot_by_steps(be, &op, &p, &mut q2).unwrap();
+                assert!(
+                    d1.to_bits() == d2.to_bits() && down(&q1) == down(&q2),
+                    "apply_dot {label}"
+                );
+
+                let (p, q, z) = (vec(3), vec(4), vec(5));
+                for alpha in [0.731, -1.37e-3] {
+                    for with_z in [false, true] {
+                        for with_rounded in [false, true] {
+                            let (mut x1, mut r1, mut s1) = (vec(6), vec(7), vec32(8));
+                            let (mut x2, mut r2, mut s2) = (vec(6), vec(7), vec32(8));
+                            let z = with_z.then_some(&z);
+                            let a = be
+                                .cg_update(alpha, &p, &q, &mut x1, &mut r1, z, with_rounded.then_some(&mut s1))
+                                .unwrap();
+                            let b = cg_update_by_steps(
+                                be,
+                                alpha,
+                                &p,
+                                &q,
+                                &mut x2,
+                                &mut r2,
+                                z,
+                                with_rounded.then_some(&mut s2),
+                            )
+                            .unwrap();
+                            let case = format!("cg_update {label} α {alpha} z {with_z} rounded {with_rounded}");
+                            assert_eq!((a.0.to_bits(), a.1.to_bits()), (b.0.to_bits(), b.1.to_bits()), "{case}");
+                            assert!(down(&x1) == down(&x2) && down(&r1) == down(&r2), "{case}");
+                            assert!(down32(&s1) == down32(&s2), "{case}");
+                        }
+                    }
+                }
+
+                let (z32, r) = (vec32(9), vec(10));
+                let (mut z1, mut z2) = (vec(11), vec(11));
+                let a = be.promote_dot(&z32, &r, &mut z1).unwrap();
+                let b = promote_dot_by_steps(be, &z32, &r, &mut z2).unwrap();
+                assert!(
+                    a.to_bits() == b.to_bits() && down(&z1) == down(&z2),
+                    "promote_dot {label}"
+                );
+
+                // Every product −0.0: the sums keep the sign of `dot`.
+                let (zero32, minus_zero) = (single.zeros(n).unwrap(), be.upload(&vec![-0.0; n]).unwrap());
+                let a = be.promote_dot(&zero32, &minus_zero, &mut z1).unwrap();
+                let b = promote_dot_by_steps(be, &zero32, &minus_zero, &mut z2).unwrap();
+                assert_eq!(a.to_bits(), b.to_bits(), "−0.0 sum {label}");
+            }
+        }
+        check(&CpuBackend::new());
+        check(&CpuSingle::new());
+    }
+
     #[test]
     fn a_prepared_solve_equals_pcg_on() {
         let be = CpuBackend::new();

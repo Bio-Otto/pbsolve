@@ -10,7 +10,7 @@ use crate::backend::Backend;
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::multigrid::{self, Coarse27, LevelMatrix, LevelOp, Stencil27, Transfer};
-use crate::operator::{apply7_with, Stencil7, StencilOperator};
+use crate::operator::{apply7_into, apply7_with, Stencil7, StencilOperator};
 use crate::real::Real;
 use crate::surface::{self, CoefficientMaps, Sphere};
 use rayon::prelude::*;
@@ -19,6 +19,17 @@ use std::sync::Arc;
 
 /// Fixed chunk size => reduction order independent of the thread count.
 const CHUNK: usize = 1 << 14;
+
+/// Σ a_i b_i over one chunk, in order: the partial sum of every dot product
+/// (`dot` and the fused CG steps).
+fn chunk_dot<T: Real>(a: &[T], b: &[T]) -> f64 {
+    a.iter().zip(b).map(|(p, q)| p.to_f64() * q.to_f64()).sum()
+}
+
+/// The chunks' partial sums added in chunk order.
+fn total(partials: &[f64]) -> f64 {
+    partials.iter().sum()
+}
 
 /// How operators are held for a given precision: f64 shares the host
 /// operators, f32 keeps rounded copies.
@@ -38,6 +49,8 @@ pub trait CpuReal: Real {
         out: &mut [Self],
         f: F,
     );
+    /// [`crate::operator::apply7_into`] of the operator (fused A p and p·q).
+    fn apply_into(op: &Self::Op, x: &[Self], first: usize, out: &mut [Self]);
     /// The f64 matrices behind the operators (multigrid setup); `None` for
     /// rounded copies.
     fn fine_matrix(op: &Self::Op) -> Option<&StencilOperator>;
@@ -72,6 +85,11 @@ impl CpuReal for f64 {
     }
     fn apply_coarse_with<F: Fn(f64, usize, f64) -> f64 + Sync>(op: &Self::Coarse, x: &[f64], out: &mut [f64], f: F) {
         multigrid::apply27_with(op.dims, &op.coef, x, out, f)
+    }
+    fn apply_into(op: &Self::Op, x: &[f64], first: usize, out: &mut [f64]) {
+        apply7_into(
+            op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, first, out,
+        )
     }
     fn fine_matrix(op: &Self::Op) -> Option<&StencilOperator> {
         Some(op)
@@ -113,6 +131,11 @@ impl CpuReal for f32 {
     }
     fn apply_coarse_with<F: Fn(f32, usize, f32) -> f32 + Sync>(op: &Self::Coarse, x: &[f32], out: &mut [f32], f: F) {
         multigrid::apply27_with(op.dims, &op.coef, x, out, f)
+    }
+    fn apply_into(op: &Self::Op, x: &[f32], first: usize, out: &mut [f32]) {
+        apply7_into(
+            op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, first, out,
+        )
     }
     fn fine_matrix(_: &Self::Op) -> Option<&StencilOperator> {
         None
@@ -268,9 +291,9 @@ impl<T: CpuReal> Backend for Cpu<T> {
         let partial: Vec<f64> = a
             .par_chunks(CHUNK)
             .zip(b.par_chunks(CHUNK))
-            .map(|(x, y)| x.iter().zip(y).map(|(p, q)| p.to_f64() * q.to_f64()).sum::<f64>())
+            .map(|(x, y)| chunk_dot(x, y))
             .collect();
-        Ok(partial.iter().sum())
+        Ok(total(&partial))
     }
 
     fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
@@ -384,6 +407,86 @@ impl<T: CpuReal> Backend for Cpu<T> {
                 *x += one * *d;
             });
         Ok(())
+    }
+
+    // The CG steps in one parallel pass each: every chunk of `dot` is
+    // updated with the expressions of the separate operations (`apply`;
+    // `axpy`: y + α·x; `demote`; `promote`) and then summed by `chunk_dot`
+    // while it is still in cache, so the results equal the step-by-step
+    // defaults bit for bit.
+
+    fn apply_dot(&self, op: &Self::Operator, p: &Self::Vector, q: &mut Self::Vector) -> Result<f64> {
+        let partial: Vec<f64> = q
+            .par_chunks_mut(CHUNK)
+            .zip(p.par_chunks(CHUNK))
+            .enumerate()
+            .map(|(k, (qc, pc))| {
+                T::apply_into(op, p, k * CHUNK, qc);
+                chunk_dot(pc, qc)
+            })
+            .collect();
+        Ok(total(&partial))
+    }
+
+    fn cg_update(
+        &self,
+        alpha: f64,
+        p: &Self::Vector,
+        q: &Self::Vector,
+        x: &mut Self::Vector,
+        r: &mut Self::Vector,
+        z: Option<&Self::Vector>,
+        rounded: Option<&mut Vec<f32>>,
+    ) -> Result<(f64, f64)> {
+        let n = r.len();
+        let lengths_match = [p.len(), q.len(), x.len()].iter().all(|&m| m == n)
+            && z.is_none_or(|z| z.len() == n)
+            && rounded.as_ref().is_none_or(|v| v.len() == n);
+        if !lengths_match {
+            return Err(PbError::Backend("cg_update: vectors of different lengths".into()));
+        }
+        let (a, minus_a) = (T::from_f64(alpha), T::from_f64(-alpha));
+        let mut rounded: Vec<Option<&mut [f32]>> = match rounded {
+            Some(v) => v.chunks_mut(CHUNK).map(Some).collect(),
+            None => (0..n.div_ceil(CHUNK)).map(|_| None).collect(),
+        };
+        let (rr, rz): (Vec<f64>, Vec<f64>) = x
+            .par_chunks_mut(CHUNK)
+            .zip(r.par_chunks_mut(CHUNK))
+            .zip(p.par_chunks(CHUNK).zip(q.par_chunks(CHUNK)))
+            .zip(rounded.par_iter_mut())
+            .enumerate()
+            .map(|(k, (((xc, rc), (pc, qc)), out))| {
+                for (x, p) in xc.iter_mut().zip(pc) {
+                    *x += a * *p;
+                }
+                for (r, q) in rc.iter_mut().zip(qc) {
+                    *r += minus_a * *q;
+                }
+                let rz = z.map_or(0.0, |z| chunk_dot(rc, &z[k * CHUNK..k * CHUNK + rc.len()]));
+                if let Some(out) = out {
+                    for (o, r) in out.iter_mut().zip(rc.iter()) {
+                        *o = f32::from_f64(r.to_f64());
+                    }
+                }
+                (chunk_dot(rc, rc), rz)
+            })
+            .unzip();
+        Ok((total(&rr), if z.is_some() { total(&rz) } else { 0.0 }))
+    }
+
+    fn promote_dot(&self, z32: &Vec<f32>, r: &Self::Vector, z: &mut Self::Vector) -> Result<f64> {
+        let partial: Vec<f64> = z
+            .par_chunks_mut(CHUNK)
+            .zip(z32.par_chunks(CHUNK).zip(r.par_chunks(CHUNK)))
+            .map(|(zc, (sc, rc))| {
+                for (z, s) in zc.iter_mut().zip(sc) {
+                    *z = T::from_f64(s.to_f64());
+                }
+                chunk_dot(rc, zc)
+            })
+            .collect();
+        Ok(total(&partial))
     }
 
     fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)> {

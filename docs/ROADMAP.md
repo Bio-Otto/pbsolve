@@ -188,10 +188,14 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
 * Fused multigrid smoother (done): the V-cycle's residual and Chebyshev
   updates run as one pass (CPU) or kernel (CUDA) each, bit-identical; CPU
   calculations 1.17–1.25×, the CUDA solve stage 1.17–1.26×.
-* *Next:* fuse the CG vector updates and dot products at the f64 level
-  (x, r, ‖r‖² and the f32 copy of r in one pass), and measure the CUDA
-  smoother gain on an idle GPU. The host `mdh` sum (~3 s for 5DK3) still
-  bounds CUDA calculations with the default boundary.
+* Fused CG steps (done): the update of x and r with ‖r‖², rᵀz and the f32
+  copy of r, the widening of the V-cycle's result with rᵀz and, on the CPU,
+  A p with pᵀAp run as one pass (CPU) or kernel (CUDA) each, with the
+  summation order of `dot`, bit-identical; CPU calculations 1.03–1.07×
+  (1.13× with Jacobi), the CUDA CG vector kernels 1.11×. A p with pᵀAp stays
+  two kernels on CUDA: on the reduction grid the stencil loses its L2 reuse.
+* *Next:* measure both fused steps on an idle GPU. The host `mdh` sum (~3 s
+  for 5DK3) still bounds CUDA calculations with the default boundary.
 
 ### v0.2 — Accuracy
 

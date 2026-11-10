@@ -186,6 +186,16 @@
   operations. Results are identical bit for bit. A calculation is 1.17–1.25×
   faster on the CPU; on CUDA the solve stage is 1.17–1.26× faster and a
   calculation 1.05–1.11× (measured on a shared GPU).
+- The conjugate-gradient iteration makes fewer passes over memory. One pass
+  updates x and r, computes ‖r‖² (and rᵀz) and rounds r for the f32 V-cycle;
+  another widens the V-cycle's result while computing rᵀz. On the CPU, A p and
+  pᵀAp are one pass as well. The new `Backend` methods `cg_update`,
+  `promote_dot` and `apply_dot` default to the separate operations, and
+  `backend::Stepwise` runs any backend with those defaults (the tests'
+  reference). Results are identical bit for bit. A calculation is
+  1.03–1.07× faster on the CPU (1.13× with `jacobi`). On CUDA the CG vector
+  kernels take 10 % less time, 2–4 % of the solve stage (measured on a
+  shared GPU).
 
 ### Fixed
 

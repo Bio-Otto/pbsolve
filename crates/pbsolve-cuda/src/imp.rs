@@ -160,6 +160,8 @@ struct Kernels {
     residual27_update: CudaFunction,
     cheb_first: CudaFunction,
     cheb_next: CudaFunction,
+    cg_update: CudaFunction,
+    promote_dot: CudaFunction,
 }
 
 /// Multigrid setup and assembly kernels (f64 only).
@@ -220,6 +222,8 @@ impl Kernels {
             residual27_update: f(format!("pb_residual27_update_{s}"))?,
             cheb_first: f(format!("pb_cheb_first_{s}"))?,
             cheb_next: f(format!("pb_cheb_next_{s}"))?,
+            cg_update: f(format!("pb_cg_update_{s}"))?,
+            promote_dot: f(format!("pb_promote_dot_{s}"))?,
         })
     }
 }
@@ -546,6 +550,21 @@ impl<T: CudaReal> Dev<T> {
             .ok_or_else(|| PbError::Backend("assembly needs the f64 backend".into()))
     }
 
+    /// The `K` sums of a reduction kernel's per-block partials (sum k of
+    /// block b at `partials[k·blocks + b]`), each added in block order: the
+    /// result of every dot product.
+    fn block_sums<const K: usize>(&self, partials: &CudaSlice<f64>, blocks: usize) -> Result<[f64; K]> {
+        let host = self.stream().clone_dtoh(partials).map_err(cuda_err("download"))?;
+        self.stream().synchronize().map_err(cuda_err("synchronize"))?;
+        Ok(std::array::from_fn(|k| host[k * blocks..(k + 1) * blocks].iter().sum()))
+    }
+
+    fn lock_partials(&self) -> Result<std::sync::MutexGuard<'_, CudaSlice<f64>>> {
+        self.partials
+            .lock()
+            .map_err(|_| PbError::Backend("poisoned lock".into()))
+    }
+
     /// A device buffer of `n` values that the caller overwrites completely.
     fn uninit(&self, n: usize) -> Result<CudaSlice<T>> {
         // SAFETY: every caller launches a kernel that writes all n values
@@ -712,10 +731,7 @@ impl<T: CudaReal> Backend for Dev<T> {
         let n = a.len();
         let cfg = Self::grid_for(n, MAX_REDUCTION_BLOCKS);
         let blocks = cfg.grid_dim.0 as usize;
-        let mut partials = self
-            .partials
-            .lock()
-            .map_err(|_| PbError::Backend("poisoned lock".into()))?;
+        let mut partials = self.lock_partials()?;
         let n64 = n as i64;
         {
             let mut b = self.stream().launch_builder(&self.k.dot);
@@ -723,19 +739,15 @@ impl<T: CudaReal> Backend for Dev<T> {
             // SAFETY: argument list matches the kernel signature; partials holds MAX_REDUCTION_BLOCKS values.
             unsafe { b.launch(cfg) }.map_err(cuda_err("pb_dot_partial"))?;
         }
-        let host = self.stream().clone_dtoh(&*partials).map_err(cuda_err("download"))?;
-        self.stream().synchronize().map_err(cuda_err("synchronize"))?;
-        Ok(host[..blocks].iter().sum())
+        let [ab] = self.block_sums(&partials, blocks)?;
+        Ok(ab)
     }
 
     fn dot2(&self, a: &Self::Vector, bvec: &Self::Vector, cvec: &Self::Vector) -> Result<(f64, f64)> {
         let n = a.len();
         let cfg = Self::grid_for(n, MAX_REDUCTION_BLOCKS);
         let blocks = cfg.grid_dim.0 as usize;
-        let mut partials = self
-            .partials
-            .lock()
-            .map_err(|_| PbError::Backend("poisoned lock".into()))?;
+        let mut partials = self.lock_partials()?;
         let n64 = n as i64;
         {
             let mut b = self.stream().launch_builder(&self.k.dot2);
@@ -743,9 +755,8 @@ impl<T: CudaReal> Backend for Dev<T> {
             // SAFETY: argument list matches the kernel signature; partials holds 2 MAX_REDUCTION_BLOCKS values.
             unsafe { b.launch(cfg) }.map_err(cuda_err("pb_dot2_partial"))?;
         }
-        let host = self.stream().clone_dtoh(&*partials).map_err(cuda_err("download"))?;
-        self.stream().synchronize().map_err(cuda_err("synchronize"))?;
-        Ok((host[..blocks].iter().sum(), host[blocks..2 * blocks].iter().sum()))
+        let [ab, ac] = self.block_sums(&partials, blocks)?;
+        Ok((ab, ac))
     }
 
     fn axpy(&self, alpha: f64, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
@@ -859,6 +870,89 @@ impl<T: CudaReal> Backend for Dev<T> {
         // SAFETY: argument list matches the kernel signature.
         unsafe { b.launch(Self::grid_for(r.len(), MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_cheb_next"))?;
         Ok(())
+    }
+
+    // Two CG steps fused into one kernel each (pb_cg_update, pb_promote_dot),
+    // with the expressions of the separate kernels and the grid of `dot`
+    // (each thread adds the same elements in the same order), so the results
+    // equal the step-by-step defaults bit for bit. `apply_dot` keeps its
+    // default, `apply` and `dot`: on the dot's grid of at most 1024 blocks,
+    // which run in waves, the stencil no longer finds the neighbours one
+    // plane away in the L2 cache, and A p alone takes 1.4–1.5× longer than
+    // with one thread per node; the fused kernel was slower than the pair.
+
+    fn cg_update(
+        &self,
+        alpha: f64,
+        p: &Self::Vector,
+        q: &Self::Vector,
+        x: &mut Self::Vector,
+        r: &mut Self::Vector,
+        z: Option<&Self::Vector>,
+        rounded: Option<&mut CudaSlice<f32>>,
+    ) -> Result<(f64, f64)> {
+        let n = r.len();
+        let lengths_match = [p.len(), q.len(), x.len()].iter().all(|&m| m == n)
+            && z.is_none_or(|z| z.len() == n)
+            && rounded.as_ref().is_none_or(|v| v.len() == n);
+        if !lengths_match {
+            return Err(PbError::Backend("cg_update: vectors of different lengths".into()));
+        }
+        let (a, minus_a) = (T::from_f64(alpha), T::from_f64(-alpha));
+        let cfg = Self::grid_for(n, MAX_REDUCTION_BLOCKS);
+        let blocks = cfg.grid_dim.0 as usize;
+        let n64 = n as i64;
+        // A null device pointer for an absent `z` or `rounded`.
+        let null: u64 = 0;
+        let mut partials = self.lock_partials()?;
+        {
+            let mut b = self.stream().launch_builder(&self.k.cg_update);
+            b.arg(&n64)
+                .arg(&a)
+                .arg(&minus_a)
+                .arg(p)
+                .arg(q)
+                .arg(&mut *x)
+                .arg(&mut *r);
+            match z {
+                Some(z) => b.arg(z),
+                None => b.arg(&null),
+            };
+            match rounded {
+                Some(v) => b.arg(v),
+                None => b.arg(&null),
+            };
+            b.arg(&mut *partials);
+            // SAFETY: argument list matches pb_cg_update (z and r32 may be null); vectors have
+            // length n, partials 2 MAX_REDUCTION_BLOCKS values.
+            unsafe { b.launch(cfg) }.map_err(cuda_err("pb_cg_update"))?;
+        }
+        if z.is_some() {
+            let [rr, rz] = self.block_sums(&partials, blocks)?;
+            Ok((rr, rz))
+        } else {
+            let [rr] = self.block_sums(&partials, blocks)?;
+            Ok((rr, 0.0))
+        }
+    }
+
+    fn promote_dot(&self, z32: &CudaSlice<f32>, r: &Self::Vector, z: &mut Self::Vector) -> Result<f64> {
+        let n = r.len();
+        if z32.len() != n || z.len() != n {
+            return Err(PbError::Backend("promote_dot: vector lengths".into()));
+        }
+        let cfg = Self::grid_for(n, MAX_REDUCTION_BLOCKS);
+        let blocks = cfg.grid_dim.0 as usize;
+        let n64 = n as i64;
+        let mut partials = self.lock_partials()?;
+        {
+            let mut b = self.stream().launch_builder(&self.k.promote_dot);
+            b.arg(&n64).arg(z32).arg(r).arg(&mut *z).arg(&mut *partials);
+            // SAFETY: argument list matches pb_promote_dot; vectors have length n.
+            unsafe { b.launch(cfg) }.map_err(cuda_err("pb_promote_dot"))?;
+        }
+        let [rz] = self.block_sums(&partials, blocks)?;
+        Ok(rz)
     }
 
     fn galerkin(&self, t: &Transfer, fine: LevelOp<'_, Self>) -> Result<(Self::Coarse, Self::Vector)> {

@@ -197,6 +197,24 @@ __device__ void prolong_add_impl(
     }
 }
 
+// The sum of the block's per-thread values `acc` (tree order), stored by
+// thread 0 at *out; `s` holds BLOCK shared doubles. Every dot product sums
+// its blocks this way. Requires blockDim.x == BLOCK.
+__device__ __forceinline__ void block_sum(const double acc, double* s, double* out)
+{
+    s[threadIdx.x] = acc;
+    __syncthreads();
+    for (int w = BLOCK / 2; w > 0; w >>= 1) {
+        if (threadIdx.x < w) {
+            s[threadIdx.x] += s[threadIdx.x + w];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        *out = s[0];
+    }
+}
+
 // Per-block partial sums of a.b in double. The host adds the partials in
 // block order, which makes the reduction deterministic (no atomics).
 // Requires blockDim.x == BLOCK.
@@ -210,17 +228,7 @@ __device__ void dot_partial_impl(
     for (long long c = (long long)blockIdx.x * blockDim.x + threadIdx.x; c < n; c += stride) {
         acc += (double)a[c] * (double)b[c];
     }
-    s[threadIdx.x] = acc;
-    __syncthreads();
-    for (int w = BLOCK / 2; w > 0; w >>= 1) {
-        if (threadIdx.x < w) {
-            s[threadIdx.x] += s[threadIdx.x + w];
-        }
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        partial[blockIdx.x] = s[0];
-    }
+    block_sum(acc, s, partial + blockIdx.x);
 }
 
 // (a.b, a.c) in one pass: partial[block] and partial[gridDim.x + block], each
@@ -343,7 +351,38 @@ __device__ void dot2_partial_impl(
           const T t = (c1 * w[c]) * r[c];                                                                \
           const T dc = T(1) * t + c2 * d[c];                                                             \
           d[c] = dc;                                                                                     \
-          x[c] = x[c] + T(1) * dc; } }
+          x[c] = x[c] + T(1) * dc; } }                                                                   \
+    /* Fused CG steps (Backend::cg_update, promote_dot): each element as the                             \
+       separate kernels compute it, each dot product summed like pb_dot_partial                          \
+       (same grid on the host, grid-stride order, block_sum).                                            \
+       x += a p; r += na q (na = -a); partial = r.r and, with z, r.z (second                             \
+       half); with r32, r32 = (float)r   (axpy, axpy, dot or dot2, demote) */                            \
+    extern "C" __global__ void pb_cg_update_##S(const long long n, const T a, const T na,                \
+        const T* __restrict__ p, const T* __restrict__ q, T* __restrict__ x, T* __restrict__ r,          \
+        const T* __restrict__ z, float* __restrict__ r32, double* __restrict__ partial)                  \
+    { __shared__ double s1[BLOCK];                                                                       \
+      __shared__ double s2[BLOCK];                                                                       \
+      double rr = 0.0, rz = 0.0;                                                                         \
+      GRID_STRIDE_LOOP(c, n) {                                                                           \
+          x[c] += a * p[c];                                                                              \
+          const T rc = r[c] + na * q[c];                                                                 \
+          r[c] = rc;                                                                                     \
+          const double rd = (double)rc;                                                                  \
+          rr += rd * rd;                                                                                 \
+          if (z) { rz += rd * (double)z[c]; }                                                            \
+          if (r32) { r32[c] = (float)rc; } }                                                             \
+      block_sum(rr, s1, partial + blockIdx.x);                                                           \
+      if (z) { block_sum(rz, s2, partial + gridDim.x + blockIdx.x); } }                                  \
+    /* z = (T)z32; partial = r.z   (promote, dot) */                                                     \
+    extern "C" __global__ void pb_promote_dot_##S(const long long n, const float* __restrict__ z32,     \
+        const T* __restrict__ r, T* __restrict__ z, double* __restrict__ partial)                        \
+    { __shared__ double s[BLOCK];                                                                        \
+      double acc = 0.0;                                                                                  \
+      GRID_STRIDE_LOOP(c, n) {                                                                           \
+          const T zc = (T)z32[c];                                                                        \
+          z[c] = zc;                                                                                     \
+          acc += (double)r[c] * (double)zc; }                                                            \
+      block_sum(acc, s, partial + blockIdx.x); }
 
 PB_KERNELS(double, f64)
 PB_KERNELS(float, f32)

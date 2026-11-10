@@ -976,3 +976,152 @@ fn gpu_vcycle_equals_the_cpu_vcycle_bit_for_bit() {
     let (g32, c32) = (gpu.single().unwrap(), cpu.single().unwrap());
     assert!(vcycle(&g32, &op, &b) == vcycle(&c32, &op, &b), "f32");
 }
+
+/// Each CG step equals its sequence of operations on the GPU bit for bit
+/// (both precisions; with and without z and the f32 residual): the vectors
+/// and the sums, the latter reduced exactly as `dot` reduces them. CUDA fuses
+/// `cg_update` and `promote_dot`; `apply_dot` runs its default.
+/// The vectors also equal the CPU's (the sums differ only in the order the
+/// two platforms add them). Grids from less than one block to several
+/// elements per thread of the 1024-block reduction grid.
+#[test]
+fn fused_cg_steps_on_the_gpu_equal_their_sequences() {
+    use pbsolve_core::backend::{apply_dot_by_steps, cg_update_by_steps, promote_dot_by_steps};
+    if !gpu_present("fused_cg_steps_on_the_gpu_equal_their_sequences") {
+        return;
+    }
+
+    /// Outputs of every step on `be`, fused and by steps: vectors and sums,
+    /// each in (fused, by steps) pairs.
+    fn run<B: Backend>(be: &B, op: &Arc<StencilOperator>) -> (Vec<Vec<u64>>, Vec<u64>) {
+        let single = be.single().unwrap();
+        let n = op.len();
+        let host = |seed: usize| system_like(n + 31 * seed)[31 * seed..].to_vec();
+        let vec = |seed: usize| be.upload(&host(seed)).unwrap();
+        let vec32 = |seed: usize| single.upload(&host(seed)).unwrap();
+        let down = |v: &B::Vector| bits(&be.download(v).unwrap());
+        let down32 = |v: &<B::Single as Backend>::Vector| bits(&single.download(v).unwrap());
+        let (mut vectors, mut sums) = (Vec::new(), Vec::new());
+
+        let dop = be.prepare(op.clone()).unwrap();
+        let p = vec(1);
+        let (mut q1, mut q2) = (vec(2), vec(2));
+        let a = be.apply_dot(&dop, &p, &mut q1).unwrap();
+        let b = apply_dot_by_steps(be, &dop, &p, &mut q2).unwrap();
+        vectors.extend([down(&q1), down(&q2)]);
+        sums.extend([a.to_bits(), b.to_bits()]);
+
+        let (p, q, z) = (vec(3), vec(4), vec(5));
+        for alpha in [0.731, -1.37e-3] {
+            for with_z in [false, true] {
+                for with_rounded in [false, true] {
+                    let z = with_z.then_some(&z);
+                    let (mut x1, mut r1, mut s1) = (vec(6), vec(7), vec32(8));
+                    let a = be
+                        .cg_update(alpha, &p, &q, &mut x1, &mut r1, z, with_rounded.then_some(&mut s1))
+                        .unwrap();
+                    let (mut x2, mut r2, mut s2) = (vec(6), vec(7), vec32(8));
+                    let b = cg_update_by_steps(be, alpha, &p, &q, &mut x2, &mut r2, z, with_rounded.then_some(&mut s2))
+                        .unwrap();
+                    vectors.extend([down(&x1), down(&x2), down(&r1), down(&r2), down32(&s1), down32(&s2)]);
+                    sums.extend([a.0.to_bits(), b.0.to_bits(), a.1.to_bits(), b.1.to_bits()]);
+                }
+            }
+        }
+
+        let (z32, r) = (vec32(9), vec(10));
+        let (mut z1, mut z2) = (vec(11), vec(11));
+        let a = be.promote_dot(&z32, &r, &mut z1).unwrap();
+        let b = promote_dot_by_steps(be, &z32, &r, &mut z2).unwrap();
+        vectors.extend([down(&z1), down(&z2)]);
+        sums.extend([a.to_bits(), b.to_bits()]);
+
+        // Every product −0.0.
+        let (zero32, minus_zero) = (single.zeros(n).unwrap(), be.upload(&vec![-0.0; n]).unwrap());
+        let a = be.promote_dot(&zero32, &minus_zero, &mut z1).unwrap();
+        let b = promote_dot_by_steps(be, &zero32, &minus_zero, &mut z2).unwrap();
+        sums.extend([a.to_bits(), b.to_bits()]);
+        (vectors, sums)
+    }
+
+    let gpu = CudaBackend::new(0).unwrap();
+    let cpu = CpuBackend::new();
+    // 150 nodes (one block), 18 200, 117 649 (one element per thread),
+    // 343 000 and 4.2 M (several per thread).
+    for dims in [[6, 5, 5], [130, 7, 20], [49, 49, 49], [70, 70, 70], [161, 161, 161]] {
+        let op = operator(dims, 0.4, 0.15);
+        for (name, (gv, gs), (cv, _)) in [
+            ("f64", run(&gpu, &op), run(&cpu, &op)),
+            (
+                "f32",
+                run(&gpu.single().unwrap(), &op),
+                run(&cpu.single().unwrap(), &op),
+            ),
+        ] {
+            for (k, pair) in gv.chunks(2).enumerate() {
+                assert!(
+                    pair[0] == pair[1],
+                    "{dims:?} {name}: GPU fused != GPU steps (vector {k})"
+                );
+            }
+            for (k, pair) in gs.chunks(2).enumerate() {
+                assert_eq!(pair[0], pair[1], "{dims:?} {name}: GPU fused != GPU steps (sum {k})");
+            }
+            assert!(gv == cv, "{dims:?} {name}: GPU vectors != CPU vectors");
+        }
+    }
+}
+
+/// A whole CG solve on the GPU with the fused steps equals the solve through
+/// `Stepwise` (every smoother and CG step as its sequence of kernels, also in
+/// the f32 twin) bit for bit: every preconditioner, converged and stopped at
+/// `max_iter`, on grids of less and more nodes than the reduction grid has
+/// threads.
+#[test]
+fn gpu_cg_solves_equal_the_stepwise_solves_bit_for_bit() {
+    use pbsolve_core::backend::Stepwise;
+    use pbsolve_core::PbError;
+    if !gpu_present("gpu_cg_solves_equal_the_stepwise_solves_bit_for_bit") {
+        return;
+    }
+    fn outcome<B: Backend>(
+        be: &B,
+        op: &Arc<StencilOperator>,
+        b: &[f64],
+        opts: SolverOptions,
+    ) -> (Vec<u64>, usize, u64) {
+        match pcg(be, op.clone(), b, opts) {
+            Ok((x, s)) => (bits(&x), s.iterations, s.relative_residual.to_bits()),
+            Err(PbError::NotConverged { iterations, residual }) => (Vec::new(), iterations, residual.to_bits()),
+            Err(e) => panic!("{e}"),
+        }
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let stepwise = Stepwise(CudaBackend::new(0).unwrap());
+    let large = operator([81, 81, 81], 0.4, 0.15);
+    let large_b: Vec<f64> = system_like(large.len())
+        .iter()
+        .zip(&large.inv_diag)
+        .map(|(v, d)| if *d == 0.0 { 0.0 } else { *v })
+        .collect();
+    for (op, b) in [system(), (large, large_b)] {
+        for pc in [
+            Preconditioner::MultigridF32,
+            Preconditioner::Multigrid,
+            Preconditioner::Jacobi,
+        ] {
+            for (tol, max_iter) in [(1e-10, 10_000), (1e-30, 3)] {
+                let opts = SolverOptions {
+                    preconditioner: pc,
+                    ..SolverOptions::new(tol, max_iter)
+                };
+                let fused = outcome(&gpu, &op, &b, opts);
+                assert!(
+                    fused == outcome(&stepwise, &op, &b, opts),
+                    "{:?} {pc:?} tol {tol:e}: fused != Stepwise",
+                    op.dims
+                );
+            }
+        }
+    }
+}

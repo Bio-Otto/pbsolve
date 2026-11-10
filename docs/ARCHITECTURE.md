@@ -93,6 +93,16 @@ A backend provides:
   every element with the same expressions: smoothing and residual move about
   30 % less data (10 instead of 23 kernels per level), and the results stay
   identical bit for bit;
+* the CG steps `apply_dot` (q ← A p and p·q), `cg_update` (x ← x + α p,
+  r ← r − α q, ‖r‖², for flexible CG also r·z, and the f32 copy of r for the
+  mixed-precision V-cycle) and `promote_dot` (z widened from f32 and r·z),
+  also defaulted to their sequences. The CPU fuses all three, CUDA the last
+  two (`apply_dot` is slower as one kernel there: on the reduction grid the
+  stencil loses its L2 reuse). A fused step sums every dot product exactly as
+  `dot` does (the CPU's 2¹⁴-element chunks, the GPU's grid of at most 1024
+  blocks with the same elements per thread), so the results stay identical
+  bit for bit. `backend::Stepwise<B>` runs a backend with every fused step as
+  its sequence; tests compare whole solves with it;
 * a single-precision twin (`type Single`, `single()`) on the same device and
   stream, with `demote`/`promote` to convert vectors;
 * the multigrid setup (f64 backends only): `galerkin` (Galerkin operator and

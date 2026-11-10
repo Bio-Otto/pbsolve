@@ -991,7 +991,7 @@ fn smooth<B: Backend>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::cpu::CpuBackend;
     use crate::grid::Grid;
@@ -999,7 +999,7 @@ mod tests {
     use crate::params::PbParams;
     use crate::surface::CoefficientMaps;
 
-    fn pseudo_random(n: usize, seed: u64) -> Vec<f64> {
+    pub(crate) fn pseudo_random(n: usize, seed: u64) -> Vec<f64> {
         let mut s = seed;
         (0..n)
             .map(|_| {

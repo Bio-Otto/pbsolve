@@ -177,8 +177,7 @@ pub fn apply7_with<T: Real, F>(
     F: Fn(T, usize, T) -> T + Sync,
 {
     let [nx, ny, nz] = dims;
-    let (sx, sy, sz) = (1usize, nx, nx * ny);
-    let [cx, cy, cz] = coef;
+    let (sy, sz) = (nx, nx * ny);
     out.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
         let base = k * nx * ny;
         if k == 0 || k == nz - 1 {
@@ -200,15 +199,78 @@ pub fn apply7_with<T: Real, F>(
             row[nx - 1] = combine(row[nx - 1], first + nx - 1, T::ZERO);
             for (i, o) in row.iter_mut().enumerate().take(nx - 1).skip(1) {
                 let c = first + i;
-                let xc = x[c];
-                let v = cx * (eps_x[c - sx] * (xc - x[c - sx]) + eps_x[c] * (xc - x[c + sx]))
-                    + cy * (eps_y[c - sy] * (xc - x[c - sy]) + eps_y[c] * (xc - x[c + sy]))
-                    + cz * (eps_z[c - sz] * (xc - x[c - sz]) + eps_z[c] * (xc - x[c + sz]))
-                    + kvol[c] * xc;
+                let v = stencil7_interior(c, sy, sz, coef, eps_x, eps_y, eps_z, kvol, x);
                 *o = combine(*o, c, v);
             }
         }
     });
+}
+
+/// (A x)_c of an interior node c (strides 1, `sy`, `sz`): the expression of
+/// every 7-point kernel here and of `stencil7_at` in the CUDA kernels.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn stencil7_interior<T: Real>(
+    c: usize,
+    sy: usize,
+    sz: usize,
+    coef: [T; 3],
+    eps_x: &[T],
+    eps_y: &[T],
+    eps_z: &[T],
+    kvol: &[T],
+    x: &[T],
+) -> T {
+    let [cx, cy, cz] = coef;
+    let sx = 1;
+    let xc = x[c];
+    cx * (eps_x[c - sx] * (xc - x[c - sx]) + eps_x[c] * (xc - x[c + sx]))
+        + cy * (eps_y[c - sy] * (xc - x[c - sy]) + eps_y[c] * (xc - x[c + sy]))
+        + cz * (eps_z[c - sz] * (xc - x[c - sz]) + eps_z[c] * (xc - x[c + sz]))
+        + kvol[c] * xc
+}
+
+/// The values [`apply7`] writes at nodes `first .. first + out.len()`, into
+/// `out` (sequentially). The CPU's fused A p and p·q
+/// ([`crate::backend::Backend::apply_dot`]) runs it on each chunk of its dot
+/// product.
+#[allow(clippy::too_many_arguments)]
+pub fn apply7_into<T: Real>(
+    dims: [usize; 3],
+    coef: [T; 3],
+    eps_x: &[T],
+    eps_y: &[T],
+    eps_z: &[T],
+    kvol: &[T],
+    x: &[T],
+    first: usize,
+    out: &mut [T],
+) {
+    let [nx, ny, nz] = dims;
+    let (sy, sz) = (nx, nx * ny);
+    let end = first + out.len();
+    let mut c = first;
+    while c < end {
+        // The part of row (j, k) in the range.
+        let row = c / nx;
+        let (j, k) = (row % ny, row / ny);
+        let row_start = row * nx;
+        let row_end = (row_start + nx).min(end);
+        let seg = &mut out[c - first..row_end - first];
+        if j == 0 || k == 0 || j == ny - 1 || k == nz - 1 {
+            seg.fill(T::ZERO);
+        } else {
+            for (o, cc) in seg.iter_mut().zip(c..row_end) {
+                let i = cc - row_start;
+                *o = if i == 0 || i == nx - 1 {
+                    T::ZERO
+                } else {
+                    stencil7_interior(cc, sy, sz, coef, eps_x, eps_y, eps_z, kvol, x)
+                };
+            }
+        }
+        c = row_end;
+    }
 }
 
 /// b = 4π l_B0 q − A g_ext on interior nodes (0 on the boundary), so that the
