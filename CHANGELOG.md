@@ -100,6 +100,12 @@
   files and structure preparation, command line, comparison with APBS. Its
   Python examples run in the test suite (`tests/test_guide.py`), which also
   checks the command-line page against the options of every command.
+- Comparison with APBS 3.4.1 on three larger proteins: 1HPV (3 137 atoms,
+  three settings), 1TII (10 862) and 5DK3 (20 179 atoms, 193×321×321 grid).
+  Maps are identical, ΔG_polar agrees to ≤ 4e-6 in APBS units and ΔΔG_polar
+  of binding to ≤ 0.042 kcal/mol. With `bcfl zero` everything agrees to
+  ~1e-10, so the remainder is APBS' boundary constants (`docs/VALIDATION.md`).
+  The test suite now also compares the 1YCR complex with APBS.
 
 ### Changed
 
@@ -212,6 +218,11 @@
   its CUDA major and compiles the kernels to a CUBIN for the device.
 - A pip-installed NVRTC (`nvidia-cuda-nvrtc-cu12`, `nvidia-cuda-nvrtc` 13)
   was never found; the preload now searches `site-packages/nvidia/`.
+- The binding verdict of `pbsolve apbs compare` (`BindingReport.passed`)
+  checked the raw ΔΔG_polar difference, which includes APBS' constant factor
+  (ΔΔG × 1.2e-5). Above ~4000 kcal/mol it reported FAIL even for exact
+  agreement. It now checks the difference in APBS units, like the rest of
+  the report.
 
 ### Changed
 

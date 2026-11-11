@@ -27,7 +27,8 @@ should update the status table below.
 
    Existing APBS inputs can be replayed with `pbsolve apbs run apbs.in`.
    Acceptance: identical maps; |ΔG_pbsolve − ΔG_APBS| / |ΔG_APBS| < 1e-3
-   (`passed()`); ΔΔG_bind differences ≪ 0.1 kcal/mol.
+   (`passed()`); ΔΔG_bind differences ≪ 0.1 kcal/mol (the binding verdict:
+   ≤ 0.05 kcal/mol in APBS units).
    **Expected residuals** come only from physical constants: APBS scales the
    source with CGS constants and converts kT → kJ/mol with CODATA-1986 values
    (pbsolve: CODATA 2018), so all energies differ by `apbs_unit_factor()` =
@@ -50,6 +51,7 @@ should update the status table below.
 | Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
 | APBS 3.4.1 parity, MDM2–p53 peptide complex (PDB 1YCR, pdb2pqr 3 `--ff=AMBER`, 1670 atoms, 18 zero-radius H; ligand = chain B) | see table below: 0 / 2 146 689 differing nodes in every map; ΔG_polar +0.0012 % raw, ≤ 1.2e-6 in APBS units; ΔΔG_bind within 0.004 kcal/mol |
+| APBS 3.4.1 parity, larger proteins: 1HPV (3 137 atoms; `mdh`, `sdh`, `zero`), 1TII (10 862) and 5DK3 (20 179 atoms, 193×321×321 grid), complex/receptor/ligand each | every map identical (1HPV, 1TII; 5DK3 compared without maps); ΔG_polar ≤ 4.0e-6 in APBS units; ΔΔG_bind within 0.042 kcal/mol in APBS units (\|ΔΔG\| up to 6 232 kcal/mol); with `zero` ≤ 1.6e-10 per state and ΔΔG 7.6e-7 kcal/mol, so the remainder is APBS' boundary constants; the binding verdict now uses APBS units (the raw difference contains ΔΔG × 1.2e-5); 1YCR in the test suite; see *APBS parity: larger proteins* |
 | Mixed precision (unreleased, the default) | `multigrid-f32`: ΔG_polar within 7.9e-13 of f64 (Born, 1YCR), equal iteration counts; 1YCR 1.42–1.55× faster on the CPU, 1.03–1.12× on the shared GPU (V-cycle 2× on the device). Default after a sweep of 28 cases (5 systems up to 20 179 atoms, 14 parameter variants, CPU and CUDA): ≤ 4.2e-13, identical iterations, CPU 1.4–1.7× on proteins; Born table and 1YCR APBS comparison unchanged; see *Mixed precision* |
 | Host stages (unreleased) | Faster maps, `mdh` boundary, operator setup and host transfers; every energy, iteration count, residual, map and potential bit-identical to the previous commit on CPU and CUDA (13 cases + MM-PBSA species); 1.06–1.26× (CPU), 1.03–1.19× (CUDA) per calculation; see *Host stages* |
 | `bcfl="mdh-fast"` (unreleased, opt-in) | Interpolated `mdh`: ΔG_polar within 1.1e-13 of `mdh` (Born, 1YCR ×4, 1HPV, 1TII, 5DK3; CPU and CUDA), equal iterations; boundary 5DK3 3.39 → 0.55 s; 1YCR APBS comparison prints identical energies; see *mdh-fast* |
@@ -96,6 +98,102 @@ Reproduce:
 pdb2pqr --ff=AMBER --keep-chain --whitespace 1YCR.pdb 1ycr.pqr
 pbsolve apbs compare 1ycr.pqr --spacing 0.5 --ionic-strength 0.15 --bcfl mdh --ligand-chain B
 pbsolve apbs compare 1ycr.pqr --spacing 0.5 --pdie 2 --bcfl sdh --ligand-chain B
+```
+
+### APBS parity: larger proteins (1HPV, 1TII, 5DK3)
+
+Setup:
+* Three pdb2pqr 3.8.0 models: AMBER, `--noopt`, PROPKA titration at pH 4,
+  waters removed. These are the models of the mixed-precision sweep.
+* h = 0.5 Å, two focusing levels, `cfac 1.7`, `fadd 20`; pbsolve on the CPU.
+* Each run compares complex, receptor and ligand on the complex's grid.
+
+| System | Atoms | Ligand (leaves the complex) | dime |
+|---|---|---|---|
+| 1HPV, HIV-1 protease dimer (inhibitor not parametrised) | 3 137 | chain B (1 570 atoms) | 161×129×161 |
+| 1TII, AB5 enterotoxin | 10 862 | A subunit, chains A + C (atoms 1–3484) | 225×193×225 |
+| 5DK3, IgG4 antibody (pembrolizumab) | 20 179 | light chain A (3 317 atoms) | 193×321×321 |
+
+Energies in kcal/mol. "APBS units" = pbsolve × `apbs_unit_factor()`.
+
+| System, setting | Species | ΔG_polar APBS | ΔG_polar pbsolve | rel. diff | in APBS units |
+|---|---|---|---|---|---|
+| 1HPV, pdie 1, 0.15 M, `mdh` | complex | −2893.0061 | −2892.9784 | +9.57e-6 | −2.6e-6 |
+| | receptor | −1337.1970 | −1337.1821 | +1.12e-5 | −9.8e-7 |
+| | ligand | −1746.0495 | −1746.0315 | +1.03e-5 | −1.9e-6 |
+| | **ΔΔG_bind** | 190.2405 | 190.2352 | −0.0053 kcal/mol | −0.0030 kcal/mol |
+| 1HPV, pdie 2, 0 M, `sdh` | complex | −1406.2784 | −1406.2649 | +9.58e-6 | −2.6e-6 |
+| | receptor | −648.7114 | −648.7041 | +1.12e-5 | −9.7e-7 |
+| | ligand | −849.6027 | −849.5939 | +1.03e-5 | −1.9e-6 |
+| | **ΔΔG_bind** | 92.0357 | 92.0331 | −0.0026 kcal/mol | −0.0015 kcal/mol |
+| 1HPV, pdie 1, 0.15 M, `zero` | complex | −2267.0530 | −2267.0254 | +1.22e-5 | −1.3e-8 |
+| | receptor | −1228.5596 | −1228.5446 | +1.22e-5 | −8.7e-9 |
+| | ligand | −1475.4042 | −1475.3863 | +1.22e-5 | −1.2e-8 |
+| | **ΔΔG_bind** | 436.9108 | 436.9055 | −0.0053 kcal/mol | −7.6e-7 kcal/mol |
+| 1TII, pdie 1, 0.15 M, `mdh` | complex | −18323.0869 | −18322.9238 | +8.90e-6 | −3.3e-6 |
+| | receptor | −8180.5848 | −8180.5011 | +1.02e-5 | −2.0e-6 |
+| | ligand | −6722.1693 | −6722.1035 | +9.79e-6 | −2.4e-6 |
+| | **ΔΔG_bind** | −3420.3327 | −3420.3192 | +0.0135 kcal/mol | −0.0282 kcal/mol |
+| 5DK3, pdie 1, 0.15 M, `mdh` | complex | −44557.4193 | −44557.0534 | +8.21e-6 | −4.0e-6 |
+| | receptor | −35008.7745 | −35008.4786 | +8.45e-6 | −3.7e-6 |
+| | ligand | −3316.3615 | −3316.3251 | +1.10e-5 | −1.2e-6 |
+| | **ΔΔG_bind** | −6232.2833 | −6232.2496 | +0.0337 kcal/mol | −0.0423 kcal/mol |
+
+Every run passes. In detail:
+* **Maps.** The dielectric and ion maps are identical for 1HPV (all three
+  settings) and 1TII: 0 of 2.4 × 10⁸ node values differ (four maps, three
+  species per run).
+  * Charges differ by ≤ 8e-8 of the maximum (the DX format).
+  * Potentials differ by ≤ 6.6e-6 of their scale, the CGS/2018 ratio of the
+    source constants, as for 1YCR.
+  * Solves on APBS' own maps reproduce APBS' energies to ≤ 7.3e-8 in APBS
+    units.
+  * 5DK3 was compared without maps (`--no-maps`): the comparison holds both
+    programs' maps in memory (3.0 GB for 1TII, ~6 GB estimated for 5DK3),
+    more than the shared machine had free.
+* **Where the remainder comes from.** In APBS units the solvated states agree
+  to ≤ 1.5e-9 and the reference states (no salt, pdie everywhere) to
+  ≤ 2.0e-7.
+  * The reference remainder is APBS' analytic boundary, which uses a third
+    set of constants.
+  * ΔG_polar is the difference of two energies 20–50 times larger than
+    itself, so this remainder appears as 1–4e-6 in ΔG_polar.
+  * It grows with the molecule: 0.042 kcal/mol in the ΔΔG of 5DK3, 7e-6 of
+    its value.
+  * Without an analytic boundary (`bcfl zero`) every state of 1HPV agrees to
+    ≤ 1.6e-10, and ΔΔG_bind to 7.6e-7 kcal/mol.
+* **Binding verdict fixed.** The raw ΔΔG difference also contains the
+  constant factor, ΔΔG × 1.2e-5: 0.076 kcal/mol for 5DK3.
+  * `BindingReport.passed` compared the raw difference with 0.05 kcal/mol.
+    It would therefore report FAIL above ~4000 kcal/mol even for exact
+    agreement; 5DK3 passed only because the boundary remainder had the
+    opposite sign.
+  * The verdict now uses the difference in APBS units, like the rest of the
+    report (`test_binding_verdict_is_judged_in_apbs_units`).
+* **Tests on a real complex.** `tests/test_apbs_parity.py` now runs 1YCR
+  through APBS on a coarse grid (h = 0.8 Å):
+  * `mdh` with maps and injection for each species, ΔΔG ≤ 5e-3 kcal/mol
+    (1.2e-3 measured);
+  * the command line with `--ligand-chain B` and `bcfl zero`, ≤ 1e-8 per
+    state and ΔΔG ≤ 1e-4 kcal/mol (5e-6 measured).
+  * Mutations caught: 4/4 (raw ΔΔG verdict, chain field, unit factor off by
+    1e-7, reference state written as solvated).
+* **Cost.** One run (three species, both programs, maps) takes 73–83 s for
+  1HPV and 7.7 min for 1TII; 5DK3 without maps takes 8.5 min. APBS peaks at
+  1.1 / 2.2 / 4.1 GB.
+
+Reproduce (waters removed from the PDB first: pdb2pqr's `--drop-water`
+keeps some waters of 5DK3, see *Structure preparation*):
+
+```bash
+grep -v HOH 1HPV.pdb > 1hpv_nowat.pdb   # likewise 1TII, 5DK3
+pdb2pqr --ff=AMBER --noopt --keep-chain --whitespace \
+    --titration-state-method propka --with-ph 4 1hpv_nowat.pdb 1hpv.pqr
+pbsolve apbs compare 1hpv.pqr --spacing 0.5 --ionic-strength 0.15 --bcfl mdh --ligand-chain B
+pbsolve apbs compare 1hpv.pqr --spacing 0.5 --pdie 2 --bcfl sdh --ligand-chain B
+pbsolve apbs compare 1hpv.pqr --spacing 0.5 --ionic-strength 0.15 --bcfl zero --ligand-chain B
+pbsolve apbs compare 1tii.pqr --spacing 0.5 --ionic-strength 0.15 --bcfl mdh --ligand-atoms 1-3484
+pbsolve apbs compare 5dk3.pqr --spacing 0.5 --ionic-strength 0.15 --bcfl mdh --ligand-chain A --no-maps
 ```
 
 ## Linear solver: multigrid versus Jacobi

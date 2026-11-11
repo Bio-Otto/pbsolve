@@ -3,9 +3,10 @@
 With `surface="mol"` and `bcfl` `"mdh"`, `"sdh"` or `"zero"`, pbsolve follows
 APBS 3.4.1 (`mg-auto`, `lpbe`, `srfm mol`, `chgm spl0`) operation for
 operation: its focusing grids, dielectric and ion maps are identical to
-APBS', and its energies agree to about 1e-6. `pbsolve.apbs` runs both
-programs on the same problem and shows where they differ, if they do. It
-needs APBS 3.4.1 on the `PATH` (`conda install -c conda-forge apbs=3.4.1`).
+APBS', and its energies agree to a few parts per million. `pbsolve.apbs`
+runs both programs on the same problem and shows where they differ, if they
+do. It needs APBS 3.4.1 on the `PATH`
+(`conda install -c conda-forge apbs=3.4.1`).
 
 ## Comparing a structure
 
@@ -29,8 +30,8 @@ compares, in layers, so that a disagreement can be located:
 The verdict passes with identical grids, matching maps, the injected solution
 within 1e-4 of the potential scale and ΔG_polar within `--energy-rtol`
 (default 1e-3 relative); a binding comparison also requires ΔΔG_polar within
-0.05 kcal/mol. [The command line](cli.md#pbsolve-apbs-compare) lists all
-options.
+0.05 kcal/mol in APBS units (see [below](#what-can-differ-and-why)).
+[The command line](cli.md#pbsolve-apbs-compare) lists all options.
 
 The same from Python, with {py:func}`pbsolve.apbs.compare` and
 {py:func}`pbsolve.apbs.compare_binding`:
@@ -72,8 +73,10 @@ message naming the keyword.
   All energies therefore differ by a factor
   {py:func}`pbsolve.apbs.apbs_unit_factor` ≈ 1 + 1.2e-5; reports also give
   the differences in "APBS units", with the factor removed. APBS' analytic
-  boundary uses a third set of constants, which leaves up to ~1e-6 in
-  unscreened reference states; with `bcfl zero` the energies agree to
+  boundary uses a third set of constants, which leaves up to a few 1e-7 in
+  unscreened reference states. ΔG_polar is a small difference of two such
+  energies, so this becomes a few 1e-6 there and, for large complexes,
+  a few 0.01 kcal/mol in ΔΔG_polar. With `bcfl zero` the energies agree to
   ~1e-10.
 * **Options without an APBS equivalent.** `bcfl="mdh-fast"` is written as
   `mdh` (energies agree to ~1e-13); `surface="harmonic"` cannot be compared.
@@ -86,5 +89,17 @@ identical (0 of 2 146 689 nodes differ), ΔG_polar agrees to 1.2e-6 in APBS
 units, and ΔΔG_polar of binding to 0.004 kcal/mol. A synthetic 30-atom
 molecule with crevices and zero-radius atoms, run with all three boundary
 conditions, both surfaces, 0 to 0.15 M salt and two or three focusing levels,
-gives identical maps as well (`tests/test_apbs_parity.py`). The
-[validation record](../VALIDATION) has the full tables.
+gives identical maps as well (`tests/test_apbs_parity.py`).
+
+Three larger proteins give the same picture:
+* **1HPV**, the HIV-1 protease dimer (3 137 atoms);
+* **1TII**, an AB5 toxin (10 862 atoms, the A subunit leaving the B pentamer);
+* **5DK3**, an IgG4 antibody (20 179 atoms, one light chain leaving).
+
+The grids go up to 193×321×321 nodes. The dielectric and ion maps of 1HPV
+and 1TII are identical. ΔG_polar agrees to ≤ 4e-6 in APBS units, and
+ΔΔG_polar of binding to ≤ 0.042 kcal/mol for binding energies of up to
+6 232 kcal/mol. With `bcfl zero` the energies agree to ~1e-10 and ΔΔG_polar to
+< 1e-6 kcal/mol. The small remainder with `mdh` and `sdh` therefore comes
+from APBS' boundary constants. The [validation record](../VALIDATION) has the
+full tables.

@@ -885,9 +885,15 @@ class BindingReport:
         }
 
     def passed(self, energy_rtol: float = 1e-3, ddg_atol: float = 0.05) -> bool:
-        """All three comparisons pass and the ΔΔG_polar values differ by at most ``ddg_atol`` kcal/mol."""
+        """All three comparisons pass and the ΔΔG_polar values differ by at most
+        ``ddg_atol`` kcal/mol in APBS units.
+
+        The raw difference also contains the constant factor
+        :func:`apbs_unit_factor` times ΔΔG, which alone exceeds 0.05 kcal/mol
+        once ΔΔG passes about ±4000 kcal/mol (large complexes of like-charged
+        partners), so it is removed before the check."""
         ok = all(r.passed(energy_rtol) for r in (self.complex, self.receptor, self.ligand))
-        return ok and abs(self.ddg["diff"]) <= ddg_atol
+        return ok and abs(self.ddg["diff_unit_corrected"]) <= ddg_atol
 
     def format(self) -> str:
         """The report as text, with the binding verdict."""

@@ -11,6 +11,9 @@ the boundary carries a sizeable part of the energy. With `bcfl zero` all
 energies agree to ~1e-10.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -21,6 +24,8 @@ from conftest import write_pqr
 
 pytestmark = pytest.mark.skipif(apbs.find_apbs() is None, reason="APBS executable not found")
 
+
+YCR = Path(__file__).parent / "data" / "1ycr_amber_opt_pdb2pqr.pqr"
 
 # Relative energy tolerances after the unit correction (see module docstring).
 SOLVATED_RTOL = 1e-7
@@ -86,6 +91,33 @@ def test_binding(tmp_path, molecule, bcfl, atol):
     # kcal/mol; with mdh the residual is APBS' boundary-constant mismatch (~1e-6 of the reference energies)
     assert abs(rep.ddg["diff_unit_corrected"]) < atol
     assert rep.passed()
+
+
+def test_protein_complex(tmp_path):
+    """MDM2–p53 (1YCR: 1670 atoms, two chains, 18 hydrogens of radius 0) on a coarse
+    grid: identical maps and energies for complex, receptor and ligand."""
+    chains = np.array([ln.split()[4] for ln in YCR.read_text().splitlines() if ln.startswith("ATOM")])
+    s = pbsolve.Solver(platform="CPU", grid_spacing=0.8, ionic_strength=0.15, bcfl="mdh", dime_policy="apbs")
+    rep = apbs.compare_binding(YCR, s, chains == "B", workdir=tmp_path / "w")
+    for r in (rep.complex, rep.receptor, rep.ligand):
+        _check(r, "mdh")
+    # kcal/mol in APBS units (1.2e-3 measured): APBS' boundary constants in the reference states
+    assert abs(rep.ddg["diff_unit_corrected"]) < 5e-3
+    assert rep.passed()
+
+
+def test_protein_complex_cli_zero_boundary(tmp_path):
+    """The command line on the same complex with `bcfl zero`: without an analytic
+    boundary the unit factor is the only difference, down to the solver tolerance."""
+    out = tmp_path / "report.json"
+    argv = ["compare", str(YCR), "--platform", "CPU", "--spacing", "0.8", "--ionic-strength", "0.15"]
+    argv += ["--bcfl", "zero", "--ligand-chain", "B", "--no-maps", "--workdir", str(tmp_path / "w")]
+    assert apbs.main(argv + ["--json", str(out)]) == 0
+    rep = json.loads(out.read_text())
+    for species in ("complex", "receptor", "ligand"):
+        for state in ("solvated", "reference"):
+            assert abs(rep[species]["energies"][state]["rel_unit_corrected"]) < 1e-8, (species, state)
+    assert abs(rep["ddg"]["diff_unit_corrected"]) < 1e-4  # kcal/mol (5e-6 measured)
 
 
 def test_run_existing_input(tmp_path, molecule, molecule_pqr):

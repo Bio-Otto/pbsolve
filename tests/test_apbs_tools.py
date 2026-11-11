@@ -185,3 +185,54 @@ def test_solve_maps_reproduces_the_solver(molecule):
 def test_unit_factor():
     assert apbs.apbs_unit_factor() == pytest.approx(1.0 + 1.2186e-5, abs=2e-9)
     assert apbs.apbs_unit_factor(310.0) == pytest.approx(apbs.apbs_unit_factor(), rel=1e-12)
+
+
+def _species(dg_apbs, dg_pbsolve):
+    uf = apbs.apbs_unit_factor()
+    return apbs.ComparisonReport(
+        pqr="x.pqr",
+        workdir="w",
+        platform="CPU",
+        grid={"dims": [65, 65, 65], "fine_spacing": [0.5, 0.5, 0.5], "levels": 2},
+        grid_issues=[],
+        apbs_warnings=[],
+        energies={},
+        delta_g={
+            "apbs": dg_apbs,
+            "pbsolve": dg_pbsolve,
+            "diff": dg_pbsolve - dg_apbs,
+            "rel": dg_pbsolve / dg_apbs - 1.0,
+            "rel_unit_corrected": dg_pbsolve * uf / dg_apbs - 1.0,
+        },
+        unit_factor=uf,
+    )
+
+
+def _binding(ddg_apbs, ddg_pbsolve):
+    """Receptor and ligand agree exactly in APBS units; the complex carries the given ΔΔG values."""
+    uf = apbs.apbs_unit_factor()
+    rec, lig = -35000.0, -3300.0
+    return apbs.BindingReport(
+        complex=_species(rec + lig + ddg_apbs, (rec + lig) / uf + ddg_pbsolve),
+        receptor=_species(rec, rec / uf),
+        ligand=_species(lig, lig / uf),
+    )
+
+
+def test_binding_verdict_is_judged_in_apbs_units():
+    uf = apbs.apbs_unit_factor()
+    # A large ΔΔG (like-charged partners) on which pbsolve agrees exactly in APBS units: the raw
+    # difference is the constant factor alone, 6000 × 1.2e-5 = 0.073 kcal/mol, and must not fail.
+    rep = _binding(-6000.0, -6000.0 / uf)
+    assert abs(rep.ddg["diff"]) > 0.07
+    assert abs(rep.ddg["diff_unit_corrected"]) < 1e-9
+    assert rep.passed()
+    # Equal raw numbers mean a 0.073 kcal/mol disagreement in APBS units.
+    rep = _binding(-6000.0, -6000.0)
+    assert abs(rep.ddg["diff"]) < 1e-9
+    assert not rep.passed()
+    assert rep.passed(ddg_atol=0.08)
+    # Small complexes: unchanged verdicts on both sides of the tolerance.
+    assert _binding(190.0, 190.0 / uf + 0.04).passed()
+    assert not _binding(190.0, 190.0 / uf + 0.06).passed()
+    assert "binding verdict: PASS" in _binding(-6000.0, -6000.0 / uf).format()
