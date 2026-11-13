@@ -5,8 +5,10 @@ should update the status table below.
 
 ## Protocol
 
-1. **Analytic references.** Born ion (unit charge, a = 2 Å, ε 1 → 78.54) and,
-   planned, Kirkwood sphere with off-centre charges and salt.
+1. **Analytic references.** Born ion (unit charge, a = 2 Å, ε 1 → 78.54) and
+   Kirkwood sphere with off-centre charges and salt
+   (`pbsolve.analytic.kirkwood_energy`); each with its observed convergence
+   order, averaged over grid placements (`scripts/validate_analytic.py`).
 2. **Grid convergence.** The error must shrink overall as the spacing decreases
    (0.5 → 0.33 → 0.25 → 0.2 Å). With a sharp dielectric boundary the error
    oscillates by a few tenths of a percent depending on how the surface cuts the
@@ -47,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Kirkwood sphere (unreleased): charges off the centre of a 5 Å sphere, 0 and 0.15 M, pdie 1 and 4; Born ion | reference = closed forms to ≤ 1e-13 (Born, Born–Debye–Hückel with Stern layer, grounded-sphere images for several charges) and the interface conditions to 1e-12; pbsolve, averaged over 20 grid placements: −2.3 to −2.9 % at 0.5 Å, −0.8 to −1.0 % at 0.2 Å, observed order 1.09–1.18 (first order, as expected for the sharp boundary); charges 1 Å below the surface scatter from −11 to 0 % per placement at 0.5 Å; see *Analytic references: Kirkwood sphere* |
 | Operator symmetry, charge conservation, SES crevice, SASA, APBS reference-sphere count, marking = brute force | pass (unit tests) |
 | Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
 | APBS 3.4.1 parity, synthetic 30-atom molecule (crevices, zero-radius atoms), `mdh`/`sdh`/`zero`, `mol`/`vdw`, 0–0.15 M, 2- and 3-level focusing, Born ion | all maps identical; energies within 1e-7 (solvated) / 5e-6 (reference, `mdh`/`sdh`) in APBS units — `tests/test_apbs_parity.py` |
@@ -1673,6 +1676,67 @@ Speed: 5DK3 1.24 s vs 3.37 s for pdb2pqr; 1YCR 0.09 s vs 0.28 s (pure Python bot
 Known pdb2pqr difference: with 5-digit serial numbers fused to `HETATM`
 (e.g. `HETATM10273`), pdb2pqr's `--drop-water` keeps those waters and
 protonates them; pbsolve reads the fixed columns and drops them.
+
+## Analytic references: Kirkwood sphere
+
+**Model.** Point charges inside a sphere of radius a: interior `pdie`,
+exterior `sdie`, ions beyond the Stern radius b = a + `ion_radius`
+[Kirkwood 1934]. In pbsolve the sphere is one uncharged atom of radius a and
+the charges are atoms of radius 0 inside it; the ion map then excludes ions
+within exactly b (checked on the maps), and the reference state is `pdie`
+without ions in both.
+
+**Reference** (`pbsolve.analytic.kirkwood_energy`). The reaction field is a
+sum over multipoles n; each coefficient comes from the interface conditions
+at a and b in closed form. For salt, kₙ(κb) itself overflows at large n, so
+only its logarithmic derivative is used, from a stable recurrence of kₙ₋₁/kₙ.
+The series is cut where (ρ_max/a)²ⁿ < 1e-14 (~800 terms at ρ/a = 0.98).
+Checks (`tests/test_analytic.py`):
+* the Born energy, and Born with Debye–Hückel screening beyond a Stern
+  layer, to ≤ 1e-13;
+* sdie → ∞ or κ → ∞ makes the sphere a grounded conductor: image charges for
+  three charges (cross terms included), and for one charge at ρ/a = 0.98, to
+  1e-10 (1e-5 at finite κa ≈ 1.6·10⁴);
+* each coefficient against the full 4×4 interface conditions written with
+  the explicit kₙ polynomial, to 1e-12 (n ≤ 12). That polynomial matches
+  scipy's `spherical_kn` to 1e-15, and the recurrence matches it to 2e-16
+  up to n = 59;
+* rotation invariance, and rejection of charges on or outside the sphere.
+* Mutations caught: 6/6 (Legendre recurrence, Stern radius, start of the
+  kₙ recurrence, series cut too early, κ without sdie, powers of ρ).
+
+**pbsolve against it.** `scripts/validate_analytic.py`: CPU, `mol`, `mdh`,
+`fadd 20` (Born: 12). Every spacing is the mean over 20 placements of the
+molecule on a fixed grid (the first unshifted; range in brackets).
+Error = (ΔG − ΔG_analytic)/|ΔG_analytic|. The three charges are +1, −1 and
++0.5 at 2.0, 2.3 and 2.7 Å from the centre; the near-surface pair is two +1
+charges 1.0 and 1.2 Å below the surface.
+
+| Case | ΔG analytic (kcal/mol) | h = 0.5 | h = 0.35 | h = 0.25 | h = 0.2 | order |
+|---|---|---|---|---|---|---|
+| Born ion, a = 2 Å | −81.9589 | −2.94 % (−4.73 … −1.95) | −1.59 % (−2.14 … −1.00) | −1.23 % (−1.42 … −1.03) | −0.96 % (−1.15 … −0.73) | 1.18 |
+| Kirkwood, 3 charges, a = 5 Å | −37.2679 | −2.77 % (−3.29 … −2.06) | −1.82 % (−2.16 … −1.64) | −1.27 % (−1.39 … −1.15) | −0.98 % (−1.08 … −0.89) | 1.12 |
+| same, 0.15 M | −37.3369 | −2.69 % (−3.20 … −2.07) | −1.85 % (−2.18 … −1.61) | −1.33 % (−1.47 … −1.21) | −0.97 % (−1.06 … −0.89) | 1.09 |
+| same, 0.15 M, pdie 4 | −8.8892 | −2.34 % (−2.71 … −1.92) | −1.60 % (−1.87 … −1.35) | −1.09 % (−1.24 … −0.92) | −0.84 % (−0.93 … −0.73) | 1.11 |
+| 2 charges 1.0–1.2 Å below the surface, 0.15 M | −224.9608 | −4.68 % (−11.42 … +0.11) | −1.99 % (−5.94 … +0.02) | −1.24 % (−3.36 … −0.22) | −1.10 % (−2.38 … −0.32) | 1.59 |
+
+* **Observed order ≈ 1.1–1.2.** The 7-point scheme with a sharp dielectric
+  boundary is first order, as the roadmap states (4.8). Salt and pdie change
+  the constant, not the order. On average pbsolve's |ΔG| is too large in
+  every case.
+* **Placement matters most near the surface.** For charges 1 Å below it a
+  single calculation at 0.5 Å can be off by 11 %, and the fitted order (1.59)
+  is dominated by that scatter. Between 0.35 and 0.2 Å the mean error falls
+  roughly in proportion to h. This is the case the second-order interface
+  methods (4.8) and the error estimates (4.9) address.
+* With 6 placements instead of 20 the orders were 1.14–1.21 and 2.13 for the
+  near-surface pair, so read that row as "noisy", not "second order".
+* Tests: the 3-charge sphere at 0.5 and 0.25 Å with 0 M / pdie 1 and
+  0.15 M / pdie 4 (|error| < 1.5 % at 0.25 Å and less than 0.6 times the
+  error at 0.5 Å; 1 s each).
+
+Reproduce: `python scripts/validate_analytic.py --placements 20` (4.5 min on
+18 threads).
 
 ## Sensitivity of the sharp dielectric boundary
 

@@ -214,6 +214,15 @@ source, less grid-position dependence) next to trilinear, selectable per run.
 off-centre charges in a sphere, with and without salt [Kirkwood 1934]; two
 interacting spheres; the planar interface. Every discretisation must report
 its **observed convergence order** on these, not only the error at one spacing.
+*Status: Kirkwood sphere done (unreleased); two spheres and the planar
+interface next.*
+* `pbsolve.analytic.kirkwood_energy`: charges anywhere in a sphere, with salt
+  beyond a Stern layer; checked against closed forms (Born, Born–Debye–Hückel,
+  grounded-sphere images) and the interface conditions to ≤ 1e-12.
+* `scripts/validate_analytic.py`: error at 0.5–0.2 Å, averaged over grid
+  placements, and the observed order: 1.09–1.18 for the current
+  discretisation (first order). Charges 1 Å below the surface scatter by up
+  to 11 % per placement at 0.5 Å, the baseline for 4.8 and 4.9.
 
 **4.8 Second-order interface discretisation.** *Why:* with a sharp interface,
 the 7-point stencil is first order and solvation energies depend on how the

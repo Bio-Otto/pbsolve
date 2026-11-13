@@ -106,6 +106,13 @@
   of binding to ≤ 0.042 kcal/mol. With `bcfl zero` everything agrees to
   ~1e-10, so the remainder is APBS' boundary constants (`docs/VALIDATION.md`).
   The test suite now also compares the 1YCR complex with APBS.
+- `pbsolve.analytic.kirkwood_energy`: the exact polar solvation energy of
+  point charges anywhere inside a dielectric sphere, with or without salt
+  beyond a Stern layer [Kirkwood 1934], in pbsolve's constants and model.
+  `scripts/validate_analytic.py` reports the error against it and the Born
+  ion at several spacings, averaged over grid placements, and the observed
+  convergence order: 1.09–1.18, from about 2.3–2.9 % at 0.5 Å to 0.8–1.0 %
+  at 0.2 Å (`docs/VALIDATION.md`).
 
 ### Changed
 

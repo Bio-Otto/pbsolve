@@ -52,7 +52,13 @@ spacing; the Born ion (a = 2 Å) for example:
 
 So compare energies only between calculations with the same grid settings,
 and judge convergence from the trend over several spacings
-([validation](../VALIDATION)).
+([validation](../VALIDATION)). Averaged over placements of the molecule on
+the grid, the error falls in proportion to the spacing (first order), from
+about 3 % at 0.5 Å to 1 % at 0.2 Å. This holds for the Born ion and for
+charges anywhere inside a sphere. {py:func}`pbsolve.analytic.kirkwood_energy`
+gives the exact energy of such a sphere [Kirkwood 1934], with or without
+salt, to check settings or new methods against;
+`scripts/validate_analytic.py` measures the order.
 
 ## The same grid for related calculations
 
