@@ -136,8 +136,14 @@
   The solvated energies agree with APBS 3.4.1 to ≤ 2.3e-9 in APBS units (1YCR,
   −8/−20/−30 e test systems, 1:1 and 2:1 salts). `pbsolve apbs compare/run`
   now handle `npbe`; `solve_maps` and `potential` follow the equation. A
-  calculation costs 1.4× a linear one on the CPU and 2–3× on CUDA. The
-  default `"lpbe"` is bit-identical to before (`docs/VALIDATION.md`).
+  calculation costs 1.3–1.4× a linear one on the CPU and 1.7–1.9× on CUDA.
+  The Newton iteration runs on the device (new backend operations
+  `boltzmann_slope` and `boltzmann_residual`), from a start damped where
+  |u| > 1. The default `"lpbe"` is bit-identical to before
+  (`docs/VALIDATION.md`).
+- `batch::calculation_device_bytes`: the device memory of a calculation
+  with its settings (the nonlinear equation needs 4 more vectors); used to
+  reserve memory and to size batch workers.
 - `Solver(coulomb="analytic")`, `--coulomb`: reaction-field decomposition.
   The analytic Coulomb potential of the charges is subtracted near the
   solute, and ΔG_polar comes from one solve per focusing level, without a

@@ -49,7 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
-| Nonlinear PB (unreleased): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; cost 1.4× (CPU), 2–3× (CUDA); see *Nonlinear Poisson–Boltzmann* |
+| Nonlinear PB (unreleased): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (unreleased): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
 | Fractional dielectric interface (unreleased): `interface="fractional"` | faces split exactly against an independent computation (≤ 1e-12); default `sharp` bit-identical (CPU, CUDA); device maps = host maps; 10/11 mutations caught; analytic references with `vdw`: observed orders 1.6–2.5 (sharp 1.0–1.2), errors at 0.5 Å −0.14 … −0.71 % (sharp −2.3 … −4.7 %); with `mol` a +0.13–0.18 % plateau from APBS' sampled probe positions (gone with `sdens=100`); 1YCR placement sd 5–10× smaller, same extrapolated limit as sharp, ΔΔG_bind bias at 0.5 Å +2.7 instead of +13 kcal/mol; calculation 1.5× slower on CUDA, same on CPU; see *Fractional dielectric interface* |
 | Error estimates (unreleased): `estimate_error`, `pbsolve solvation --placements --extrapolate` | first placement = ordinary calculation bit for bit; on the analytic references, extrapolation from 0.35 and 0.25 Å leaves ≤ 0.3 % (means 1.1–1.8 % off), estimated errors within 30 % of the true ones; from 0.5/0.35 Å off by up to 2×; 1YCR: ΔG_polar −1234.7 / −1205.6 / −1190.5 kcal/mol at 0.48 / 0.34 / 0.25 Å, extrapolated −1152, ΔΔG_bind bias ~+6 kcal/mol at 0.25 Å; see *Error estimates* |
@@ -2458,7 +2458,12 @@ N(u) = κ̄²_c Σ_j −(c_j q_j / 2I) e^{−q_j u}.
   J = A_ε + V N'(u) and N'(u) = κ̄²_c Σ_j (c_j q_j² / 2I) e^{−q_j u}. J is
   the linear operator with κ̄² replaced by N'(u), so every step is an
   ordinary linear solve: multigrid CG on the CPU or the GPU, unchanged. The
-  Boltzmann terms and the residual are evaluated on the host.
+  iteration runs on the backend: two element-wise operations
+  (`boltzmann_slope`, `boltzmann_residual`; CUDA kernels with the CPU's
+  expressions) give N'(u) and complete J u into the residual
+  F = J u + V (N(u) − N'_J u) − f, so the line search needs no further
+  operator. The host only damps the start and keeps the solution for the
+  energy.
 * **Damping and accuracy.** Steps are halved until ‖F‖ decreases (Armijo),
   which is the damping the roadmap asks for [Holst & Saied 1995]. The
   iteration starts from the linearized solution solved to 1e-3. It is
@@ -2466,6 +2471,13 @@ N(u) = κ̄²_c Σ_j −(c_j q_j / 2I) e^{−q_j u}.
   stops at η = min(0.1, ‖F‖/‖b‖), and no tighter than the final target
   ‖F‖ ≤ `tol`·‖b‖ needs. This cut the CG iterations of 1YCR from 36 to 15
   per level, with the same energy to 1e-6 kcal/mol.
+* **Damped start.** Where the ions are, the linearized potential
+  overshoots once |u| > 1, and Newton then crawls down the exponential
+  (5DK3: residual 0.24–0.55 at the start, 8–9 steps). The start uses the
+  planar Gouy–Chapman relation between the linear and the nonlinear
+  potential, u = 2 asinh(u_lin/2) (Grahame), shifted to leave |u| ≤ 1
+  unchanged. Newton steps (5DK3 / helix / −30 e sphere / 1YCR): 9 / 5 / 18
+  / 2 → 4–5 / 4 / 5 / 2. The converged energies are unchanged.
 
 **Energy.** APBS' free-energy functional (`Vpmg_energy` for `npbe` with
 ions) is the energy-density form of Sharp & Honig (1990):
@@ -2559,6 +2571,12 @@ G = Σ q u − ½ Σ_faces ε (Δu)² c_a / 4π l_B − V Σ_nodes κ̄²_c Σ_j
   In `pb.rs`, 3: the outer terms dropped or added with the wrong sign,
   caught by the APBS tests after the functional was computed in one place
   for `polar_solvation` and `potential`.
+
+  The device iteration, 10/10:
+  * the residual's sign, mask and interior test;
+  * the slope's power;
+  * the Newton direction, ‖b‖, and a Jacobian without its ion term;
+  * the same three in the CUDA kernels, caught by the GPU test.
 * `tests/test_nonlinear.py` (6 tests, 2 s):
   * weak and strong potentials;
   * the energies and `potential()` on a two-level grid;
@@ -2576,27 +2594,43 @@ G = Σ q u − ½ Σ_faces ε (Δu)² c_a / 4π l_B − V Σ_nodes κ̄²_c Σ_j
   `polar_solvation`'s.
 * Default path: the fingerprint set is bit-identical on CPU and CUDA.
 
-**Cost** (0.15 M, default `tol`, seconds per calculation; the reference
-state is the same):
+**Cost** (default `tol`, seconds per calculation, best of 2 on CUDA; the
+reference state is the same). "First version" is the Newton iteration on
+the host, with the linearized start:
 
-| | lpbe | npbe | CG iterations per level, lpbe / npbe |
-|---|---|---|---|
-| 1YCR 0.5 Å, CUDA | 0.20 | 0.41 | 12 / 15 |
-| 1YCR 0.5 Å, CPU | 1.56 | 2.16 | 12 / 15 |
-| 1YCR 0.25 Å, CUDA | 1.04 | 2.67 | 13 / 16 |
-| 1YCR 0.25 Å, CPU | 13.1 | 18.1 | 13 / 16 |
-| 5DK3 0.5 Å, CUDA | 4.27 | 12.6 | 19–20 / 38 |
+| | lpbe | npbe, first version | npbe | CG iterations per level, lpbe / npbe |
+|---|---|---|---|---|
+| 1YCR 0.5 Å, CUDA | 0.20 | 0.44 | 0.34 | 12 / 14 |
+| 1YCR 0.5 Å, CPU | 1.58 | 2.16 | 2.13 | 12 / 14 |
+| 1YCR 0.25 Å, CUDA | 1.04 | 2.67 | 1.96 | 13 / 15 |
+| 1YCR 0.25 Å, CPU | 13.2 | 18.1 | 17.5 | 13 / 15 |
+| 5DK3 0.5 Å, CUDA | 4.28 | 12.7 | 7.20 | 19–20 / 29–32 |
+| −20 e helix, CUDA | 0.10 | 0.36 | 0.25 | 13 / 23 |
+| −30 e sphere, CUDA | 0.01 | 0.12 | 0.04 | 9 / 21 |
 
-On the CPU `npbe` costs 1.4 times `lpbe`. On CUDA it costs 2–3 times as
-much, for three reasons:
-* the multigrid hierarchy is rebuilt for every Newton step (5DK3: 2.2 s
-  instead of 0.43);
-* the Boltzmann terms and residuals are evaluated on the host, and u and δ
-  cross the bus every step;
-* the operator is reassembled every step.
+* **Ratio.** `npbe` now costs 1.3–1.4 times `lpbe` on the CPU and 1.7–1.9
+  times on CUDA (5DK3 3.0 → 1.7).
+* **Where it went** (5DK3, per level): the profile of the first version
+  showed 8–9 Newton steps, each with uploads of the maps (0.07 s), host
+  residuals and line searches (0.1 s) and transfers of u and δ.
+* **What remains.** Every step still sets up a new multigrid hierarchy
+  (about 0.1 s for 5DK3), and the dielectric maps are uploaded again for
+  each Jacobian.
+* **Not done: reusing the hierarchy across steps.** Its Chebyshev smoother
+  is tuned to the old diagonal, and the ion term of the new Jacobian
+  (κ̄² cosh u) can far exceed it.
 
-Reusing the hierarchy across steps and device kernels for the Boltzmann
-terms are the follow-ups.
+**Device memory.** The iteration keeps 4 vectors (u, the charges, κ̄²,
+N'(u)) beside the linear solve's buffers. A GPU test asserts that the
+pool's peak equals `solve_device_bytes` plus exactly these, for 0.11–7.2
+million nodes. `calculation_device_bytes` adds them to the memory a
+calculation, or a batch worker, sets aside. The first version needed 10:
+* the device maps lived until the level ended;
+* the residual was copied for the right-hand side (now J δ = F is solved
+  and u ← u − λδ);
+* a trial vector was kept (the line search now updates u in place);
+* the diagonal was copied as a mask (the residual kernel now tests the
+  node index).
 
 **Not done:** the Sharp–Honig volume form as an option; ion-size effects
 (size-modified PB, roadmap 4.11); forces.

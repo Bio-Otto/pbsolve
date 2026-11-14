@@ -49,10 +49,13 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   every atom with `r_i > 0`, marked the same way.
 * **Nonlinear PB** (`nonlinear.rs`): with `equation="npbe"` the solvated
   levels are solved by an inexact Newton iteration from the linearized
-  solution. The maps are built as usual and read back; the host evaluates the
-  Boltzmann terms N(u), N'(u) and the residual, and every step is a linear
-  solve with κ̄² replaced by N'(u) on the backend (multigrid CG), damped by
-  halving until ‖F‖ decreases. The energy is APBS' functional
+  solution, damped where |u| > 1 (Gouy–Chapman). The maps are built as usual
+  and read back for the energy. Every step is a linear solve with κ̄²
+  replaced by N'(u) on the backend (multigrid CG), damped by halving until
+  ‖F‖ decreases. The backend operations `boltzmann_slope` and
+  `boltzmann_residual` (CPU loops, CUDA kernels) evaluate N'(u) and
+  complete J u into the residual, so the iteration stays on the device; it
+  keeps 4 vectors beside the linear solve (`calculation_device_bytes`). The energy is APBS' functional
   Σqu − E_ε − E_ion plus the coarser levels' outer terms
   (`NonlinearLevel::external_terms`, APBS `Vpmg_extEnergy`).
 * **Coulomb part** (`coulomb.rs`): with `coulomb="analytic"` the finest level

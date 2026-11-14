@@ -178,6 +178,8 @@ struct Setup {
     source_rhs: CudaFunction,
     scatter: CudaFunction,
     gather: CudaFunction,
+    boltzmann_slope: CudaFunction,
+    boltzmann_residual: CudaFunction,
 }
 
 impl Setup {
@@ -196,6 +198,8 @@ impl Setup {
             source_rhs: f("pb_source_rhs")?,
             scatter: f("pb_scatter")?,
             gather: f("pb_gather")?,
+            boltzmann_slope: f("pb_boltzmann_slope")?,
+            boltzmann_residual: f("pb_boltzmann_residual")?,
         })
     }
 }
@@ -1201,6 +1205,50 @@ impl<T: CudaReal> Backend for Dev<T> {
         b.arg(&n).arg(&src).arg(q).arg(d).arg(y);
         // SAFETY: argument list matches pb_source_rhs; the vectors have the same length.
         unsafe { b.launch(Self::grid_for(n as usize, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_source_rhs"))?;
+        Ok(())
+    }
+
+    fn boltzmann_slope(
+        &self,
+        ions: &[[f64; 2]],
+        u: &Self::Vector,
+        kappa_sq: &Self::Vector,
+        slope: &mut Self::Vector,
+    ) -> Result<()> {
+        let k = self.assembly()?;
+        let n = slope.len() as i64;
+        let m = ions.len() as i32;
+        let flat: Vec<f64> = ions.iter().flatten().copied().collect();
+        let ions_dev = self.stream().clone_htod(&flat).map_err(cuda_err("upload"))?;
+        let mut b = self.stream().launch_builder(&k.boltzmann_slope);
+        b.arg(&n).arg(&m).arg(&ions_dev).arg(u).arg(kappa_sq).arg(slope);
+        // SAFETY: argument list matches pb_boltzmann_slope; the vectors have the same length.
+        unsafe { b.launch(Self::grid_for(n as usize, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_boltzmann_slope"))?;
+        Ok(())
+    }
+
+    fn boltzmann_residual(
+        &self,
+        ions: &[[f64; 2]],
+        vol: f64,
+        dims: [usize; 3],
+        u: &Self::Vector,
+        kappa_sq: &Self::Vector,
+        slope: &Self::Vector,
+        f: &Self::Vector,
+        y: &mut Self::Vector,
+    ) -> Result<()> {
+        let k = self.assembly()?;
+        let n = y.len() as i64;
+        let m = ions.len() as i32;
+        let [nx, ny, nz] = dims.map(|d| d as i32);
+        let flat: Vec<f64> = ions.iter().flatten().copied().collect();
+        let ions_dev = self.stream().clone_htod(&flat).map_err(cuda_err("upload"))?;
+        let mut b = self.stream().launch_builder(&k.boltzmann_residual);
+        b.arg(&n).arg(&m).arg(&ions_dev).arg(&vol).arg(&nx).arg(&ny).arg(&nz);
+        b.arg(u).arg(kappa_sq).arg(slope).arg(f).arg(y);
+        // SAFETY: argument list matches pb_boltzmann_residual; the vectors have the same length.
+        unsafe { b.launch(Self::grid_for(n as usize, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_boltzmann_residual"))?;
         Ok(())
     }
 

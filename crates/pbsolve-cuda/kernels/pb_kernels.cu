@@ -808,6 +808,59 @@ extern "C" __global__ void pb_source_rhs(const long long n, const double src, co
     GRID_STRIDE_LOOP(c, n) { y[c] = d[c] == 0.0 ? 0.0 : src * q[c] - y[c]; }
 }
 
+// Ion terms of the nonlinear PBE (pbsolve-core nonlinear.rs, slope_at and
+// residual_at, same expressions): ions = m pairs (q_j, a_j = c_j / 2I),
+// Boltzmann factors exp(-q u) with the exponent clamped to +-85 as in APBS.
+__device__ __forceinline__ double pb_boltzmann(const double x) { return exp(fmin(fmax(x, -85.0), 85.0)); }
+
+// slope = kbar2 * sum_j a_j q_j^2 exp(-q_j u)   (0 where kbar2 = 0)
+extern "C" __global__ void pb_boltzmann_slope(const long long n, const int m, const double* __restrict__ ions,
+                                              const double* __restrict__ u, const double* __restrict__ k2,
+                                              double* __restrict__ slope)
+{
+    GRID_STRIDE_LOOP(c, n)
+    {
+        const double k = k2[c];
+        double s = 0.0;
+        if (k > 0.0) {
+            for (int j = 0; j < m; ++j) {
+                const double q = ions[2 * j], a = ions[2 * j + 1];
+                s += a * q * q * pb_boltzmann(-q * u[c]);
+            }
+            s = k * s;
+        }
+        slope[c] = s;
+    }
+}
+
+// y = 0 on the boundary, else y + vol * (N(u) - slope * u) - f, N(u) = kbar2 * sum_j -a_j q_j exp(-q_j u)
+// (y = J u on entry, J assembled with kappa^2 = slope: the nonlinear residual)
+extern "C" __global__ void pb_boltzmann_residual(const long long n, const int m, const double* __restrict__ ions,
+                                                 const double vol, const int nx, const int ny, const int nz,
+                                                 const double* __restrict__ u, const double* __restrict__ k2,
+                                                 const double* __restrict__ slope, const double* __restrict__ f,
+                                                 double* __restrict__ y)
+{
+    GRID_STRIDE_LOOP(c, n)
+    {
+        const int i = (int)(c % nx), j = (int)((c / nx) % ny), k3 = (int)(c / ((long long)nx * ny));
+        if (!interior3(i, j, k3, nx, ny, nz)) {
+            y[c] = 0.0;
+            continue;
+        }
+        const double k = k2[c];
+        double nn = 0.0;
+        if (k > 0.0) {
+            for (int j = 0; j < m; ++j) {
+                const double q = ions[2 * j], a = ions[2 * j + 1];
+                nn -= a * q * pb_boltzmann(-q * u[c]);
+            }
+            nn *= k;
+        }
+        y[c] = y[c] + vol * (nn - slope[c] * u[c]) - f[c];
+    }
+}
+
 // out[idx[m]] = values[m] (distinct indices)
 extern "C" __global__ void pb_scatter(const long long m, const unsigned int* __restrict__ idx,
                                       const double* __restrict__ values, double* __restrict__ out)

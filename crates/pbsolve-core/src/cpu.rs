@@ -570,6 +570,50 @@ impl<T: CpuReal> Backend for Cpu<T> {
         assembly(T::fine_matrix(op).cloned())
     }
 
+    fn boltzmann_slope(
+        &self,
+        ions: &[[f64; 2]],
+        u: &Self::Vector,
+        kappa_sq: &Self::Vector,
+        slope: &mut Self::Vector,
+    ) -> Result<()> {
+        assembly((T::NAME == "f64").then_some(()))?;
+        slope
+            .par_iter_mut()
+            .with_min_len(CHUNK)
+            .zip(u.par_iter().zip(kappa_sq.par_iter()))
+            .for_each(|(s, (u, k))| *s = T::from_f64(crate::nonlinear::slope_at(ions, u.to_f64(), k.to_f64())));
+        Ok(())
+    }
+
+    fn boltzmann_residual(
+        &self,
+        ions: &[[f64; 2]],
+        vol: f64,
+        dims: [usize; 3],
+        u: &Self::Vector,
+        kappa_sq: &Self::Vector,
+        slope: &Self::Vector,
+        f: &Self::Vector,
+        y: &mut Self::Vector,
+    ) -> Result<()> {
+        assembly((T::NAME == "f64").then_some(()))?;
+        y.par_iter_mut().with_min_len(CHUNK).enumerate().for_each(|(c, y)| {
+            let r = crate::nonlinear::residual_at(
+                ions,
+                vol,
+                u[c].to_f64(),
+                kappa_sq[c].to_f64(),
+                slope[c].to_f64(),
+                f[c].to_f64(),
+                crate::nonlinear::is_interior(dims, c),
+                y.to_f64(),
+            );
+            *y = T::from_f64(r);
+        });
+        Ok(())
+    }
+
     fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>> {
         assembly((T::NAME == "f64").then_some(()))?;
         crate::backend::check_gather(v.len(), idx)?;

@@ -35,10 +35,10 @@
 use crate::backend::Backend;
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
-use crate::operator::{apply7, StencilOperator};
+use crate::operator::StencilOperator;
 use crate::params::PbParams;
 use crate::pb::{solve_assembled, LevelSolution, Pending};
-use crate::solver::{SolveStats, SolverOptions};
+use crate::solver::{pcg_on, SolveStats, SolverOptions};
 use crate::surface::CoefficientMaps;
 use rayon::prelude::*;
 use std::f64::consts::PI;
@@ -60,6 +60,58 @@ fn boltzmann(x: f64) -> f64 {
     x.clamp(-EXP_LIMIT, EXP_LIMIT).exp()
 }
 
+/// Whether node `c` of a grid of `dims` is interior (not on the boundary).
+#[inline]
+pub(crate) fn is_interior([nx, ny, nz]: [usize; 3], c: usize) -> bool {
+    let (i, j, k) = (c % nx, (c / nx) % ny, c / (nx * ny));
+    i > 0 && j > 0 && k > 0 && i + 1 < nx && j + 1 < ny && k + 1 < nz
+}
+
+/// N'(u) at one node: κ̄² Σ_j a_j q_j² e^{−q_j u} for `ions` = [(q_j, a_j =
+/// c_j / 2I)] ([`crate::backend::Backend::boltzmann_slope`]; the CUDA
+/// kernel `pb_boltzmann_slope` evaluates the same expressions).
+#[inline]
+pub(crate) fn slope_at(ions: &[[f64; 2]], u: f64, kappa_sq: f64) -> f64 {
+    if kappa_sq > 0.0 {
+        let mut s = 0.0;
+        for &[q, a] in ions {
+            s += a * q * q * boltzmann(-q * u);
+        }
+        kappa_sq * s
+    } else {
+        0.0
+    }
+}
+
+/// The residual at one node from y = (J u) there, J assembled with κ̄² =
+/// `slope`: 0 on the boundary, else y + V (N(u) − slope·u) − f
+/// ([`crate::backend::Backend::boltzmann_residual`]; CUDA
+/// `pb_boltzmann_residual`).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(crate) fn residual_at(
+    ions: &[[f64; 2]],
+    vol: f64,
+    u: f64,
+    kappa_sq: f64,
+    slope: f64,
+    f: f64,
+    interior: bool,
+    y: f64,
+) -> f64 {
+    if !interior {
+        return 0.0;
+    }
+    let mut n = 0.0;
+    if kappa_sq > 0.0 {
+        for &[q, a] in ions {
+            n -= a * q * boltzmann(-q * u);
+        }
+        n *= kappa_sq;
+    }
+    y + vol * (n - slope * u) - f
+}
+
 /// The mobile ions as the nonlinear term needs them: (q_j, c_j / 2I).
 #[derive(Clone, Debug)]
 pub struct IonTerms {
@@ -67,6 +119,11 @@ pub struct IonTerms {
 }
 
 impl IonTerms {
+    /// The species as (q_j, c_j / 2I).
+    pub fn species(&self) -> &[[f64; 2]] {
+        &self.species
+    }
+
     /// None without ions (zero ionic strength): the equation is then linear.
     pub fn new(params: &PbParams) -> Option<Self> {
         let two_i = 2.0 * params.ionic_strength();
@@ -78,18 +135,6 @@ impl IonTerms {
                 .map(|i| [i.charge, i.concentration / two_i])
                 .collect(),
         })
-    }
-
-    /// N(u) / κ̄² and N'(u) / κ̄².
-    #[inline]
-    fn term(&self, u: f64) -> (f64, f64) {
-        let (mut n, mut dn) = (0.0, 0.0);
-        for &[q, a] in &self.species {
-            let e = boltzmann(-q * u);
-            n -= a * q * e;
-            dn += a * q * q * e;
-        }
-        (n, dn)
     }
 
     /// Σ_j (c_j / 2I)(e^{−q_j u} − 1), the ion energy density / κ̄².
@@ -203,11 +248,25 @@ fn box_share(x: f64, h: f64, lo: f64, hi: f64) -> f64 {
     }
 }
 
+/// The Jacobian of a Newton step on a backend: the operator, its inverse
+/// diagonal (moved into the linear solver) and N'(u).
+type Jacobian<B> = (
+    <B as Backend>::Operator,
+    Option<<B as Backend>::Vector>,
+    <B as Backend>::Vector,
+);
+
 /// Solves one level of the nonlinear equation with Dirichlet values `g` (on
 /// `grid.boundary_indices()`), host maps `maps` and node charges (e).
 /// Returns the solution on `be` (as the linear levels do), the solver
 /// statistics (CG iterations summed over the Newton steps, the final
 /// nonlinear residual ‖F‖/‖b‖) and the host solution for the energy.
+///
+/// The iteration runs on `be`: the Boltzmann terms
+/// ([`Backend::boltzmann_slope`], [`Backend::boltzmann_residual`]), the
+/// Jacobian and its multigrid CG. The residual of a trial u is J u completed
+/// by the ion terms, with J the Jacobian of the current step, so the line
+/// search needs no further operator.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn solve_level<B: Backend>(
     be: &B,
@@ -222,19 +281,8 @@ pub(crate) fn solve_level<B: Backend>(
     let n = grid.len();
     let boundary = grid.boundary_indices();
     let vol = grid.cell_volume();
-    let coef = StencilOperator::face_coefficients(&grid);
     let src = 4.0 * PI * lb0;
-    let mut f = vec![0.0; n];
-    for (&c, q) in nodes.iter().zip(charges) {
-        f[c] += src * q;
-    }
-    let mut interior = vec![true; n];
-    for &c in &boundary {
-        interior[c] = false;
-    }
-    let no_ions = vec![0.0; n];
-    let a_eps =
-        |x: &[f64], y: &mut [f64]| apply7(grid.dims, coef, &maps.eps_x, &maps.eps_y, &maps.eps_z, &no_ions, x, y);
+    let species = ions.species();
     let upload_eps = || -> Result<[B::Vector; 3]> {
         Ok([
             be.upload(&maps.eps_x)?,
@@ -279,37 +327,56 @@ pub(crate) fn solve_level<B: Backend>(
     let mut u = be.download(&solved.x)?;
     drop(solved.x);
     add(solved.stats);
+    let t = Instant::now();
     for (&c, v) in boundary.iter().zip(&g) {
         u[c] = *v;
     }
-
-    let t = Instant::now();
-    let residual = |u: &[f64], r: &mut Vec<f64>| -> f64 {
-        a_eps(u, r);
-        r.par_iter_mut().enumerate().for_each(|(c, r)| {
-            *r = if interior[c] {
-                *r + vol * maps.kappa_sq[c] * ions.term(u[c]).0 - f[c]
-            } else {
-                0.0
-            };
-        });
-        r.par_iter().map(|r| r * r).sum::<f64>().sqrt()
-    };
-    // ‖b‖ of the linear system: the charges and the boundary values.
-    let mut g_only = vec![0.0; n];
-    for (&c, v) in boundary.iter().zip(&g) {
-        g_only[c] = *v;
+    // Where the ions are, the linearized potential overshoots once |u| > 1:
+    // start from the planar Gouy–Chapman relation u = 2 asinh(u_lin / 2)
+    // there (Grahame), shifted to leave |u| ≤ 1 unchanged.
+    let mut interior = vec![true; n];
+    for &c in &boundary {
+        interior[c] = false;
     }
-    let mut r = vec![0.0; n];
-    a_eps(&g_only, &mut r);
-    let b_norm = (0..n)
-        .into_par_iter()
-        .map(|c| if interior[c] { (f[c] - r[c]).powi(2) } else { 0.0 })
-        .sum::<f64>()
-        .sqrt()
-        .max(f64::MIN_POSITIVE);
-    drop(g_only);
-    let mut norm = residual(&u, &mut r);
+    u.par_iter_mut().enumerate().for_each(|(c, u)| {
+        if interior[c] && maps.kappa_sq[c] > 0.0 && u.abs() > 1.0 {
+            *u = u.signum() * (1.0 + 2.0 * ((u.abs() - 1.0) / 2.0).asinh());
+        }
+    });
+    drop(interior);
+    let mut u = be.upload_owned(u)?;
+    let kappa = be.upload(&maps.kappa_sq)?;
+    let scaled: Vec<f64> = charges.iter().map(|q| src * q).collect();
+    let f = be.scatter(n, nodes, &scaled)?;
+
+    // The Jacobian at u: the operator with κ̄² = N'(u), its inverse
+    // diagonal and N'(u).
+    let jacobian = |u: &B::Vector| -> Result<Jacobian<B>> {
+        let mut slope = be.zeros(n)?;
+        be.boltzmann_slope(species, u, &kappa, &mut slope)?;
+        let mut ion_map = be.zeros(n)?;
+        be.copy(&slope, &mut ion_map)?;
+        let [ex, ey, ez] = upload_eps()?;
+        let (op, inv_diag) = be.assemble_operator(&grid, [ex, ey, ez, ion_map])?;
+        Ok((op, Some(inv_diag), slope))
+    };
+    // r = F(u) = J u + V (N(u) − N'_J u) − f on the interior; returns ‖F‖.
+    let residual = |op: &B::Operator, slope: &B::Vector, u: &B::Vector, r: &mut B::Vector| -> Result<f64> {
+        be.apply(op, u, r)?;
+        be.boltzmann_residual(species, vol, grid.dims, u, &kappa, slope, &f, r)?;
+        Ok(be.dot(r, r)?.sqrt())
+    };
+    let (mut op, mut inv_diag, mut slope) = jacobian(&u)?;
+    // ‖b‖ of the linear system, f − A g: J g has no ion term inside (g is 0 there).
+    let b_norm = {
+        let gv = be.scatter(n, &boundary, &g)?;
+        let mut b = be.zeros(n)?;
+        be.apply(&op, &gv, &mut b)?;
+        be.source_rhs(1.0, &f, inv_diag.as_ref().expect("a fresh Jacobian"), &mut b)?;
+        be.dot(&b, &b)?.sqrt().max(f64::MIN_POSITIVE)
+    };
+    let mut r = Some(be.zeros(n)?);
+    let mut norm = residual(&op, &slope, &u, r.as_mut().expect("a residual"))?;
     let mut host_seconds = t.elapsed().as_secs_f64();
     let mut steps = 0;
     while norm > opts.tol * b_norm {
@@ -319,25 +386,8 @@ pub(crate) fn solve_level<B: Backend>(
                 residual: norm / b_norm,
             });
         }
-        // J δ = −F: the linear operator with κ̄² replaced by N'(u).
-        let t = Instant::now();
-        let slope: Vec<f64> = (0..n)
-            .into_par_iter()
-            .map(|c| {
-                let k2 = maps.kappa_sq[c];
-                if k2 > 0.0 {
-                    k2 * ions.term(u[c]).1
-                } else {
-                    0.0
-                }
-            })
-            .collect();
-        let rhs: Vec<f64> = r.par_iter().map(|r| -r / src).collect();
-        host_seconds += t.elapsed().as_secs_f64();
-        let [ex, ey, ez] = upload_eps()?;
-        let jac = [ex, ey, ez, be.upload_owned(slope)?];
-        let zero = vec![0.0; boundary.len()];
-        // Inexact Newton: ‖J δ + F‖ ≤ η ‖F‖.
+        // J δ = F (the Newton step is −δ), inexact: ‖J δ − F‖ ≤ η ‖F‖. The
+        // residual and the inverse diagonal move into the solver.
         let relative = norm / b_norm;
         let step = SolverOptions {
             tol: relative
@@ -346,54 +396,54 @@ pub(crate) fn solve_level<B: Backend>(
                 .min(MAX_FORCING),
             ..opts
         };
-        let solved = solve_assembled(
-            be,
-            &grid,
-            &boundary,
-            Pending::Ready(zero),
-            jac,
-            || be.upload_owned(rhs),
-            lb0,
-            step,
-        )?;
-        let delta = be.download(&solved.x)?;
-        drop(solved.x);
-        add(solved.stats);
-        // Backtracking until ‖F‖ decreases (Armijo, c = 1e-4).
+        be.synchronize()?;
+        let d = inv_diag.take().expect("a fresh Jacobian");
+        let (delta, s) = pcg_on(be, grid.dims, &op, d, r.take().expect("a residual"), step)?;
+        add(s);
+        // The solver's buffers return to the pool at a synchronisation.
+        be.synchronize()?;
+        let mut buf = be.zeros(n)?;
+        // Backtracking until ‖F‖ decreases (Armijo, c = 1e-4), u updated in place.
         let t = Instant::now();
-        let mut lambda = 1.0;
-        let mut trial = vec![0.0; n];
-        let mut r_trial = vec![0.0; n];
+        let (mut lambda, mut taken) = (1.0, 0.0);
         loop {
-            trial
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(c, x)| *x = u[c] + lambda * delta[c]);
-            let n_trial = residual(&trial, &mut r_trial);
-            if n_trial <= (1.0 - 1e-4 * lambda) * norm || lambda < 1.0 / 1024.0 {
-                std::mem::swap(&mut u, &mut trial);
-                std::mem::swap(&mut r, &mut r_trial);
-                norm = n_trial;
+            be.axpy(-(lambda - taken), &delta, &mut u)?;
+            taken = lambda;
+            let trial = residual(&op, &slope, &u, &mut buf)?;
+            if trial <= (1.0 - 1e-4 * lambda) * norm || lambda < 1.0 / 1024.0 {
+                norm = trial;
                 break;
             }
             lambda *= 0.5;
         }
-        host_seconds += t.elapsed().as_secs_f64();
+        drop(delta);
+        r = Some(buf);
         steps += 1;
+        if norm > opts.tol * b_norm {
+            drop((op, slope));
+            be.synchronize()?;
+            (op, inv_diag, slope) = jacobian(&u)?;
+        }
+        be.synchronize()?;
+        host_seconds += t.elapsed().as_secs_f64();
     }
+    drop((op, inv_diag, slope, r));
     stats.relative_residual = norm / b_norm;
     stats.solve_seconds += host_seconds;
 
-    let mut x = u.clone();
-    for &c in &boundary {
-        x[c] = 0.0;
-    }
+    // The host copy for the energy; on `be` u − g (zero on the boundary).
+    let t = Instant::now();
+    let u_host = be.download(&u)?;
+    let gv = be.scatter(n, &boundary, &g)?;
+    be.axpy(-1.0, &gv, &mut u)?;
+    drop(gv);
+    stats.solve_seconds += t.elapsed().as_secs_f64();
     let sol = LevelSolution {
         grid: grid.clone(),
-        x: be.upload_owned(x)?,
+        x: u,
         g,
     };
-    Ok((sol, stats, NonlinearLevel { grid, maps, u }))
+    Ok((sol, stats, NonlinearLevel { grid, maps, u: u_host }))
 }
 
 #[cfg(test)]
@@ -411,14 +461,21 @@ mod tests {
     fn a_1_1_salt_gives_sinh_and_cosh() {
         let params = PbParams::default().with_salt(0.15, 2.0);
         let ions = IonTerms::new(&params).unwrap();
+        // N(u) with κ̄² = 1: the residual of y = 0, slope 0, f = 0, V = 1.
+        let term = |ions: &IonTerms, u: f64| {
+            let sp = ions.species();
+            (residual_at(sp, 1.0, u, 1.0, 0.0, 0.0, true, 0.0), slope_at(sp, u, 1.0))
+        };
         for u in [-3.0, -0.2, 0.0, 0.7, 5.0] {
-            let (n, dn) = ions.term(u);
+            let (n, dn) = term(&ions, u);
             assert!((n - f64::sinh(u)).abs() < 1e-12 * f64::cosh(u), "{u}: {n}");
             assert!((dn - f64::cosh(u)).abs() < 1e-12 * f64::cosh(u), "{u}: {dn}");
             assert!((ions.density(u) - (f64::cosh(u) - 1.0)).abs() < 1e-12 * f64::cosh(u));
         }
         // Clamped as in APBS.
-        assert_eq!(ions.term(200.0).1, f64::cosh(85.0));
+        assert_eq!(term(&ions, 200.0).1, f64::cosh(85.0));
+        // The residual's mask: 0 on the boundary.
+        assert_eq!(residual_at(ions.species(), 1.0, 2.0, 1.0, 3.0, 4.0, false, 5.0), 0.0);
         // Any electroneutral salt: N(0) = 0 and N'(0) = 1 (the linearized κ̄²).
         let asym = PbParams {
             ions: vec![
@@ -435,7 +492,7 @@ mod tests {
             ],
             ..PbParams::default()
         };
-        let (n, dn) = IonTerms::new(&asym).unwrap().term(0.0);
+        let (n, dn) = term(&IonTerms::new(&asym).unwrap(), 0.0);
         assert!(n.abs() < 1e-15 && (dn - 1.0).abs() < 1e-15, "{n} {dn}");
         assert!(IonTerms::new(&PbParams::default()).is_none());
     }

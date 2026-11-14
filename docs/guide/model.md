@@ -179,8 +179,8 @@ For strongly charged molecules the difference grows to kcal/mol and more: about
 −22 kT/e and the nonlinear one −7.5. The functional misses the field energy
 beyond the outermost box. For strongly charged molecules, enlarge `cfac` and
 `fadd`: the default boxes miss 20–30 % of the nonlinear correction there. A
-nonlinear calculation costs about 1.4 times a linear one on the CPU and 2–3
-times on a GPU. Without ions both equations are the same.
+nonlinear calculation costs about 1.3–1.4 times a linear one on the CPU and
+1.7–1.9 times on a GPU. Without ions both equations are the same.
 
 ## Boundary condition
 

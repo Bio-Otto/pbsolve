@@ -25,7 +25,8 @@ use crate::autogrid::GridSpec;
 use crate::backend::Backend;
 use crate::error::Result;
 use crate::molecule::Atom;
-use crate::params::{PbParams, Preconditioner};
+use crate::nonlinear::IonTerms;
+use crate::params::{Equation, PbParams, Preconditioner};
 use crate::pb::{polar_solvation, PolarSolvation};
 use crate::solver::solve_device_bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,7 +48,29 @@ pub const POOL_SLACK_BYTES: u64 = 64 << 20;
 /// buffers of the largest calculation on grids of `dims`
 /// ([`solve_device_bytes`]) plus 1/8 and [`POOL_SLACK_BYTES`]. 0 without grids.
 pub fn worker_device_bytes(dims: impl IntoIterator<Item = [usize; 3]>, preconditioner: Preconditioner) -> u64 {
-    match dims.into_iter().map(|d| solve_device_bytes(d, preconditioner)).max() {
+    padded(dims.into_iter().map(|d| solve_device_bytes(d, preconditioner)).max())
+}
+
+/// Device vectors the nonlinear equation keeps beside a linear solve's
+/// buffers: u, the charges, κ̄² and N'(u) ([`crate::nonlinear`]).
+pub const NONLINEAR_VECTORS: u64 = 4;
+
+/// [`worker_device_bytes`] for the calculations of `params`: with
+/// `equation = npbe` and ions, [`NONLINEAR_VECTORS`] more f64 vectors.
+pub fn calculation_device_bytes(dims: impl IntoIterator<Item = [usize; 3]>, params: &PbParams) -> u64 {
+    let nonlinear = params.equation == Equation::Nonlinear && IonTerms::new(params).is_some();
+    padded(
+        dims.into_iter()
+            .map(|d| {
+                let n = d.iter().map(|&v| v as u64).product::<u64>();
+                solve_device_bytes(d, params.preconditioner) + if nonlinear { NONLINEAR_VECTORS * 8 * n } else { 0 }
+            })
+            .max(),
+    )
+}
+
+fn padded(peak: Option<u64>) -> u64 {
+    match peak {
         Some(peak) => peak + peak / 8 + POOL_SLACK_BYTES,
         None => 0,
     }

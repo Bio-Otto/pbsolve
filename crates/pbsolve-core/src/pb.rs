@@ -4,7 +4,7 @@
 
 use crate::autogrid::GridSpec;
 use crate::backend::{Backend, MemoryHold};
-use crate::batch::worker_device_bytes;
+use crate::batch::calculation_device_bytes;
 use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
 use crate::charge::{spread_charges_sparse_with, spread_charges_with};
 use crate::coulomb::{coulomb_energy_kt, Split};
@@ -477,13 +477,17 @@ fn solve_nonlinear_level<B: Backend>(
     timings: &mut Timings,
 ) -> Result<(LevelSolution<B>, SolveStats, NodeCharges, LevelExtra)> {
     let t = Instant::now();
-    let [eps_x, eps_y, eps_z, kappa_sq] = maps_on(be, &grid, atoms, params, Some(surf))?;
-    let maps = CoefficientMaps {
-        eps_x: be.download(&eps_x)?,
-        eps_y: be.download(&eps_y)?,
-        eps_z: be.download(&eps_z)?,
-        kappa_sq: be.download(&kappa_sq)?,
+    let maps = {
+        // Released before the Newton iteration allocates.
+        let [eps_x, eps_y, eps_z, kappa_sq] = maps_on(be, &grid, atoms, params, Some(surf))?;
+        CoefficientMaps {
+            eps_x: be.download(&eps_x)?,
+            eps_y: be.download(&eps_y)?,
+            eps_z: be.download(&eps_z)?,
+            kappa_sq: be.download(&kappa_sq)?,
+        }
     };
+    be.synchronize()?;
     timings.maps += t.elapsed().as_secs_f64();
     let t = Instant::now();
     let g = g.wait()?;
@@ -634,7 +638,7 @@ fn focused<B: Backend, T>(
 /// for its next level, up to what [`crate::batch::device_workers`] sets aside
 /// for the calculation.
 fn hold_memory<'a, B: Backend>(be: &'a B, spec: &GridSpec, params: &PbParams) -> Result<MemoryHold<'a, B>> {
-    MemoryHold::new(be, worker_device_bytes([spec.dims], params.preconditioner))
+    MemoryHold::new(be, calculation_device_bytes([spec.dims], params))
 }
 
 /// A pool for host work in the background of a device calculation, with the

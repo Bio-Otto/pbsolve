@@ -333,8 +333,10 @@ low potential.
   energies differ by the functional's truncation at the boxes (field energy
   beyond them), which APBS shares. The Sharp–Honig volume form converges
   faster with the box and could be offered as an option.
-* Cost 1.4× (CPU), 2–3× (CUDA, multigrid rebuilt per step, Boltzmann terms
-  on the host).
+* Cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA) a linear calculation. The iteration
+  runs on the device and starts from a Gouy–Chapman-damped linearized
+  potential (5DK3 on CUDA: 12.7 → 7.2 s). Rebuilding the multigrid
+  hierarchy every step remains.
 
 **4.11 Size-modified PB.** Finite ion size via the lattice-gas (Bikerman /
 Borukhov) free energy [Borukhov, Andelman & Orland 1997], uniform ion size

@@ -102,6 +102,7 @@ fn device_memory_of_calculations_matches_the_estimate() {
             );
         }
     }
+    nonlinear_device_memory(&gpu);
     // Three workers at once, each on its own backend and stream.
     let dims = [97, 89, 81];
     let pc = Preconditioner::MultigridF32;
@@ -132,4 +133,38 @@ fn device_memory_of_calculations_matches_the_estimate() {
         peak.reserved >> 20,
         (3 * per_worker) >> 20
     );
+}
+
+/// The nonlinear equation keeps NONLINEAR_VECTORS vectors beside the linear
+/// solve's buffers, and its calculation fits calculation_device_bytes. Run
+/// from the test above: the pool statistics are shared by the process.
+fn nonlinear_device_memory(gpu: &CudaBackend) {
+    use pbsolve_core::batch::{calculation_device_bytes, NONLINEAR_VECTORS};
+    let atoms = atoms();
+    for dims in [[57, 49, 41], [81, 65, 49], [201, 177, 201]] {
+        for pc in [Preconditioner::MultigridF32, Preconditioner::Multigrid] {
+            let p = PbParams {
+                equation: pbsolve_core::Equation::Nonlinear,
+                ..params(pc)
+            };
+            gpu.reset_pool_peak().unwrap();
+            polar_solvation(gpu, &atoms, &p, &spec(dims)).unwrap();
+            let peak = gpu.pool_peak().unwrap();
+            let n: u64 = dims.iter().map(|&d| d as u64).product();
+            let scratch = if pc == Preconditioner::MultigridF32 {
+                2 * SCRATCH
+            } else {
+                SCRATCH
+            };
+            let want = solve_device_bytes(dims, pc) + scratch + NONLINEAR_VECTORS * 8 * n;
+            assert_eq!(peak.used, want, "{dims:?} {pc:?}");
+            let budget = calculation_device_bytes([dims], &p);
+            assert!(
+                peak.reserved <= budget,
+                "{dims:?} {pc:?}: reserved {} > {budget}",
+                peak.reserved
+            );
+            assert!(budget > worker_device_bytes([dims], pc));
+        }
+    }
 }

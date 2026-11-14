@@ -4,7 +4,7 @@
 
 use numpy::ndarray::ArrayView2;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
-use pbsolve_core::batch::{device_workers, polar_solvation_batch as core_batch, worker_device_bytes, Job};
+use pbsolve_core::batch::{calculation_device_bytes, device_workers, polar_solvation_batch as core_batch, Job};
 use pbsolve_core::charge::spread_charges_with;
 use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
 use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
@@ -658,7 +658,7 @@ impl PySolver {
         let Some((free, total)) = self.engine.device_memory()? else {
             return Ok(workers);
         };
-        let per_worker = worker_device_bytes(specs.iter().map(|s| s.dims), self.params.preconditioner);
+        let per_worker = calculation_device_bytes(specs.iter().map(|s| s.dims), &self.params);
         Ok(device_workers(workers, per_worker, free, total))
     }
 

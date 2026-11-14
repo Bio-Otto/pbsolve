@@ -238,6 +238,49 @@ pub trait Backend {
     /// A host copy of a fine operator (for grids too small to coarsen, whose
     /// multigrid is a single factorised level).
     fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
+    /// The slope N'(u) of the nonlinear equation's ion term at every node
+    /// ([`crate::nonlinear`]): κ̄² Σ_j a_j q_j² e^{−q_j u} with `ions` =
+    /// [(q_j, a_j)], exponents clamped to ±85. The default computes it on the
+    /// host.
+    fn boltzmann_slope(
+        &self,
+        ions: &[[f64; 2]],
+        u: &Self::Vector,
+        kappa_sq: &Self::Vector,
+        slope: &mut Self::Vector,
+    ) -> Result<()> {
+        let (u, k) = (self.download(u)?, self.download(kappa_sq)?);
+        let s: Vec<f64> = u
+            .iter()
+            .zip(&k)
+            .map(|(&u, &k)| crate::nonlinear::slope_at(ions, u, k))
+            .collect();
+        self.write(&s, slope)
+    }
+    /// Completes y = J u (J the operator assembled with κ̄² = `slope` on a
+    /// grid of `dims`) into the nonlinear residual A_ε u + V N(u) − f: y_i ←
+    /// 0 on the boundary, else y_i + V (N(u_i) − slope_i u_i) − f_i. The
+    /// default computes it on the host.
+    #[allow(clippy::too_many_arguments)]
+    fn boltzmann_residual(
+        &self,
+        ions: &[[f64; 2]],
+        vol: f64,
+        dims: [usize; 3],
+        u: &Self::Vector,
+        kappa_sq: &Self::Vector,
+        slope: &Self::Vector,
+        f: &Self::Vector,
+        y: &mut Self::Vector,
+    ) -> Result<()> {
+        let (u, k, s) = (self.download(u)?, self.download(kappa_sq)?, self.download(slope)?);
+        let (f, mut yh) = (self.download(f)?, self.download(y)?);
+        for (c, y) in yh.iter_mut().enumerate() {
+            let inside = crate::nonlinear::is_interior(dims, c);
+            *y = crate::nonlinear::residual_at(ions, vol, u[c], k[c], s[c], f[c], inside, *y);
+        }
+        self.write(&yh, y)
+    }
     /// The values `v[idx[m]]` in the order of `idx` (indices below the length
     /// of `v`, repetitions allowed). The pipeline reads the potential at the
     /// charges and at the nodes the next focusing level interpolates instead
@@ -467,6 +510,8 @@ impl<B: Backend> Backend for Stepwise<B> {
         fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)>;
         fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
         fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
+        fn boltzmann_slope(&self, ions: &[[f64; 2]], u: &Self::Vector, kappa_sq: &Self::Vector, slope: &mut Self::Vector) -> Result<()>;
+        fn boltzmann_residual(&self, ions: &[[f64; 2]], vol: f64, dims: [usize; 3], u: &Self::Vector, kappa_sq: &Self::Vector, slope: &Self::Vector, f: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
         fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>>;
         fn synchronize(&self) -> Result<()>;
         fn runs_on_device(&self) -> bool;
