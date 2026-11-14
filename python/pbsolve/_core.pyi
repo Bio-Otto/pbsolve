@@ -251,6 +251,9 @@ class Solver:
     def device_name(self) -> str:
         """Name of the device the solver runs on."""
     @property
+    def device(self) -> int:
+        """Index of the CUDA device the solver was created for (``device``)."""
+    @property
     def ionic_strength(self) -> float:
         """Ionic strength ½Σcz² of the mobile ions in mol/L."""
     def make_grid(self, coords: npt.ArrayLike, radii: npt.ArrayLike) -> GridSpec:

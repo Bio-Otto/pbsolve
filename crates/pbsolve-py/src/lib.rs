@@ -788,6 +788,12 @@ impl PySolver {
         self.engine.device_name()
     }
 
+    /// Index of the CUDA device the solver was created for (``device``).
+    #[getter]
+    fn device(&self) -> usize {
+        self.device
+    }
+
     /// Ionic strength ½Σcz² of the mobile ions in mol/L.
     #[getter]
     fn ionic_strength(&self) -> f64 {

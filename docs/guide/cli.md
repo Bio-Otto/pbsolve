@@ -80,6 +80,8 @@ and the [solver options](#solver-options), and:
 |---|---|
 | `--dx` | also write the solvated potential to this OpenDX file |
 | `--apbs-grid` | print the equivalent APBS grid keywords (implies `--dime-policy apbs`) |
+| `--placements` | also solve on this many grid placements (at least 2) and report the mean, sd and sem of ΔG_polar ([error estimates](solver.md#error-estimates)) |
+| `--extrapolate` | with `--placements`: repeat at this finer spacing and extrapolate the mean to zero spacing |
 | `--json` | print the results as JSON |
 
 ```bash

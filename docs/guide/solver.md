@@ -79,6 +79,52 @@ except pbsolve.ConvergenceError as err:
     print("not converged:", err)
 ```
 
+## Error estimates
+
+With a sharp dielectric boundary, ΔG_polar depends on the spacing and on
+where the surface falls between the nodes. {py:func}`pbsolve.estimate_error`
+measures both:
+
+* It solves on several placements of the grid (the automatic grid moved by
+  random fractions of a spacing) and reports their mean, the standard
+  deviation (the spread of a single calculation) and the standard error of
+  the mean.
+* Given two spacings or more, it also extrapolates the means at the two
+  finest to zero spacing (first order, as measured on the analytic
+  references). `discretisation_error` is the estimated error of the mean.
+* With `parts` (receptor and ligand masks) the quantity is the association
+  energy ΔG(complex) − ΔG(receptor) − ΔG(ligand) on the complex's grid, as in
+  MM-PBSA.
+
+```python
+import pbsolve
+
+coords, charges, radii = pbsolve.read_pqr("tests/data/1ycr_amber_opt_pdb2pqr.pqr")
+solver = pbsolve.Solver(ionic_strength=0.15)
+est = pbsolve.estimate_error(solver, coords, charges, radii, placements=4)
+print(est.format())
+print(est.energies[0])  # the first placement is the ordinary calculation
+```
+
+Each placement costs one calculation, so the estimate costs `placements`
+times as much per spacing; {py:meth}`~pbsolve.Solver.polar_solvation_many`
+runs them concurrently. For the extrapolation, use spacings of 0.35 Å and
+below: from 0.35 and 0.25 Å the extrapolated energies of the analytic
+references are within 0.3 % of the exact ones, and the estimated error is
+within 30 % of the true one. From 0.5 and 0.35 Å the correction can be off
+by a factor of 2 ([validation](../VALIDATION)).
+
+```{code-block} python
+est = pbsolve.estimate_error(solver, coords, charges, radii, placements=8, spacings=[0.35, 0.25])
+print(est.extrapolated, est.discretisation_error)
+```
+
+For 1YCR at 0.15 M (8 placements), the mean ΔG_polar is −1234.7, −1205.6
+and −1190.5 kcal/mol at 0.48, 0.34 and 0.25 Å, and extrapolates to
+−1152 kcal/mol. Placements spread by 4 kcal/mol (sd) at 0.5 Å and by
+1.2 kcal/mol at 0.25 Å. On the command line, `pbsolve solvation` takes
+`--placements` and `--extrapolate` ([command line](cli.md#pbsolve-solvation)).
+
 ## Reproducibility
 
 Sums run in a fixed order. The same input on the same platform therefore

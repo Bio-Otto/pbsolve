@@ -10,7 +10,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from . import Solver, __version__, available_platforms, cuda_info, write_dx
+from . import Solver, __version__, available_platforms, cuda_info, estimate_error, write_dx
 from .io import Molecule, frames, load
 from .mmpbsa import nonpolar_energy, pbsa_solvation_frames
 
@@ -121,6 +121,9 @@ def _load(args: argparse.Namespace, need_coords: bool = True) -> Molecule:
 
 # ----------------------------------------------------------------- commands
 def _solvation(args: argparse.Namespace) -> int:
+    if args.extrapolate is not None and args.placements < 2:
+        print("error: --extrapolate needs --placements (at least 2)", file=sys.stderr)
+        return 2
     mol = _load(args)
     coords, charges, radii = mol.coords, mol.charges, mol.radii
     solver = _solver(args, "apbs" if args.apbs_grid else None)
@@ -140,6 +143,16 @@ def _solvation(args: argparse.Namespace) -> int:
         "dime": grid.dims,
         "fine_spacing": grid.fine_spacing,
     }
+    if args.placements:
+        spacings = [args.spacing, args.extrapolate] if args.extrapolate is not None else None
+        est = estimate_error(solver, coords, charges, radii, placements=args.placements, spacings=spacings)
+        out["placements"] = est.placements
+        out["polar_mean_kcal_mol"] = est.energy
+        out["polar_sd_kcal_mol"] = est.sd
+        out["polar_sem_kcal_mol"] = est.sem
+        if est.extrapolated is not None:
+            out["polar_extrapolated_kcal_mol"] = est.extrapolated
+            out["extrapolation_spacings"] = est.spacings
     if args.dx:
         pot, origin, spacing, _ = solver.potential(coords, charges, radii, grid=grid)
         write_dx(args.dx, pot, origin, spacing, comment=f"pbsolve {__version__} potential (kT/e) for {args.input}")
@@ -247,6 +260,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     s.add_argument("--dx", help="write the solvated potential to this OpenDX file")
     s.add_argument(
         "--apbs-grid", action="store_true", help="print the equivalent APBS grid keywords (implies --dime-policy apbs)"
+    )
+    s.add_argument(
+        "--placements",
+        type=int,
+        default=0,
+        help="also solve on this many grid placements (>= 2) and report their mean, sd and sem",
+    )
+    s.add_argument(
+        "--extrapolate",
+        type=float,
+        metavar="SPACING",
+        help="with --placements: repeat at this finer spacing and extrapolate the mean to zero spacing",
     )
     s.add_argument("--json", action="store_true")
 

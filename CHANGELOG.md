@@ -113,6 +113,14 @@
   ion at several spacings, averaged over grid placements, and the observed
   convergence order: 1.09–1.18, from about 2.3–2.9 % at 0.5 Å to 0.8–1.0 %
   at 0.2 Å (`docs/VALIDATION.md`).
+- `pbsolve.estimate_error` and `pbsolve solvation --placements N
+  [--extrapolate SPACING]`: ΔG_polar (or, with `parts`, the association
+  energy) averaged over random placements of the grid. Reports the
+  placements' standard deviation and the standard error of the mean, and
+  with two spacings extrapolates to zero spacing. From 0.35 and 0.25 Å the
+  extrapolation is within 0.3 % on the analytic references. For 1YCR it
+  shows a spacing error of ~3 % in ΔG_polar and ~6 kcal/mol in ΔΔG_polar at
+  0.25 Å (`docs/VALIDATION.md`).
 - `Solver(chgm="spl2" | "spl4")`, `--chgm`: B-spline charge assignment as
   APBS `chgm spl2` and `spl4` (orders 3 and 5, 3 and 5 nodes per axis), with
   APBS' energy rule. The default `spl0` (trilinear) is unchanged. pbsolve's

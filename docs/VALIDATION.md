@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Error estimates (unreleased): `estimate_error`, `pbsolve solvation --placements --extrapolate` | first placement = ordinary calculation bit for bit; on the analytic references, extrapolation from 0.35 and 0.25 Å leaves ≤ 0.3 % (means 1.1–1.8 % off), estimated errors within 30 % of the true ones; from 0.5/0.35 Å off by up to 2×; 1YCR: ΔG_polar −1234.7 / −1205.6 / −1190.5 kcal/mol at 0.48 / 0.34 / 0.25 Å, extrapolated −1152, ΔΔG_bind bias ~+6 kcal/mol at 0.25 Å; see *Error estimates* |
 | B-spline charges (unreleased): `chgm` `spl2`, `spl4` as APBS | weights: charge and centre to 1e-12, variance h²/4 and 5h²/12, exact on-node values; energies at the charged nodes = full-potential energies bit for bit (CPU, CUDA); `spl0` bit-identical to the previous commit; APBS 3.4.1: synthetic molecule and 1YCR complex with maps identical and ΔG ≤ 1.3e-6, ΔΔG +0.0012 kcal/mol in APBS units, as `spl0`; 6/6 mutations caught; accuracy: analytic errors and orders unchanged within 0.3 points, 1YCR placement sd 4.09 → 4.07 / 3.88 kcal/mol; cost on 5DK3 +1 % / +4 % (CUDA); see *Charge assignment: B-splines* |
 | Two spheres (unreleased): 5 and 4 Å spheres 15.8 Å apart, 0 and 0.15 M, complex and association ΔΔG on the complex's grid | reference: exact limits (no dielectric jump 7e-15, conductors 3e-12, far apart with salt 3e-13, charge–dipole asymptote) and converged to 1e-11; pbsolve: complex first order (1.11–1.17 `mol`, 1.02–1.06 `vdw`), association ΔΔG of 1.8 kcal/mol within 0.002 kcal/mol on average at every spacing with `vdw`; with `mol` 0.011–0.019 kcal/mol from APBS' sampled molecular surface; see *Analytic references: two spheres* |
 | Kirkwood sphere (unreleased): charges off the centre of a 5 Å sphere, 0 and 0.15 M, pdie 1 and 4; Born ion | reference = closed forms to ≤ 1e-13 (Born, Born–Debye–Hückel with Stern layer, grounded-sphere images for several charges) and the interface conditions to 1e-12; pbsolve, averaged over 20 grid placements: −2.3 to −2.9 % at 0.5 Å, −0.8 to −1.0 % at 0.2 Å, observed order 1.09–1.18 (first order, as expected for the sharp boundary); charges 1 Å below the surface scatter from −11 to 0 % per placement at 0.5 Å; see *Analytic references: Kirkwood sphere* |
@@ -1936,6 +1937,92 @@ CPU they added at most 4 % to a 28.5 s calculation (measured before the
 zero weights were skipped). Nodes whose weight is
 exactly 0 (one end node per axis) are skipped; that halved the `spl4`
 assembly (0.83 → 0.44 s) without changing the energy.
+
+## Error estimates (`estimate_error`)
+
+**Change.** `pbsolve.estimate_error(solver, coords, charges, radii,
+placements=8, spacings=None, parts=None)` and `pbsolve solvation
+--placements N [--extrapolate H]`:
+* The automatic grid is moved by uniform random fractions (−½ … ½) of its
+  fine spacing along each axis; the first placement is the unmoved grid.
+  The placements are solved with `polar_solvation_many`.
+* It reports the mean, the standard deviation over the placements and the
+  standard error of the mean.
+* Given two spacings or more, it extrapolates the means at the two finest
+  to zero spacing at first order. `discretisation_error` is mean −
+  extrapolated.
+* With `parts` (masks or indices) the quantity is ΔG(all) − Σ ΔG(part) on
+  the grid of the whole molecule (MM-PBSA association energy).
+* Nothing changes unless it is called; `polar_kcal_mol` of
+  `pbsolve solvation` stays the ordinary single calculation.
+
+**Checks** (`tests/test_estimate.py`, 5 tests, 6 s):
+* Every placement equals `polar_solvation` on the automatic grid moved by
+  its reported offset (at most half a spacing per axis; the first is zero),
+  bit for bit.
+* Mean, sd and sem follow their definitions, and the same seed gives the
+  same placements.
+* The extrapolation follows its formula with the actual fine spacings
+  (grids round the spacing down: 0.469 / 0.341 Å for 0.5 / 0.35).
+* Masks and index arrays give the same association energies, equal to three
+  calculations on the complex's grid; bad arguments raise `ValueError`.
+* Against Kirkwood's solution the extrapolation removes most of the error.
+* The command line reports mean, sd, sem and the extrapolation.
+* Mutations caught: 7/7 (extrapolation formula, sem, sd, offsets in Å
+  instead of spacings, first placement moved, parts added, spacings in the
+  wrong order).
+
+**Accuracy of the estimates** (CUDA, 12 placements, the cases of
+`scripts/validate_analytic.py`; errors relative to the exact value, in %;
+association energies in kcal/mol):
+
+| Case | spacings (Å) | error of the mean | sd | error after extrapolation | estimated error of the mean | true / estimated |
+|---|---|---|---|---|---|---|
+| Born ion, a = 2 Å | 0.5, 0.35 | −1.63 | 0.35 | +1.87 | −3.49 | 0.47 |
+| | 0.35, 0.25 | −1.29 | 0.12 | −0.30 | −1.00 | 1.30 |
+| Kirkwood, 3 charges | 0.5, 0.35 | −1.79 | 0.13 | +0.76 | −2.55 | 0.70 |
+| | 0.35, 0.25 | −1.34 | 0.09 | −0.09 | −1.25 | 1.07 |
+| same, 0.15 M | 0.35, 0.25 | −1.37 | 0.09 | −0.11 | −1.26 | 1.09 |
+| same, 0.15 M, pdie 4 | 0.35, 0.25 | −1.14 | 0.09 | −0.14 | −1.01 | 1.14 |
+| 2 charges 1–1.2 Å below the surface | 0.5, 0.35 | −2.38 | 1.58 | −1.14 | −1.24 | 1.92 |
+| | 0.35, 0.25 | −1.75 | 1.24 | −0.02 | −1.73 | 1.01 |
+| Two spheres, 0 M | 0.5, 0.35 | −2.17 | 0.21 | +0.54 | −2.72 | 0.80 |
+| | 0.35, 0.25 | −1.53 | 0.14 | +0.19 | −1.72 | 0.89 |
+| Two spheres, 0.15 M | 0.35, 0.25 | −1.54 | 0.15 | +0.25 | −1.79 | 0.86 |
+| Association ΔΔG, 0 M (kcal/mol) | 0.35, 0.25 | −0.017 | 0.019 | −0.022 | +0.005 | – |
+| Association ΔΔG, 0.15 M (kcal/mol) | 0.35, 0.25 | −0.012 | 0.013 | −0.006 | −0.007 | – |
+
+* From 0.35 and 0.25 Å the extrapolated energies are within 0.3 % of the
+  exact ones (the means are off by 1.1–1.8 %). The estimated error of the
+  mean is within 30 % of the true error, even for charges just below the
+  surface.
+* From 0.5 and 0.35 Å the correction is off by up to a factor of 2 in both
+  directions: the first-order regime starts below ~0.35 Å. The documentation
+  recommends spacings of 0.35 Å and below.
+* Association energies on one grid are already within the placement noise;
+  their extrapolation carries no information. Use their sd and sem.
+
+**A protein** (1YCR, 0.15 M, CUDA, 8 placements per spacing; 12 s for
+ΔG_polar, 34 s with receptor and ligand):
+
+| Fine spacing (Å) | 0.484 | 0.341 | 0.245 | extrapolated (0.341, 0.245) |
+|---|---|---|---|---|
+| ΔG_polar, mean (kcal/mol) | −1234.7 | −1205.6 | −1190.5 (sd 1.23, sem 0.44) | −1152.3 |
+| ΔΔG_bind, mean (kcal/mol) | 426.6 | 421.6 | 419.3 (sd 0.43, sem 0.15) | 413.5 |
+
+* The protein depends on the spacing far more than the spheres do: ΔG_polar
+  changes by 3.6 % from 0.48 to 0.25 Å, and the estimated error at 0.25 Å
+  is 38 kcal/mol (3 %).
+* The estimate itself has an uncertainty: extrapolating from 0.48 and
+  0.34 Å instead gives −1136 kcal/mol. On the spheres the finest pair was
+  right to 30 % of the correction.
+* ΔΔG_polar of binding carries a bias of ~+6 kcal/mol at 0.25 Å and ~+13 at
+  0.5 Å. That is far above its placement noise (sd 0.4 at 0.25 Å, 1.6 at
+  0.5 Å, see *Charge assignment*) and enters absolute MM-PBSA binding
+  energies directly. How much of it cancels between related ligands is
+  not measured here.
+* Placement sd: 4.1 kcal/mol at 0.5 Å (16 placements, *Charge assignment*),
+  1.2 at 0.25 Å.
 
 ## Sensitivity of the sharp dielectric boundary
 

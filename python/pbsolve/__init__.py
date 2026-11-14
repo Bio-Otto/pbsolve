@@ -105,6 +105,7 @@ _preload_nvrtc(_CUDA_MAJOR)
 
 from . import io, prep, radii  # noqa: E402
 from .dx import read_dx, write_dx  # noqa: E402
+from .estimate import ErrorEstimate, estimate_error  # noqa: E402
 from .mmpbsa import (  # noqa: E402
     SITKOFF_BETA,
     SITKOFF_GAMMA,
@@ -117,6 +118,7 @@ from .mmpbsa import (  # noqa: E402
 
 __all__ = [
     "ConvergenceError",
+    "ErrorEstimate",
     "GridSpec",
     "PBSAFrame",
     "PolarResult",
@@ -130,6 +132,7 @@ __all__ = [
     "available_platforms",
     "bjerrum_length",
     "cuda_info",
+    "estimate_error",
     "io",
     "kt_kcal_per_mol",
     "kt_kj_per_mol",

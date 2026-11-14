@@ -266,6 +266,18 @@ protein reduced at least 3× relative to v0.0.1.
 uncertainty from grid-shift averaging and two-spacing extrapolation, so users
 can see whether the discretisation error matters next to the statistical
 error over frames.
+*Status: done (unreleased).*
+* `pbsolve.estimate_error` and `pbsolve solvation --placements
+  --extrapolate`: mean, sd and sem over grid placements, and the means at
+  two spacings extrapolated to zero spacing at first order. `parts` covers
+  MM-PBSA association energies.
+* On the analytic references, extrapolating from 0.35 and 0.25 Å leaves
+  ≤ 0.3 %, and the estimated error is within 30 % of the true one. From
+  0.5/0.35 Å it is off by up to 2×.
+* 1YCR: ΔG_polar changes by 3.6 % from 0.48 to 0.25 Å (estimated error at
+  0.25 Å: 3 %). ΔΔG_polar of binding carries ~+6 kcal/mol at 0.25 Å and
+  ~+13 at 0.5 Å, far more than its placement noise. That is the case for
+  4.8.
 
 ### v0.3 — Physics
 
