@@ -58,7 +58,12 @@ about 3 % at 0.5 Å to 1 % at 0.2 Å. This holds for the Born ion and for
 charges anywhere inside a sphere. {py:func}`pbsolve.analytic.kirkwood_energy`
 gives the exact energy of such a sphere [Kirkwood 1934], with or without
 salt, to check settings or new methods against;
-`scripts/validate_analytic.py` measures the order.
+{py:func}`pbsolve.analytic.two_sphere_energy` does the same for two spheres.
+`scripts/validate_analytic.py` measures the order. Energy differences
+computed on one grid, such as the association energy of the two spheres,
+are far more accurate than the energies themselves: within 0.002 kcal/mol
+with `surface="vdw"` and ~0.015 kcal/mol with the default `mol`, where the
+complex is off by 1–2 kcal/mol.
 
 ## The same grid for related calculations
 

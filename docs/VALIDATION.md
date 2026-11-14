@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Two spheres (unreleased): 5 and 4 Å spheres 15.8 Å apart, 0 and 0.15 M, complex and association ΔΔG on the complex's grid | reference: exact limits (no dielectric jump 7e-15, conductors 3e-12, far apart with salt 3e-13, charge–dipole asymptote) and converged to 1e-11; pbsolve: complex first order (1.11–1.17 `mol`, 1.02–1.06 `vdw`), association ΔΔG of 1.8 kcal/mol within 0.002 kcal/mol on average at every spacing with `vdw`; with `mol` 0.011–0.019 kcal/mol from APBS' sampled molecular surface; see *Analytic references: two spheres* |
 | Kirkwood sphere (unreleased): charges off the centre of a 5 Å sphere, 0 and 0.15 M, pdie 1 and 4; Born ion | reference = closed forms to ≤ 1e-13 (Born, Born–Debye–Hückel with Stern layer, grounded-sphere images for several charges) and the interface conditions to 1e-12; pbsolve, averaged over 20 grid placements: −2.3 to −2.9 % at 0.5 Å, −0.8 to −1.0 % at 0.2 Å, observed order 1.09–1.18 (first order, as expected for the sharp boundary); charges 1 Å below the surface scatter from −11 to 0 % per placement at 0.5 Å; see *Analytic references: Kirkwood sphere* |
 | Operator symmetry, charge conservation, SES crevice, SASA, APBS reference-sphere count, marking = brute force | pass (unit tests) |
 | Multigrid preconditioner (unreleased): Pᵀ = R, linear interpolation, Galerkin = RAP, exact symmetry/SPD, coarsest solve, SPD V-cycle, contraction 0.23 per V-cycle, thread-count independence, multigrid = Jacobi energies | pass (`multigrid.rs`, `pb.rs`, `tests/test_multigrid.py`); CG iterations 10–19 independent of spacing vs 155–688 for Jacobi; Born table unchanged; see [Linear solver](#linear-solver-multigrid-versus-jacobi) |
@@ -1735,8 +1736,98 @@ charges 1.0 and 1.2 Å below the surface.
   0.15 M / pdie 4 (|error| < 1.5 % at 0.25 Å and less than 0.6 times the
   error at 0.5 Å; 1 s each).
 
-Reproduce: `python scripts/validate_analytic.py --placements 20` (4.5 min on
-18 threads).
+Reproduce: `python scripts/validate_analytic.py --placements 20` (the script
+also runs the two spheres below; 20 min on 18 threads, 4.5 min for these
+rows).
+
+## Analytic references: two spheres
+
+**Model.** Two spheres with charges inside, as for Kirkwood, far enough
+apart that their ion-free shells do not overlap. pbsolve's maps for a 5 and
+a 4 Å sphere 15.8 Å apart (0.4 Å grid):
+* The ion map is the union of the two balls of radius a + `ion_radius`,
+  node for node.
+* The dielectric map is the union of the spheres, face for face, with `vdw`.
+* `mol` (APBS' molecular surface) samples probe positions at `sdens` points
+  per Å². Between them it leaves cusps: 25 of 0.8 million x-faces lie
+  0.0004–0.0044 Å outside the spheres and are marked inside. This differs
+  from the exact spheres by a fixed amount at every spacing.
+
+**Reference** (`pbsolve.analytic.two_sphere_energy`).
+* Each sphere has a multipole expansion: regular inside, the ion-free shell,
+  and outgoing kₙ(κr) (r⁻⁽ⁿ⁺¹⁾ without salt) outside.
+* The spheres are coupled by re-expanding each one's outgoing field about the
+  other centre. With z along the line between the centres, each azimuthal
+  order m is a separate linear system.
+* The re-expansion coefficients come from Gauss–Legendre projection on the
+  other sphere's ion boundary. Each sphere's response per order comes from
+  its four interface conditions, scaled to stay well conditioned.
+* The order is chosen from the geometry for ~1e-12 (at most 150); one call
+  takes ~0.03 s.
+
+Checks (`tests/test_analytic.py`):
+* pdie = sdie without salt: the re-expanded fields must rebuild the Coulomb
+  interaction exactly; |ΔG| = 7e-15 kcal/mol.
+* sdie → ∞: each sphere is a grounded conductor on its own (image charges),
+  minus the reference state's Coulomb interaction: 3e-12.
+* Far apart without salt: ΔG − Kirkwood₁ − Kirkwood₂ against the charge and
+  dipole interaction through the solvent (a dielectric sphere passes on
+  3/(pdie + 2 sdie) of a dipole's field). The remainder is 2.5e-2 / 5.8e-3 /
+  5.6e-5 at 50 / 100 / 1000 Å and falls as 1/d², as the next order should.
+* Far apart with salt (300 Å): only the reference state's Coulomb
+  interaction is left, to 3e-13.
+* Swapping the spheres, rotating and translating everything, and raising
+  the order to 80 change nothing beyond 1e-11.
+* The Legendre functions are orthonormal; the logarithmic derivatives of iₙ
+  and kₙ match the power series and the explicit polynomial to 1e-13.
+* Mutations caught: 9/9 (direction of the re-expansion, multipole
+  normalisation, the ±m pairs, the reference Coulomb term, the Stern shell,
+  the iₙ and kₙ recurrences, the Legendre recurrence, pdie/sdie in the
+  interface conditions).
+
+**pbsolve against it** (`scripts/validate_analytic.py --placements 20`,
+`mol` and `--surface vdw`). Charges as in the Kirkwood table (5 Å sphere)
+plus −1 and +0.7 in the 4 Å sphere. The association energy ΔΔG = complex −
+sphere 1 − sphere 2 is computed on the complex's grid, as in MM-PBSA; its
+errors are in kcal/mol.
+
+| Case | surface | exact | h = 0.5 | h = 0.35 | h = 0.25 | h = 0.2 | order |
+|---|---|---|---|---|---|---|---|
+| two spheres, 0 M | `mol` | −55.3714 | −3.35 % (−3.93 … −2.76) | −2.15 % (−2.43 … −1.91) | −1.48 % (−1.69 … −1.34) | −1.13 % (−1.22 … −0.99) | 1.17 |
+| | `vdw` | | −3.57 % (−4.02 … −2.96) | −2.39 % (−2.65 … −2.11) | −1.70 % (−1.89 … −1.51) | −1.35 % (−1.44 … −1.24) | 1.06 |
+| two spheres, 0.15 M | `mol` | −55.4476 | −3.25 % (−4.17 … −2.40) | −2.15 % (−2.55 … −1.96) | −1.55 % (−1.74 … −1.40) | −1.16 % (−1.25 … −1.08) | 1.11 |
+| | `vdw` | | −3.43 % (−4.38 … −2.49) | −2.34 % (−2.78 … −2.10) | −1.72 % (−1.92 … −1.59) | −1.33 % (−1.43 … −1.20) | 1.02 |
+| association, 0 M | `mol` | 1.7878 | −0.015 (−0.105 … +0.079) | −0.018 (−0.073 … +0.056) | −0.011 (−0.034 … +0.019) | −0.016 (−0.043 … +0.005) | – |
+| | `vdw` | | −0.002 (−0.004 … +0.000) | −0.002 (−0.003 … −0.001) | −0.002 (−0.002 … −0.001) | −0.002 (−0.002 … −0.001) | – |
+| association, 0.15 M | `mol` | 1.8061 | −0.014 (−0.091 … +0.011) | −0.019 (−0.079 … +0.016) | −0.006 (−0.050 … +0.024) | −0.012 (−0.028 … +0.006) | – |
+| | `vdw` | | −0.001 (−0.002 … +0.001) | −0.000 (−0.001 … +0.001) | −0.000 (−0.001 … +0.001) | −0.000 (−0.000 … +0.000) | – |
+
+* **The complex is first order**, as one sphere is: orders 1.11–1.17 with
+  `mol` and 1.02–1.06 with `vdw`. With `vdw` the Kirkwood and Born rows give
+  0.96–0.99 and 1.10, with errors 0.1–0.25 points larger than with `mol`.
+  The cusps of `mol` enlarge the cavity slightly and offset part of the
+  discretisation's overestimate of |ΔG|.
+* **The association energy cancels on one grid.** With `vdw` its mean is
+  within 0.002 kcal/mol (0.1 %) at every spacing, single placements within
+  0.004; with salt within 0.001 and 0.002. The complex itself is off by
+  0.7–2 kcal/mol.
+  * Without salt the remaining 0.002 kcal/mol comes from the coarsest box's
+    `mdh` values, which treat the spheres as water: with a coarse box 2–3
+    times larger (`cfac 5`, `fadd 60`) it is +0.0001 kcal/mol (h = 0.35 Å,
+    4 placements).
+* **With `mol` the association is off by 0.011–0.019 kcal/mol on average
+  (0.6–1 %) at every spacing.** Single placements scatter by up to
+  ±0.1 kcal/mol at 0.5 Å. This is the cusps above, not the discretisation:
+  at 0.25 Å (10 placements) `vdw` gives −0.0016 ± 0.0001 and `mol`
+  −0.019 ± 0.007 kcal/mol, and a larger box does not change `mol`. It is a
+  property of the APBS-compatible surface, small next to the statistical
+  error of MM-PBSA.
+* Tests: the 0 M pair with `vdw` at 0.5 and 0.35 Å; the complex is within
+  2.5 % and improves, and ΔΔG is within 0.006 kcal/mol (measured −0.0031 /
+  −0.0007); 2.4 s.
+
+Reproduce: `python scripts/validate_analytic.py --placements 20` and the same
+with `--surface vdw` (20 min each on 18 threads).
 
 ## Sensitivity of the sharp dielectric boundary
 

@@ -214,8 +214,8 @@ source, less grid-position dependence) next to trilinear, selectable per run.
 off-centre charges in a sphere, with and without salt [Kirkwood 1934]; two
 interacting spheres; the planar interface. Every discretisation must report
 its **observed convergence order** on these, not only the error at one spacing.
-*Status: Kirkwood sphere done (unreleased); two spheres and the planar
-interface next.*
+*Status: Kirkwood sphere and two spheres done (unreleased); the planar
+interface waits for a geometric surface input.*
 * `pbsolve.analytic.kirkwood_energy`: charges anywhere in a sphere, with salt
   beyond a Stern layer; checked against closed forms (Born, Born–Debye–Hückel,
   grounded-sphere images) and the interface conditions to ≤ 1e-12.
@@ -223,6 +223,17 @@ interface next.*
   placements, and the observed order: 1.09–1.18 for the current
   discretisation (first order). Charges 1 Å below the surface scatter by up
   to 11 % per placement at 0.5 Å, the baseline for 4.8 and 4.9.
+* `pbsolve.analytic.two_sphere_energy`: two spheres coupled by multipole
+  re-expansion, with salt, checked against exact limits. The complex is first
+  order like one sphere. The association energy on one grid is within
+  0.002 kcal/mol with `vdw`; with `mol`, APBS' sampled probe positions add
+  0.011–0.019 kcal/mol at every spacing.
+* Planar interface: pbsolve's input is atoms, so a dielectric half-space can
+  only be set up through hand-made maps (`Solver.solve_maps`). That would
+  test the operator but not the surface construction. Large-sphere charges
+  near the surface already probe the flat limit. The test follows when a
+  surface can be given as geometry (level set, 4.8) or as a membrane slab
+  (v0.4).
 
 **4.8 Second-order interface discretisation.** *Why:* with a sharp interface,
 the 7-point stencil is first order and solvation energies depend on how the

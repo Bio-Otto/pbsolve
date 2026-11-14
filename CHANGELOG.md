@@ -113,6 +113,11 @@
   ion at several spacings, averaged over grid placements, and the observed
   convergence order: 1.09–1.18, from about 2.3–2.9 % at 0.5 Å to 0.8–1.0 %
   at 0.2 Å (`docs/VALIDATION.md`).
+- `pbsolve.analytic.two_sphere_energy`: the same for charges in two spheres,
+  from a converged multipole solution. The association energy of two spheres
+  computed on one grid, as in MM-PBSA, agrees with it to 0.002 kcal/mol with
+  `surface="vdw"`. With the default `mol` surface, APBS' sampled probe
+  positions add 0.011–0.019 kcal/mol.
 
 ### Changed
 
