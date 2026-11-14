@@ -1,6 +1,6 @@
 """Reciprocal validation against APBS.
 
-pbsolve and APBS (multigrid, ``lpbe``, ``srfm mol``, ``chgm spl0/spl2/spl4``) can be run
+pbsolve and APBS (multigrid, ``lpbe`` or ``npbe``, ``srfm mol``, ``chgm spl0/spl2/spl4``) can be run
 on the same problem in both directions:
 
 * :func:`compare` — pbsolve settings → APBS input → run both → layered report;
@@ -127,6 +127,7 @@ class ElecCalc:
     bcfl: str = "mdh"
     chgm: str = "spl0"
     method: str = "mg-auto"  # or "mg-manual"
+    pbe: str = "lpbe"  # or "npbe"
     mol: int = 1
     etol: Optional[float] = None
     calcenergy: str = "total"
@@ -153,6 +154,7 @@ class ElecCalc:
             surface="mol",
             bcfl=self.bcfl,
             chgm=self.chgm,
+            equation=self.pbe,
             tol=tol if tol is not None else min(self.etol or 1e-8, 1e-8),
             max_iter=max_iter,
             **_preconditioner(preconditioner),
@@ -207,6 +209,7 @@ def elec_from_solver(
         bcfl="mdh" if p["bcfl"] == "mdh-fast" else p["bcfl"],
         chgm=p["chgm"],
         method="mg-auto" if grid.is_focused else "mg-manual",
+        pbe=p["equation"],
         etol=etol if etol is not None else p["tol"],
         writes=list(writes),
     )
@@ -233,7 +236,7 @@ def write_input(molecules: Sequence[PathLike], elecs: Sequence[ElecCalc], prints
             out.append("    gcent " + " ".join(_fmt(v) for v in g.center))
             g.to_apbs()  # dims check
         out.append(f"    mol {e.mol}")
-        out.append("    lpbe")
+        out.append(f"    {e.pbe}")
         out.append(f"    bcfl {e.bcfl}")
         for z, c, r in e.ions:
             out.append(f"    ion charge {_fmt(z)} conc {_fmt(c)} radius {_fmt(r)}")
@@ -270,7 +273,6 @@ class ApbsInput:
 
 
 _UNSUPPORTED = {
-    "npbe": "nonlinear PBE",
     "nrpbe": "nonlinear regularized PBE",
     "lrpbe": "regularized PBE",
     "smpbe": "size-modified PBE",
@@ -363,8 +365,8 @@ def parse_input(path: PathLike) -> ApbsInput:
                     e[tl] = ("mol", int(take())) if t1.lower() == "mol" else [float(t1)] + take_floats(2)
                 elif tl == "mol":
                     e["mol"] = int(take())
-                elif tl == "lpbe":
-                    e["pbe"] = "lpbe"
+                elif tl in ("lpbe", "npbe"):
+                    e["pbe"] = tl
                 elif tl == "bcfl":
                     b = take().lower()
                     if b not in ("zero", "sdh", "mdh"):
@@ -453,8 +455,8 @@ def parse_input(path: PathLike) -> ApbsInput:
         method = e.get("method")
         if method is None:
             raise ApbsError(f"elec {name}: missing mg-auto/mg-manual")
-        if e.get("pbe") != "lpbe":
-            raise NotImplementedError(f"elec {name}: only 'lpbe' is supported")
+        if e.get("pbe") not in ("lpbe", "npbe"):
+            raise NotImplementedError(f"elec {name}: only 'lpbe' and 'npbe' are supported")
         if "dime" not in e:
             raise ApbsError(f"elec {name}: missing dime")
         req = tuple(e["dime"])
@@ -497,6 +499,7 @@ def parse_input(path: PathLike) -> ApbsInput:
                 bcfl=e["bcfl"],
                 chgm=e.get("chgm", "spl0"),
                 method=method,
+                pbe=e["pbe"],
                 mol=e.get("mol", 1),
                 etol=e.get("etol"),
                 calcenergy=e.get("calcenergy", "no"),
@@ -722,10 +725,14 @@ class ComparisonReport:
                 )
         for st, inj in self.injection.items():
             p = inj["potential"]
+            energy = (
+                f"energy {inj['energy_rel']:+.2e} rel ({inj['energy_rel_unit_corrected']:+.2e} in APBS units)"
+                if "energy_rel" in inj
+                else "energy not compared (npbe: APBS adds the coarser levels' terms)"
+            )
             lines.append(
                 f"  injection ({st}): pbsolve solver on APBS maps -> max |Δu| = {p['max_abs']:.2e} kT/e "
-                f"({p['max_rel_to_max']:.1e} of max); energy {inj['energy_rel']:+.2e} rel "
-                f"({inj['energy_rel_unit_corrected']:+.2e} in APBS units)"
+                f"({p['max_rel_to_max']:.1e} of max); {energy}"
             )
         lines.append("  energies (kJ/mol):          APBS         pbsolve     rel. diff   (APBS units)")
         for st, e in self.energies.items():
@@ -859,18 +866,22 @@ def compare(
             }
             for st in ("solvated", "reference"):
                 u, iters, resid = solver.solve_maps(*eps[st], kap[st], apbs_q, apbs_pot[st], ours["origin"], ours["spacing"])
+                inj: dict[str, Any] = {"potential": _field_diff(u, apbs_pot[st]), "iterations": iters}
+                if st == "solvated" and solver.params["equation"] == "npbe" and ours["kappa_bar_sq"] > 0:
+                    # APBS' nonlinear energy adds terms of the coarser levels, which one level lacks.
+                    report.injection[st] = inj
+                    continue
                 if solver.params["chgm"] == "spl4":
                     # APBS takes the spl4 energy at the atoms with trilinear weights (Vpmg_qfEnergy).
                     e_inj = 0.5 * float(np.sum(charges * _interp(u, ours["origin"], ours["spacing"], coords))) * kj
                 else:
                     e_inj = 0.5 * float(np.sum(apbs_q * u)) * kj
-                report.injection[st] = {
-                    "potential": _field_diff(u, apbs_pot[st]),
-                    "energy_kj": e_inj,
-                    "energy_rel": _rel(e_inj, energies[st]["apbs_kj"]),
-                    "energy_rel_unit_corrected": _rel(e_inj * uf, energies[st]["apbs_kj"]),
-                    "iterations": iters,
-                }
+                inj.update(
+                    energy_kj=e_inj,
+                    energy_rel=_rel(e_inj, energies[st]["apbs_kj"]),
+                    energy_rel_unit_corrected=_rel(e_inj * uf, energies[st]["apbs_kj"]),
+                )
+                report.injection[st] = inj
     (work / "report.json").write_text(json.dumps(report.to_dict(), indent=2))
     return report
 
@@ -1129,6 +1140,7 @@ def _add_solver_args(ap: argparse.ArgumentParser) -> None:
         help="boundary condition (mdh-fast: pbsolve's interpolated mdh; APBS runs mdh)",
     )
     ap.add_argument("--chgm", default="spl0", choices=["spl0", "spl2", "spl4"], help="charge assignment (APBS chgm)")
+    ap.add_argument("--equation", default="lpbe", choices=["lpbe", "npbe"], help="linearized or nonlinear PBE")
     ap.add_argument("--cfac", type=float, default=1.7)
     ap.add_argument("--fadd", type=float, default=20.0)
     ap.add_argument("--tol", type=float, default=1e-8, help="pbsolve tolerance; also written as APBS etol")
@@ -1229,6 +1241,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 surface=a.surface,
                 bcfl=a.bcfl,
                 chgm=a.chgm,
+                equation=a.equation,
                 cfac=a.cfac,
                 fadd=a.fadd,
                 tol=a.tol,

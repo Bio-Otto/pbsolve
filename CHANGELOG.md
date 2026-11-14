@@ -129,6 +129,15 @@
   5–10 times and the ΔΔG_polar bias at 0.5 Å from +13 to +2.7 kcal/mol.
   Opt-in: the default `"sharp"` (as APBS) is bit-identical to before
   (`docs/VALIDATION.md`).
+- `Solver(equation="npbe")`, `--equation`: the nonlinear Poisson–Boltzmann
+  equation, as APBS `npbe`. An inexact Newton iteration from the linearized
+  solution reuses the linear multigrid solver. The energy is APBS'
+  free-energy functional, including the coarser focusing levels' outer terms.
+  The solvated energies agree with APBS 3.4.1 to ≤ 2.3e-9 in APBS units (1YCR,
+  −8/−20/−30 e test systems, 1:1 and 2:1 salts). `pbsolve apbs compare/run`
+  now handle `npbe`; `solve_maps` and `potential` follow the equation. A
+  calculation costs 1.4× a linear one on the CPU and 2–3× on CUDA. The
+  default `"lpbe"` is bit-identical to before (`docs/VALIDATION.md`).
 - `Solver(coulomb="analytic")`, `--coulomb`: reaction-field decomposition.
   The analytic Coulomb potential of the charges is subtracted near the
   solute, and ΔG_polar comes from one solve per focusing level, without a

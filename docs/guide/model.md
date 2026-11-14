@@ -1,7 +1,8 @@
 # Physical model
 
 pbsolve solves the linearized Poisson–Boltzmann equation (LPBE) the way APBS
-does, in APBS' dimensionless form:
+does, in APBS' dimensionless form (the nonlinear equation is
+[below](#nonlinear-equation)):
 
 $$
 -\nabla\cdot\big(\varepsilon(\mathbf r)\,\nabla u(\mathbf r)\big)
@@ -147,6 +148,39 @@ print(salt.ionic_strength)  # ½ Σ c z² = 0.3 mol/L
 ```
 
 `temperature` (K, default 298.15) enters $k_BT$, $l_B$ and $\kappa$.
+
+## Nonlinear equation
+
+The LPBE assumes that the ions respond linearly to the potential, which holds
+for $|u| \ll 1$ kT/e. Near strongly charged molecules (nucleic acids,
+membranes, highly charged proteins) the ions follow the Boltzmann
+distribution, and `equation="npbe"` (APBS `npbe`) solves
+
+$$
+-\nabla\cdot\big(\varepsilon\nabla u\big)
++ \bar\kappa^2 \sum_j \frac{c_j z_j}{2I}\,\big(-e^{-z_j u}\big)
+= 4\pi\, l_B \sum_i z_i\,\delta(\mathbf r - \mathbf r_i),
+$$
+
+which for a 1:1 salt is $\bar\kappa^2 \sinh u$ instead of $\bar\kappa^2 u$.
+Newton's method solves it with the linear solver of the LPBE, starting from the
+linearized solution. The solvated energy is APBS' free-energy functional
+[Sharp & Honig 1990], so ΔG_polar matches APBS `npbe`
+([validation](../VALIDATION)); the reference state stays linear.
+
+```python
+nonlinear = pbsolve.Solver(ionic_strength=0.15, equation="npbe")
+print(f"{nonlinear.polar_solvation(coords, charges, radii).energy:.2f} kcal/mol")
+```
+
+For a typical protein such as 1YCR the two equations differ by 0.03 kcal/mol.
+For strongly charged molecules the difference grows to kcal/mol and more: about
+100 kcal/mol for a −30 e sphere, where the linearized potential at the ions is
+−22 kT/e and the nonlinear one −7.5. The functional misses the field energy
+beyond the outermost box. For strongly charged molecules, enlarge `cfac` and
+`fadd`: the default boxes miss 20–30 % of the nonlinear correction there. A
+nonlinear calculation costs about 1.4 times a linear one on the CPU and 2–3
+times on a GPU. Without ions both equations are the same.
 
 ## Boundary condition
 

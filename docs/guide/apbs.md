@@ -1,7 +1,7 @@
 # Comparing with APBS
 
 With `surface="mol"` and `bcfl` `"mdh"`, `"sdh"` or `"zero"`, pbsolve follows
-APBS 3.4.1 (`mg-auto`, `lpbe`, `srfm mol`, `chgm spl0`, `spl2` or `spl4`)
+APBS 3.4.1 (`mg-auto`, `lpbe` or `npbe`, `srfm mol`, `chgm spl0`, `spl2` or `spl4`)
 operation for operation: its focusing grids, dielectric and ion maps are
 identical to APBS', and its energies agree to a few parts per million.
 `pbsolve.apbs` runs both programs on the same problem and shows where they
@@ -59,7 +59,7 @@ pbsolve apbs run apbs.in
 evaluates the `mg-auto` and `mg-manual` calculations and `print` statements
 of an existing APBS input with pbsolve, runs APBS on the same file (unless
 `--no-apbs`) and prints the energies side by side. Inputs with features
-pbsolve lacks (nonlinear PB, external maps, `mg-para`) are refused with a
+pbsolve lacks (size-modified or regularized PB, external maps, `mg-para`) are refused with a
 message naming the keyword.
 
 ## What can differ, and why
@@ -104,3 +104,9 @@ and 1TII are identical. ΔG_polar agrees to ≤ 4e-6 in APBS units, and
 < 1e-6 kcal/mol. The small remainder with `mdh` and `sdh` therefore comes
 from APBS' boundary constants. The [validation record](../VALIDATION) has the
 full tables.
+
+With `npbe` (`--equation npbe`) pbsolve reproduces APBS' Newton solution and
+its free-energy functional, including the energy terms APBS adds for the
+coarser focusing levels. On 1YCR and on strongly charged test systems (up to
+a −30 e sphere) the solvated energies agree to ≤ 2.3e-9 in APBS units, and
+the nonlinear correction (npbe − lpbe) agrees to 1e-4 kcal/mol.

@@ -321,6 +321,20 @@ error over frames.
 linear solver, with damping for the exponential term [Holst & Saied 1995].
 Energy functional and convergence tests against the linearized equation at
 low potential.
+*Status: done (unreleased) as `equation="npbe"`, APBS `npbe`.*
+* Newton from the linearized solution; each step is the linear solve with
+  κ̄² replaced by N'(u), inexact [Dembo et al. 1982; Holst et al. 1994]
+  and damped by halving until ‖F‖ decreases. Default tolerances: 15 instead
+  of 12 CG iterations per level on 1YCR.
+* Energy: APBS' functional [Sharp & Honig 1990] with the coarser levels'
+  outer terms. APBS 3.4.1 `npbe` is matched to ≤ 2.3e-9 (solvated energies
+  in APBS units, up to a −30 e sphere, 1:1 and 2:1 salts, 1–3 levels).
+* Low-potential test: the potential equals the linearized one to O(q²); the
+  energies differ by the functional's truncation at the boxes (field energy
+  beyond them), which APBS shares. The Sharp–Honig volume form converges
+  faster with the box and could be offered as an option.
+* Cost 1.4× (CPU), 2–3× (CUDA, multigrid rebuilt per step, Boltzmann terms
+  on the host).
 
 **4.11 Size-modified PB.** Finite ion size via the lattice-gas (Bikerman /
 Borukhov) free energy [Borukhov, Andelman & Orland 1997], uniform ion size
@@ -504,6 +518,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Chern IL, Liu JG, Wang WC. Accurate evaluation of electrostatics for macromolecules in solution. Methods Appl. Anal. 10, 309 (2003).
 * Davis ME, McCammon JA. Dielectric boundary smoothing in finite difference solutions of the Poisson equation: an approach to improve accuracy and convergence. J. Comput. Chem. 12, 909 (1991).
 * Decherchi S, Rocchia W. A general and robust ray-casting-based algorithm for triangulating surfaces at the nanoscale. PLoS One 8, e59744 (2013).
+* Dembo RS, Eisenstat SC, Steihaug T. Inexact Newton methods. SIAM J. Numer. Anal. 19, 400 (1982).
 * Di Florio V, Ansalone P, Siryk SV, Decherchi S, de Falco C, Rocchia W. NextGenPB: an analytically-enhanced finite element solver for the linearized Poisson–Boltzmann equation. Comput. Phys. Commun. 317, 109816 (2025).
 * Duan L, Liu X, Zhang JZH. Interaction entropy: a new paradigm for highly efficient and reliable computation of protein–ligand binding free energy. J. Am. Chem. Soc. 138, 5722 (2016).
 * Dzubiella J, Swanson JMJ, McCammon JA. Coupling hydrophobicity, dispersion, and electrostatics in continuum solvent models. Phys. Rev. Lett. 96, 087802 (2006).
@@ -513,6 +528,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Grant JA, Pickup BT, Nicholls A. A smooth permittivity function for Poisson–Boltzmann solvation methods. J. Comput. Chem. 22, 608 (2001).
 * Greene D, Qi R, Nguyen R, Qiu T, Luo R. Heterogeneous dielectric implicit membrane model for the calculation of MMPBSA binding free energies. J. Chem. Inf. Model. 59, 3041 (2019).
 * Hahn DF, et al. Best practices for constructing, preparing, and evaluating protein–ligand binding affinity benchmarks. Living J. Comp. Mol. Sci. 4, 1497 (2022).
+* Holst M, Kozack RE, Saied F, Subramaniam S. Protein electrostatics: rapid multigrid-based Newton algorithm for solution of the full nonlinear Poisson–Boltzmann equation. J. Biomol. Struct. Dyn. 11, 1437 (1994).
 * Holst M, McCammon JA, Yu Z, Zhou YC, Zhu Y. Adaptive finite element modeling techniques for the Poisson–Boltzmann equation. Commun. Comput. Phys. 11, 179 (2012).
 * Holst M, Saied F. Multigrid solution of the Poisson–Boltzmann equation. J. Comput. Chem. 14, 105 (1993).
 * Holst MJ, Saied F. Numerical solution of the nonlinear Poisson–Boltzmann equation: developing more robust and efficient methods. J. Comput. Chem. 16, 337 (1995).
@@ -531,6 +547,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Qi R, Luo R. Robustness and efficiency of Poisson–Boltzmann modeling on graphics processing units. J. Chem. Inf. Model. 59, 409 (2019).
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
 * Reis PBPS, Vila-Viçosa D, Rocchia W, Machuqueiro M. PypKa: a flexible Python module for Poisson–Boltzmann-based pKa calculations. J. Chem. Inf. Model. 60, 4442 (2020).
+* Sharp KA, Honig B. Calculating total electrostatic energies with the nonlinear Poisson–Boltzmann equation. J. Phys. Chem. 94, 7684 (1990).
 * Tamstorf R, Benzaken J, McCormick SF. Discretization-error-accurate mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S420 (2021b).
 * Tan C, Tan YH, Luo R. Implicit nonpolar solvent models. J. Phys. Chem. B 111, 12263 (2007).
 * Tatebe O. The multigrid preconditioned conjugate gradient method. Proc. 6th Copper Mountain Conference on Multigrid Methods, NASA CP-3224, 621 (1993).

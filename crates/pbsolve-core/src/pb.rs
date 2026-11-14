@@ -11,7 +11,8 @@ use crate::coulomb::{coulomb_energy_kt, Split};
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::molecule::Atom;
-use crate::params::{ChargeMethod, CoulombMethod, PbParams};
+use crate::nonlinear::{self, IonTerms, NonlinearLevel};
+use crate::params::{ChargeMethod, CoulombMethod, Equation, PbParams};
 use crate::solver::{pcg_on, pcg_setup, SolveStats, SolverOptions};
 use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
@@ -76,6 +77,10 @@ pub struct FieldSolution {
     pub stats: Vec<SolveStats>,
     /// Summed over all levels.
     pub timings: Timings,
+    /// The free-energy functional (kT) of a nonlinear state with ions
+    /// ([`crate::nonlinear`]); None for linear states, whose energy is
+    /// ½ Σ q u ([`electrostatic_energy_kt`]).
+    pub energy_kt: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -145,25 +150,7 @@ pub fn solve_with_maps<B: Backend>(
     temperature: f64,
     opts: SolverOptions,
 ) -> Result<(Vec<f64>, SolveStats)> {
-    let n = grid.len();
-    for (name, len) in [
-        ("eps_x", maps.eps_x.len()),
-        ("eps_y", maps.eps_y.len()),
-        ("eps_z", maps.eps_z.len()),
-        ("kappa_sq", maps.kappa_sq.len()),
-        ("node_charge", node_charge.len()),
-        ("g_ext", g_ext.len()),
-    ] {
-        if len != n {
-            return crate::error::invalid(format!("{name} has {len} values, grid has {n} nodes"));
-        }
-    }
-    let bad_eps = [&maps.eps_x, &maps.eps_y, &maps.eps_z]
-        .iter()
-        .any(|m| m.par_iter().any(|e| e.is_nan() || *e <= 0.0));
-    if bad_eps || maps.kappa_sq.par_iter().any(|k| k.is_nan() || *k < 0.0) {
-        return crate::error::invalid("dielectric maps must be positive and kappa_sq non-negative");
-    }
+    check_maps(grid, &maps, node_charge, g_ext)?;
     let maps = [
         be.upload_owned(maps.eps_x)?,
         be.upload_owned(maps.eps_y)?,
@@ -187,9 +174,61 @@ pub fn solve_with_maps<B: Backend>(
     Ok((u, stats))
 }
 
+/// [`solve_with_maps`] for the nonlinear equation with the ions of `params`
+/// (`kappa_sq` is κ̄² times the ion accessibility, as for the linear one).
+/// Without ions it is the linear solve.
+pub fn solve_with_maps_nonlinear<B: Backend>(
+    be: &B,
+    grid: &Grid,
+    maps: CoefficientMaps,
+    node_charge: &[f64],
+    g_ext: &[f64],
+    params: &PbParams,
+    opts: SolverOptions,
+) -> Result<(Vec<f64>, SolveStats)> {
+    let Some(ions) = IonTerms::new(params) else {
+        return solve_with_maps(be, grid, maps, node_charge, g_ext, params.temperature, opts);
+    };
+    check_maps(grid, &maps, node_charge, g_ext)?;
+    let g: Vec<f64> = grid.boundary_indices().iter().map(|&c| g_ext[c]).collect();
+    let (nodes, charges): (Vec<usize>, Vec<f64>) = node_charge
+        .iter()
+        .enumerate()
+        .filter(|(_, q)| **q != 0.0)
+        .map(|(c, q)| (c, *q))
+        .unzip();
+    let lb0 = bjerrum_length_vacuum(params.temperature);
+    let (sol, stats, _) = nonlinear::solve_level(be, grid.clone(), g, maps, (&nodes, &charges), &ions, lb0, opts)?;
+    let (_, u) = sol.potential(be)?;
+    Ok((u, stats))
+}
+
+fn check_maps(grid: &Grid, maps: &CoefficientMaps, node_charge: &[f64], g_ext: &[f64]) -> Result<()> {
+    let n = grid.len();
+    for (name, len) in [
+        ("eps_x", maps.eps_x.len()),
+        ("eps_y", maps.eps_y.len()),
+        ("eps_z", maps.eps_z.len()),
+        ("kappa_sq", maps.kappa_sq.len()),
+        ("node_charge", node_charge.len()),
+        ("g_ext", g_ext.len()),
+    ] {
+        if len != n {
+            return crate::error::invalid(format!("{name} has {len} values, grid has {n} nodes"));
+        }
+    }
+    let bad_eps = [&maps.eps_x, &maps.eps_y, &maps.eps_z]
+        .iter()
+        .any(|m| m.par_iter().any(|e| e.is_nan() || *e <= 0.0));
+    if bad_eps || maps.kappa_sq.par_iter().any(|k| k.is_nan() || *k < 0.0) {
+        return crate::error::invalid("dielectric maps must be positive and kappa_sq non-negative");
+    }
+    Ok(())
+}
+
 /// A host input that is ready, or still being built in the background
 /// ([`with_background_inputs`]).
-enum Pending<T> {
+pub(crate) enum Pending<T> {
     Ready(T),
     Later(mpsc::Receiver<T>),
 }
@@ -207,13 +246,13 @@ impl<T> Pending<T> {
 }
 
 /// The result of [`solve_assembled`].
-struct Solved<B: Backend> {
-    x: B::Vector,
+pub(crate) struct Solved<B: Backend> {
+    pub(crate) x: B::Vector,
     /// The Dirichlet values on the boundary nodes.
-    g: Vec<f64>,
-    stats: SolveStats,
+    pub(crate) g: Vec<f64>,
+    pub(crate) stats: SolveStats,
     /// Seconds spent waiting for `g` from the background.
-    waited: f64,
+    pub(crate) waited: f64,
 }
 
 /// Assembles the system of maps already on `be` (as
@@ -224,7 +263,7 @@ struct Solved<B: Backend> {
 /// background are waited for only after the preconditioner is set up, as
 /// the setup does not need them; the results are the same either way.
 #[allow(clippy::too_many_arguments)]
-fn solve_assembled<B: Backend>(
+pub(crate) fn solve_assembled<B: Backend>(
     be: &B,
     grid: &Grid,
     boundary: &[usize],
@@ -280,11 +319,11 @@ fn solve_assembled<B: Backend>(
 
 /// The solution of one level, still on the backend: u = x + g, with g the
 /// Dirichlet values on the boundary nodes and 0.0 on interior ones.
-struct LevelSolution<B: Backend> {
-    grid: Grid,
-    x: B::Vector,
+pub(crate) struct LevelSolution<B: Backend> {
+    pub(crate) grid: Grid,
+    pub(crate) x: B::Vector,
     /// g on `grid.boundary_indices()`, in that order.
-    g: Vec<f64>,
+    pub(crate) g: Vec<f64>,
 }
 
 impl<B: Backend> LevelSolution<B> {
@@ -327,11 +366,21 @@ fn add_boundary_values(grid: &Grid, u: &mut [f64], g: &[f64]) {
 /// increasing order and their charges.
 type NodeCharges = (Vec<usize>, Vec<f64>);
 
-/// One LPBE solve on `grid` with Dirichlet values `g` (on
+/// What a level keeps besides its solution for the energy: the region χ of
+/// the reaction-field decomposition, or the host solution of a nonlinear
+/// level.
+pub(crate) enum LevelExtra {
+    None,
+    Split(Split),
+    Nonlinear(NonlinearLevel),
+}
+
+/// One PB solve on `grid` with Dirichlet values `g` (on
 /// `grid.boundary_indices()`). Also returns the node charges the energy is
 /// taken with ([`ChargeMethod::energy_method`]). With `decompose` it solves
 /// for the reaction field v = u − χG instead of u ([`crate::coulomb`]) and
-/// also returns the region χ.
+/// also returns the region χ. The solvated state of `equation = npbe` with
+/// ions is solved by Newton's method ([`crate::nonlinear`]).
 #[allow(clippy::too_many_arguments)]
 fn solve_level<B: Backend>(
     be: &B,
@@ -342,7 +391,13 @@ fn solve_level<B: Backend>(
     surf: Option<&MolecularSurface>,
     decompose: bool,
     timings: &mut Timings,
-) -> Result<(LevelSolution<B>, SolveStats, NodeCharges, Option<Split>)> {
+) -> Result<(LevelSolution<B>, SolveStats, NodeCharges, LevelExtra)> {
+    let ions = (params.equation == Equation::Nonlinear)
+        .then(|| IonTerms::new(params))
+        .flatten();
+    if let (Some(surf), Some(ions)) = (surf, ions) {
+        return solve_nonlinear_level(be, grid, g, atoms, params, surf, &ions, timings);
+    }
     let t = Instant::now();
     // Maps built from validated parameters are valid (ε > 0, κ̄² ≥ 0).
     let maps = maps_on(be, &grid, atoms, params, surf)?;
@@ -357,11 +412,7 @@ fn solve_level<B: Backend>(
     } else {
         (None, spread_charges_sparse_with(&grid, atoms, params.chgm)?)
     };
-    let opts = SolverOptions {
-        tol: params.tol,
-        max_iter: params.max_iter,
-        preconditioner: params.preconditioner,
-    };
+    let opts = solver_options(params);
     let scatter = || be.scatter(grid.len(), &nodes, &charges);
     let solved = solve_assembled(be, &grid, &grid.boundary_indices(), g, maps, scatter, lb0, opts)?;
     let (x, g, mut stats) = (solved.x, solved.g, solved.stats);
@@ -380,7 +431,80 @@ fn solve_level<B: Backend>(
         m if m == params.chgm && split.is_none() => (nodes, charges),
         m => spread_charges_sparse_with(&grid, atoms, m)?,
     };
-    Ok((LevelSolution { grid, x, g }, stats, energy_charges, split))
+    let extra = split.map_or(LevelExtra::None, LevelExtra::Split);
+    Ok((LevelSolution { grid, x, g }, stats, energy_charges, extra))
+}
+
+/// The free-energy functional of a nonlinear finest level (kT), minus the
+/// coarser levels' outer terms `external` (dielectric, ions); None for a
+/// linear level.
+fn nonlinear_energy(
+    extra: &LevelExtra,
+    params: &PbParams,
+    lb0: f64,
+    charges: (&[usize], &[f64]),
+    external: [f64; 2],
+) -> Option<f64> {
+    match (extra, IonTerms::new(params)) {
+        (LevelExtra::Nonlinear(level), Some(ions)) => {
+            Some(level.energy(&ions, lb0, charges) - external[0] - external[1])
+        }
+        _ => None,
+    }
+}
+
+fn solver_options(params: &PbParams) -> SolverOptions {
+    SolverOptions {
+        tol: params.tol,
+        max_iter: params.max_iter,
+        preconditioner: params.preconditioner,
+    }
+}
+
+/// [`solve_level`] for the solvated state of the nonlinear equation: the
+/// maps are built as for the linear equation and read back to the host,
+/// where the Newton iteration evaluates the Boltzmann terms; the linear
+/// steps run on `be`.
+#[allow(clippy::too_many_arguments)]
+fn solve_nonlinear_level<B: Backend>(
+    be: &B,
+    grid: Grid,
+    g: Pending<Vec<f64>>,
+    atoms: &[Atom],
+    params: &PbParams,
+    surf: &MolecularSurface,
+    ions: &IonTerms,
+    timings: &mut Timings,
+) -> Result<(LevelSolution<B>, SolveStats, NodeCharges, LevelExtra)> {
+    let t = Instant::now();
+    let [eps_x, eps_y, eps_z, kappa_sq] = maps_on(be, &grid, atoms, params, Some(surf))?;
+    let maps = CoefficientMaps {
+        eps_x: be.download(&eps_x)?,
+        eps_y: be.download(&eps_y)?,
+        eps_z: be.download(&eps_z)?,
+        kappa_sq: be.download(&kappa_sq)?,
+    };
+    timings.maps += t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let g = g.wait()?;
+    timings.boundary += t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let lb0 = bjerrum_length_vacuum(params.temperature);
+    let (nodes, charges) = spread_charges_sparse_with(&grid, atoms, params.chgm)?;
+    let (sol, mut stats, level) =
+        nonlinear::solve_level(be, grid, g, maps, (&nodes, &charges), ions, lb0, solver_options(params))?;
+    let freeing = Instant::now();
+    be.synchronize()?;
+    stats.solve_seconds += freeing.elapsed().as_secs_f64();
+    let total = t.elapsed().as_secs_f64();
+    timings.setup += stats.setup_seconds;
+    timings.solve += stats.solve_seconds;
+    timings.assembly += (total - stats.setup_seconds - stats.solve_seconds).max(0.0);
+    let energy_charges = match params.chgm.energy_method() {
+        m if m == params.chgm => (nodes, charges),
+        m => spread_charges_sparse_with(&sol.grid, atoms, m)?,
+    };
+    Ok((sol, stats, energy_charges, LevelExtra::Nonlinear(level)))
 }
 
 /// Boundary values of `fine` focused from the solution of the coarser level,
@@ -449,7 +573,7 @@ fn focused<B: Backend, T>(
     params: &PbParams,
     inputs: StateInputs,
     decompose: bool,
-    finish: impl FnOnce(LevelSolution<B>, NodeCharges, Option<Split>, &mut Timings) -> Result<T>,
+    finish: impl FnOnce(LevelSolution<B>, NodeCharges, LevelExtra, [f64; 2], &mut Timings) -> Result<T>,
 ) -> Result<(T, Vec<SolveStats>, Timings)> {
     let StateInputs {
         surf,
@@ -461,10 +585,22 @@ fn focused<B: Backend, T>(
     timings.maps += t.elapsed().as_secs_f64();
     let mut outer_boundary = Some(outer_boundary);
     let mut stats = Vec::with_capacity(levels.len());
-    let mut last: Option<(LevelSolution<B>, NodeCharges, Option<Split>)> = None;
+    let mut last: Option<(LevelSolution<B>, NodeCharges, LevelExtra)> = None;
+    // The dielectric and ion terms of the nonlinear functional outside the
+    // finer boxes (APBS `Vpmg_extEnergy`).
+    let mut external = [0.0; 2];
+    let ions = IonTerms::new(params);
+    let lb0 = bjerrum_length_vacuum(params.temperature);
     for (index, grid) in levels.iter().enumerate() {
-        let t = Instant::now();
         let coarse = last.take();
+        if let (Some((_, _, LevelExtra::Nonlinear(level))), Some(ions)) = (&coarse, &ions) {
+            let t = Instant::now();
+            let (diel, ion) = level.external_terms(grid, ions, lb0);
+            external[0] += diel;
+            external[1] += ion;
+            timings.energy += t.elapsed().as_secs_f64();
+        }
+        let t = Instant::now();
         let g = match &coarse {
             None => outer_boundary.take().expect("the outermost level comes first"),
             // Coarser levels solve for u itself (only the finest decomposes).
@@ -489,8 +625,8 @@ fn focused<B: Backend, T>(
         stats.push(s);
         last = Some((sol, charges, split));
     }
-    let (sol, charges, split) = last.expect("at least one level");
-    let out = finish(sol, charges, split, &mut timings)?;
+    let (sol, charges, extra) = last.expect("at least one level");
+    let out = finish(sol, charges, extra, external, &mut timings)?;
     Ok((out, stats, timings))
 }
 
@@ -568,13 +704,18 @@ pub fn solve_focused<B: Backend>(
     params.validate()?;
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
-    let field = |sol: LevelSolution<B>, _, _, timings: &mut Timings| {
-        let t = Instant::now();
-        let field = sol.potential(be)?;
-        timings.solve += t.elapsed().as_secs_f64();
-        Ok(field)
-    };
-    let ((grid, potential), stats, timings) = match background_pool_for(be) {
+    let lb0 = bjerrum_length_vacuum(params.temperature);
+    let field =
+        |sol: LevelSolution<B>, (nodes, charges): NodeCharges, extra, external: [f64; 2], timings: &mut Timings| {
+            let t = Instant::now();
+            let energy = nonlinear_energy(&extra, params, lb0, (&nodes, &charges), external);
+            timings.energy += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let field = sol.potential(be)?;
+            timings.solve += t.elapsed().as_secs_f64();
+            Ok((field, energy))
+        };
+    let (((grid, potential), energy_kt), stats, timings) = match background_pool_for(be) {
         Some(pool) => with_background_inputs(&pool, &levels, atoms, params, medium, |inputs| {
             focused(be, &levels, atoms, params, inputs, false, field)
         })?,
@@ -594,6 +735,7 @@ pub fn solve_focused<B: Backend>(
         potential,
         stats,
         timings,
+        energy_kt,
     })
 }
 
@@ -625,12 +767,17 @@ pub fn polar_solvation<B: Backend>(
     params: &PbParams,
     spec: &GridSpec,
 ) -> Result<PolarSolvation> {
-    let energy = |sol: LevelSolution<B>, charges, _, timings: &mut Timings| {
-        let t = Instant::now();
-        let e = energy_at_charges(be, &sol, charges)?;
-        timings.energy += t.elapsed().as_secs_f64();
-        Ok(e)
-    };
+    let lb0 = bjerrum_length_vacuum(params.temperature);
+    let energy =
+        |sol: LevelSolution<B>, (nodes, charges): NodeCharges, extra, external: [f64; 2], timings: &mut Timings| {
+            let t = Instant::now();
+            let e = match nonlinear_energy(&extra, params, lb0, (&nodes, &charges), external) {
+                Some(e) => e,
+                None => energy_at_charges(be, &sol, (nodes, charges))?,
+            };
+            timings.energy += t.elapsed().as_secs_f64();
+            Ok(e)
+        };
     params.validate()?;
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
@@ -648,16 +795,16 @@ pub fn polar_solvation<B: Backend>(
         }
     };
     if params.coulomb == CoulombMethod::Analytic {
-        let lb0 = bjerrum_length_vacuum(params.temperature);
-        let reaction =
-            |sol: LevelSolution<B>, (nodes, charges): NodeCharges, split: Option<Split>, timings: &mut Timings| {
-                let t = Instant::now();
-                let v = sol.values_at(be, &nodes)?;
-                let split = split.expect("the finest level is decomposed");
-                let e = split.reaction_energy(&sol.grid, atoms, params.pdie, lb0, (&nodes, &charges), &v);
-                timings.energy += t.elapsed().as_secs_f64();
-                Ok(e)
+        let reaction = |sol: LevelSolution<B>, (nodes, charges): NodeCharges, extra, _, timings: &mut Timings| {
+            let t = Instant::now();
+            let v = sol.values_at(be, &nodes)?;
+            let LevelExtra::Split(split) = extra else {
+                unreachable!("the finest level is decomposed")
             };
+            let e = split.reaction_energy(&sol.grid, atoms, params.pdie, lb0, (&nodes, &charges), &v);
+            timings.energy += t.elapsed().as_secs_f64();
+            Ok(e)
+        };
         let run = |inputs| focused(be, &levels, atoms, params, inputs, true, reaction);
         let (energy_kt, stats, mut timings) = match background_pool_for(be) {
             Some(pool) => with_background_inputs(&pool, &levels, atoms, params, Medium::Solvated, run)?,

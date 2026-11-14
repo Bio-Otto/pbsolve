@@ -136,7 +136,7 @@ to rounding (1e-13 relative or better); see [CPU and GPU](platforms.md).
 
 {py:meth}`~pbsolve.Solver.maps` returns the coefficient maps of one focusing
 level (dielectric on the three face grids, κ̄², charges), and
-{py:meth}`~pbsolve.Solver.solve_maps` solves the LPBE for maps and boundary
+{py:meth}`~pbsolve.Solver.solve_maps` solves the LPBE (or, with `equation="npbe"`, the nonlinear equation) for maps and boundary
 values you supply. Feeding APBS' own maps into `solve_maps` tests pbsolve's
 discretisation and solver in isolation, which is how the
 [APBS comparison](apbs.md) locates any difference.

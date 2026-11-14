@@ -1200,3 +1200,65 @@ fn analytic_coulomb_matches_the_cpu() {
         assert_eq!(r.stats_solvated.len(), cpu.stats_solvated.len());
     }
 }
+
+/// The nonlinear equation (`equation = "npbe"`) gives the CPU's energies and
+/// potentials on the GPU: one to three focusing levels, a 1:1 and a 2:1
+/// salt. The Newton steps run on the host; the linear steps on the device.
+#[test]
+fn nonlinear_pb_matches_the_cpu() {
+    use pbsolve_core::pb::{polar_solvation, solve_focused, Medium};
+    use pbsolve_core::{Equation, GridSpec, IonSpecies};
+    if !gpu_present("nonlinear_pb_matches_the_cpu") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let mut atoms = cluster(150, 23);
+    for a in atoms.iter_mut().step_by(5) {
+        a.charge *= 4.0;
+    }
+    let fine = [24.0, 22.0, 26.0];
+    let spec = |scale: f64| GridSpec {
+        center: [0.1, -0.2, 0.3],
+        dims: [49, 45, 53],
+        coarse_length: fine.map(|l| scale * l),
+        fine_length: fine,
+    };
+    let two_one = vec![
+        IonSpecies {
+            charge: 2.0,
+            concentration: 0.05,
+            radius: 2.0,
+        },
+        IonSpecies {
+            charge: -1.0,
+            concentration: 0.1,
+            radius: 2.0,
+        },
+    ];
+    for (scale, ions) in [(1.0, None), (2.0, Some(two_one)), (9.0, None)] {
+        let mut params = PbParams {
+            pdie: 2.0,
+            equation: Equation::Nonlinear,
+            tol: 1e-10,
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
+        if let Some(ions) = ions {
+            params.ions = ions;
+        }
+        let spec = spec(scale);
+        let r = polar_solvation(&gpu, &atoms, &params, &spec).unwrap();
+        let cpu = polar_solvation(&CpuBackend::new(), &atoms, &params, &spec).unwrap();
+        let rel = (r.solvated_kt - cpu.solvated_kt).abs() / cpu.solvated_kt.abs();
+        assert!(
+            rel < 1e-10,
+            "{scale}: CPU {} vs CUDA {} ({rel:e})",
+            cpu.solvated_kt,
+            r.solvated_kt
+        );
+        assert_eq!(r.stats_solvated.len(), cpu.stats_solvated.len());
+        let field = solve_focused(&gpu, &spec, &atoms, &params, Medium::Solvated).unwrap();
+        let e = field.energy_kt.expect("the nonlinear functional");
+        assert!((e - r.solvated_kt).abs() < 1e-10 * e.abs(), "{e} vs {}", r.solvated_kt);
+    }
+}

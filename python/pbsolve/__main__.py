@@ -55,6 +55,13 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
         "weighted by the edge length inside the solute, close to second order; mol and vdw surfaces)",
     )
     p.add_argument(
+        "--equation",
+        default="lpbe",
+        choices=["lpbe", "npbe"],
+        help="Poisson-Boltzmann equation of the solvated state: lpbe (linearized, default) or npbe (nonlinear, "
+        "Boltzmann-distributed ions; as APBS npbe)",
+    )
+    p.add_argument(
         "--coulomb",
         default="grid",
         choices=["grid", "analytic"],
@@ -103,6 +110,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         surface=args.surface,
         interface=args.interface,
         coulomb=args.coulomb,
+        equation=args.equation,
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,

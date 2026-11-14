@@ -198,6 +198,35 @@ impl InterfaceMethod {
     }
 }
 
+/// The Poisson–Boltzmann equation of the solvated state (APBS `lpbe` /
+/// `npbe`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Equation {
+    /// Linearized: the mobile ions respond as κ̄² u (APBS `lpbe`, the default).
+    #[default]
+    Linear,
+    /// Nonlinear: Boltzmann-distributed ions, κ̄² Σ_j (c_j q_j / 2I)
+    /// sinh-like terms (APBS `npbe`), solved by Newton's method.
+    Nonlinear,
+}
+
+impl Equation {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "lpbe" => Ok(Self::Linear),
+            "npbe" => Ok(Self::Nonlinear),
+            other => invalid(format!("unknown equation '{other}' (expected 'lpbe' or 'npbe')")),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Linear => "lpbe",
+            Self::Nonlinear => "npbe",
+        }
+    }
+}
+
 /// How ΔG_polar removes the Coulomb potential of the charges, and with it
 /// the grid's self-energy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -262,6 +291,8 @@ pub struct PbParams {
     /// How ΔG_polar removes the Coulomb potential (reference solve or
     /// reaction-field decomposition).
     pub coulomb: CoulombMethod,
+    /// Linearized or nonlinear Poisson–Boltzmann equation.
+    pub equation: Equation,
     pub bcfl: BoundaryCondition,
     /// Charge assignment to the grid.
     pub chgm: ChargeMethod,
@@ -285,6 +316,7 @@ impl Default for PbParams {
             surface: SurfaceMethod::Mol,
             interface: InterfaceMethod::Sharp,
             coulomb: CoulombMethod::Grid,
+            equation: Equation::Linear,
             bcfl: BoundaryCondition::Mdh,
             chgm: ChargeMethod::Trilinear,
             tol: 1.0e-8,
@@ -338,6 +370,9 @@ impl PbParams {
         }
         if self.interface == InterfaceMethod::Fractional && self.surface == SurfaceMethod::HarmonicMol {
             return invalid("interface 'fractional' needs surface 'mol' or 'vdw'");
+        }
+        if self.equation == Equation::Nonlinear && self.coulomb == CoulombMethod::Analytic {
+            return invalid("equation 'npbe' needs coulomb 'grid'");
         }
         if self.tol.is_nan() || self.tol <= 0.0 || self.tol >= 1.0 || self.max_iter == 0 {
             return invalid("tol must be in (0, 1) and max_iter > 0");

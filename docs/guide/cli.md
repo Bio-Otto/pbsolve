@@ -46,6 +46,7 @@ Commands that solve take these options; they are the
 | `--srad` | 1.4 | solvent probe radius (Å) |
 | `--surface` | `mol` | `mol`, `vdw` or `harmonic` |
 | `--interface` | `sharp` | dielectric of the faces the surface cuts: `sharp` (as APBS) or `fractional` (edge-weighted harmonic average, see [the model](model.md#dielectric-boundary)) |
+| `--equation` | `lpbe` | Poisson–Boltzmann equation of the solvated state: `lpbe` (linearized) or `npbe` (nonlinear, as APBS, see [the model](model.md#nonlinear-equation)) |
 | `--coulomb` | `grid` | how ΔG_polar removes the Coulomb potential: `grid` (reference state on the same grid, as APBS) or `analytic` (reaction-field decomposition, one solve instead of two, see [the model](model.md#solvation-energy)) |
 | `--bcfl` | `mdh` | `mdh`, `mdh-fast`, `sdh` or `zero` |
 | `--dime-policy` | `pbsolve` | grid node counts: `pbsolve` (8k+1) or `apbs` (values APBS keeps) |
@@ -166,6 +167,7 @@ pbsolve reads (converted to PQR first).
 | `--surface` | `mol` (default) or `vdw`; `harmonic` has no APBS equivalent |
 | `--bcfl` | `mdh` (default), `mdh-fast` (pbsolve's interpolated `mdh`; APBS runs `mdh`), `sdh` or `zero` |
 | `--chgm` | charge assignment, `spl0` (default), `spl2` or `spl4`, written as APBS `chgm` |
+| `--equation` | `lpbe` (default) or `npbe`, written as the APBS keyword |
 | `--cfac`, `--fadd` | automatic grid sizing ([grids](grids.md)) |
 | `--tol` | pbsolve's CG tolerance, also written as APBS `etol` |
 | `--preconditioner` | pbsolve's preconditioner |

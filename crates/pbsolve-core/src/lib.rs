@@ -36,6 +36,7 @@ pub mod error;
 pub mod grid;
 pub mod molecule;
 pub mod multigrid;
+pub mod nonlinear;
 pub mod operator;
 pub mod params;
 pub mod pb;
@@ -53,11 +54,12 @@ pub use error::{PbError, Result};
 pub use grid::Grid;
 pub use molecule::Atom;
 pub use params::{
-    BoundaryCondition, ChargeMethod, CoulombMethod, InterfaceMethod, IonSpecies, PbParams, Preconditioner,
+    BoundaryCondition, ChargeMethod, CoulombMethod, Equation, InterfaceMethod, IonSpecies, PbParams, Preconditioner,
     SurfaceMethod,
 };
 pub use pb::{
-    coefficient_maps, polar_solvation, solve_focused, solve_with_maps, FieldSolution, Medium, PolarSolvation, Timings,
+    coefficient_maps, polar_solvation, solve_focused, solve_with_maps, solve_with_maps_nonlinear, FieldSolution,
+    Medium, PolarSolvation, Timings,
 };
 pub use solver::{SolveStats, SolverOptions};
 pub use surface::{CoefficientMaps, MolecularSurface};

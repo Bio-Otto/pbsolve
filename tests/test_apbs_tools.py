@@ -110,7 +110,7 @@ def test_parse_input_mol_centering_and_reset(tmp_path, molecule, molecule_pqr):
 
 @pytest.mark.parametrize(
     "line, match",
-    [(" npbe\n", "nonlinear"), (" srfm smol\n", "srfm smol"), (" chgm spl1\n", "chgm spl1"), (" bcfl focus\n", "bcfl")],
+    [(" smpbe\n", "size-modified"), (" srfm smol\n", "srfm smol"), (" chgm spl1\n", "chgm spl1"), (" bcfl focus\n", "bcfl")],
 )
 def test_parse_input_rejects_unsupported(tmp_path, molecule_pqr, line, match):
     path = tmp_path / "x.in"

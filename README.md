@@ -6,7 +6,8 @@
 pbsolve computes electrostatic potentials and polar solvation energies of
 biomolecules from the Poisson–Boltzmann equation, on the CPU or on NVIDIA GPUs,
 and plugs directly into simulation and MM-PBSA workflows. The current release
-solves the linearized equation with finite differences and grid focusing; the
+solves the linearized and the nonlinear equation with finite differences and
+grid focusing; the
 design keeps the physics separate from the compute backends so that further
 solution methods and integrations can be added.
 

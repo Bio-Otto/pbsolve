@@ -40,7 +40,8 @@ def _check(rep, bcfl):
     for st, inj in rep.injection.items():
         # constants alone shift u by ~6e-6 of its scale (APBS' CGS source term)
         assert inj["potential"]["max_rel_to_max"] < 2e-5, st
-        assert abs(inj["energy_rel_unit_corrected"]) < 1e-6, st
+        if "energy_rel_unit_corrected" in inj:  # not for npbe's solvated state
+            assert abs(inj["energy_rel_unit_corrected"]) < 1e-6, st
     assert abs(rep.energies["solvated"]["rel_unit_corrected"]) < SOLVATED_RTOL
     assert abs(rep.energies["reference"]["rel_unit_corrected"]) < REFERENCE_RTOL[bcfl]
     assert rep.passed()
@@ -64,6 +65,36 @@ def test_layered_parity(tmp_path, molecule_pqr, kw):
     _check(rep, kw["bcfl"])
 
 
+@pytest.mark.parametrize(
+    "kw",
+    [
+        dict(ionic_strength=0.15, bcfl="mdh"),
+        dict(ions=[(2.0, 0.05, 2.0), (-1.0, 0.1, 1.8)], bcfl="sdh", pdie=2.0),
+        dict(ionic_strength=0.1, bcfl="zero", surface="vdw", chgm="spl2"),
+    ],
+)
+def test_nonlinear_parity(tmp_path, molecule_pqr, kw):
+    """`npbe`: APBS' Newton solution and free-energy functional, outer terms
+    of the coarser level included."""
+    s = pbsolve.Solver(platform="CPU", grid_spacing=0.6, fadd=10.0, dime_policy="apbs", equation="npbe", **kw)
+    rep = apbs.compare(molecule_pqr, s, workdir=tmp_path / "w")
+    _check(rep, kw["bcfl"])
+    assert "energy_rel" not in rep.injection["solvated"]
+
+
+def test_nonlinear_highly_charged(tmp_path):
+    """A −30 e sphere at 0.1 M: the linearized potential at the ions is −22 kT/e,
+    the nonlinear one −7.5; ΔG_polar differs by ~100 kcal/mol. The small fine
+    box leaves 17 kT of ion energy and 6 kT of field energy to the coarse level."""
+    pqr = write_pqr(tmp_path / "s.pqr", np.array([[0.11, -0.07, 0.05]]), np.array([-30.0]), np.array([4.0]))
+    kw = dict(platform="CPU", grid_spacing=0.5, ionic_strength=0.1, cfac=3.0, fadd=8.0, dime_policy="apbs")
+    lin = apbs.compare(pqr, pbsolve.Solver(**kw), workdir=tmp_path / "l", maps=False, inject=False)
+    non = apbs.compare(pqr, pbsolve.Solver(equation="npbe", **kw), workdir=tmp_path / "n")
+    _check(non, "mdh")
+    assert non.delta_g["apbs"] - lin.delta_g["apbs"] < -90.0
+    assert abs(non.delta_g["rel_unit_corrected"]) < 1e-5
+
+
 def test_three_level_focusing(tmp_path, molecule, molecule_pqr):
     coords, _, radii = molecule
     s = pbsolve.Solver(platform="CPU", ionic_strength=0.1)
@@ -74,6 +105,10 @@ def test_three_level_focusing(tmp_path, molecule, molecule_pqr):
     assert rep.grid["levels"] == 3 and not rep.grid_issues
     assert abs(rep.energies["solvated"]["rel_unit_corrected"]) < SOLVATED_RTOL
     assert abs(rep.energies["reference"]["rel_unit_corrected"]) < REFERENCE_RTOL["mdh"]
+    # npbe: the outer terms of both coarser levels
+    non = pbsolve.Solver(platform="CPU", ionic_strength=0.1, equation="npbe")
+    rep = apbs.compare(molecule_pqr, non, grid=grid, workdir=tmp_path / "n", maps=False, inject=False)
+    assert abs(rep.energies["solvated"]["rel_unit_corrected"]) < SOLVATED_RTOL
 
 
 def test_born_ion(tmp_path):
@@ -133,3 +168,8 @@ def test_run_existing_input(tmp_path, molecule, molecule_pqr):
     assert rep.passed(energy_rtol=1e-4)
     assert len(rep.prints) == 1 and abs(rep.prints[0]["rel"]) < 1e-4
     assert apbs.main(["run", str(path), "--platform", "CPU", "--workdir", str(tmp_path / "cli")]) == 0
+    # The same input with npbe in both blocks.
+    path.write_text(path.read_text().replace("    lpbe", "    npbe"))
+    assert [e.pbe for e in apbs.parse_input(path).elecs] == ["npbe", "npbe"]
+    rep = apbs.run_input(path, platform="CPU", workdir=tmp_path / "npbe")
+    assert rep.passed(energy_rtol=1e-4)

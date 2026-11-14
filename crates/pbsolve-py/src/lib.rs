@@ -11,9 +11,9 @@ use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
 use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, kt_in_kj_per_mol};
 use pbsolve_core::{
     apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_solvation, solve_focused, solve_with_maps,
-    Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps, CoulombMethod, CpuBackend, DimePolicy, Grid,
-    GridSpec, InterfaceMethod, IonSpecies, Medium, PbError, PbParams, PolarSolvation, Preconditioner, SolveStats,
-    SolverOptions, SurfaceMethod,
+    solve_with_maps_nonlinear, Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps, CoulombMethod,
+    CpuBackend, DimePolicy, Equation, Grid, GridSpec, InterfaceMethod, IonSpecies, Medium, PbError, PbParams,
+    PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -131,10 +131,17 @@ impl Engine {
         maps: CoefficientMaps,
         charge: &[f64],
         g_ext: &[f64],
-        temperature: f64,
+        params: &PbParams,
         opts: SolverOptions,
     ) -> Result<(Vec<f64>, SolveStats), PbError> {
-        dispatch!(self, be => solve_with_maps(be, grid, maps, charge, g_ext, temperature, opts))
+        match params.equation {
+            Equation::Linear => {
+                dispatch!(self, be => solve_with_maps(be, grid, maps, charge, g_ext, params.temperature, opts))
+            }
+            Equation::Nonlinear => {
+                dispatch!(self, be => solve_with_maps_nonlinear(be, grid, maps, charge, g_ext, params, opts))
+            }
+        }
     }
 }
 
@@ -541,6 +548,11 @@ impl PyPolarResult {
 ///     field, one solve instead of two; not an APBS option). Affects
 ///     :meth:`polar_solvation` and the functions built on it, not
 ///     :meth:`potential`.
+/// equation : str
+///     The Poisson–Boltzmann equation of the solvated state (APBS keyword):
+///     "lpbe" (linearized) or "npbe" (nonlinear: Boltzmann-distributed ions,
+///     solved by Newton's method; its energy is APBS' free-energy
+///     functional). Without ions both are the same.
 ///
 /// Raises
 /// ------
@@ -702,7 +714,8 @@ impl PySolver {
         ionic_strength = 0.0, ion_radius = 2.0, ions = None,
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
-        preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid"
+        preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid",
+        equation = "lpbe"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -728,6 +741,7 @@ impl PySolver {
         chgm: &str,
         interface: &str,
         coulomb: &str,
+        equation: &str,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -740,6 +754,7 @@ impl PySolver {
             chgm: ChargeMethod::parse(chgm).map_err(to_py)?,
             interface: InterfaceMethod::parse(interface).map_err(to_py)?,
             coulomb: CoulombMethod::parse(coulomb).map_err(to_py)?,
+            equation: Equation::parse(equation).map_err(to_py)?,
             tol,
             max_iter,
             preconditioner: Preconditioner::parse(preconditioner).map_err(to_py)?,
@@ -793,6 +808,7 @@ impl PySolver {
         d.set_item("chgm", p.chgm.as_str())?;
         d.set_item("interface", p.interface.as_str())?;
         d.set_item("coulomb", p.coulomb.as_str())?;
+        d.set_item("equation", p.equation.as_str())?;
         d.set_item("tol", p.tol)?;
         d.set_item("max_iter", p.max_iter)?;
         d.set_item("preconditioner", p.preconditioner.as_str())?;
@@ -1052,7 +1068,8 @@ impl PySolver {
     /// spacing : list of 3 float
     ///     Node spacing in Å.
     /// energy_kt : float
-    ///     Electrostatic energy ½Σqu of that state in kT.
+    ///     Electrostatic energy ½Σqu of that state in kT; for the solvated
+    ///     state of ``equation="npbe"`` with ions, APBS' free-energy functional.
     #[pyo3(signature = (coords, charges, radii, grid = None, reference = false))]
     #[allow(clippy::type_complexity)]
     fn potential<'py>(
@@ -1070,7 +1087,10 @@ impl PySolver {
         let (sol, energy) = py
             .detach(|| -> Result<_, PbError> {
                 let sol = self.engine.field(&atoms, &self.params, &spec, medium)?;
-                let e = electrostatic_energy_kt(&sol, &atoms, self.params.chgm)?;
+                let e = match sol.energy_kt {
+                    Some(e) => e,
+                    None => electrostatic_energy_kt(&sol, &atoms, self.params.chgm)?,
+                };
                 Ok((sol, e))
             })
             .map_err(to_py)?;
@@ -1154,7 +1174,7 @@ impl PySolver {
         Ok(d)
     }
 
-    /// Solve the LPBE with given coefficient maps.
+    /// Solve the PB equation (``equation``: linearized or nonlinear) with given coefficient maps.
     ///
     /// Feeding APBS' own maps here tests pbsolve's discretisation and linear
     /// solver in isolation ("map injection"). Temperature, tolerance,
@@ -1218,9 +1238,8 @@ impl PySolver {
             max_iter: self.params.max_iter,
             preconditioner: self.params.preconditioner,
         };
-        let temperature = self.params.temperature;
         let (u, stats) = py
-            .detach(|| self.engine.with_maps(&grid, maps, &q, &g, temperature, opts))
+            .detach(|| self.engine.with_maps(&grid, maps, &q, &g, &self.params, opts))
             .map_err(to_py)?;
         Ok((to_numpy(py, dims, &u)?, stats.iterations, stats.relative_residual))
     }

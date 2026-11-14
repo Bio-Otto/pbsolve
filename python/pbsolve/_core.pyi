@@ -222,6 +222,11 @@ class Solver:
         field, one solve instead of two; not an APBS option). Affects
         :meth:`polar_solvation` and the functions built on it, not
         :meth:`potential`.
+    equation : str
+        The Poisson–Boltzmann equation of the solvated state (APBS keyword):
+        "lpbe" (linearized) or "npbe" (nonlinear: Boltzmann-distributed ions,
+        solved by Newton's method; its energy is APBS' free-energy
+        functional). Without ions both are the same.
 
     Raises
     ------
@@ -262,6 +267,7 @@ class Solver:
         chgm: str = "spl0",
         interface: str = "sharp",
         coulomb: str = "grid",
+        equation: str = "lpbe",
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:
@@ -452,7 +458,8 @@ class Solver:
         spacing : list of 3 float
             Node spacing in Å.
         energy_kt : float
-            Electrostatic energy ½Σqu of that state in kT.
+            Electrostatic energy ½Σqu of that state in kT; for the solvated
+            state of ``equation="npbe"`` with ions, APBS' free-energy functional.
         """
     def maps(
         self,
@@ -506,7 +513,7 @@ class Solver:
         origin: Sequence[float],
         spacing: Sequence[float],
     ) -> tuple[npt.NDArray[np.float64], int, float]:
-        """Solve the LPBE with given coefficient maps.
+        """Solve the PB equation (``equation``: linearized or nonlinear) with given coefficient maps.
 
         Feeding APBS' own maps here tests pbsolve's discretisation and linear
         solver in isolation ("map injection"). Temperature, tolerance,

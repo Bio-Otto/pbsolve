@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Nonlinear PB (unreleased): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; cost 1.4× (CPU), 2–3× (CUDA); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (unreleased): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
 | Fractional dielectric interface (unreleased): `interface="fractional"` | faces split exactly against an independent computation (≤ 1e-12); default `sharp` bit-identical (CPU, CUDA); device maps = host maps; 10/11 mutations caught; analytic references with `vdw`: observed orders 1.6–2.5 (sharp 1.0–1.2), errors at 0.5 Å −0.14 … −0.71 % (sharp −2.3 … −4.7 %); with `mol` a +0.13–0.18 % plateau from APBS' sampled probe positions (gone with `sdens=100`); 1YCR placement sd 5–10× smaller, same extrapolated limit as sharp, ΔΔG_bind bias at 0.5 Å +2.7 instead of +13 kcal/mol; calculation 1.5× slower on CUDA, same on CPU; see *Fractional dielectric interface* |
 | Error estimates (unreleased): `estimate_error`, `pbsolve solvation --placements --extrapolate` | first placement = ordinary calculation bit for bit; on the analytic references, extrapolation from 0.35 and 0.25 Å leaves ≤ 0.3 % (means 1.1–1.8 % off), estimated errors within 30 % of the true ones; from 0.5/0.35 Å off by up to 2×; 1YCR: ΔG_polar −1234.7 / −1205.6 / −1190.5 kcal/mol at 0.48 / 0.34 / 0.25 Å, extrapolated −1152, ΔΔG_bind bias ~+6 kcal/mol at 0.25 Å; see *Error estimates* |
@@ -2427,6 +2428,182 @@ grid; mean (sd) in kcal/mol):
 
 Reproduce: `python scripts/validate_analytic.py --placements 10 --interface
 fractional --coulomb analytic [--surface vdw] --platform CUDA`.
+
+## Nonlinear Poisson–Boltzmann (`equation="npbe"`)
+
+**Change.** `Solver(equation="npbe")` and `--equation npbe` solve the
+nonlinear PB equation for the solvated state, as APBS `npbe`:
+* The reference state (`pdie`, no ions) stays linear. Without ions `npbe` is
+  `lpbe` bit for bit.
+* `pbsolve apbs compare` and `run` now write, read and compare `npbe`, so
+  APBS inputs with `npbe` are no longer refused.
+* `Solver.potential` returns the nonlinear potential and, as its energy,
+  the free-energy functional.
+* `Solver.solve_maps` solves the nonlinear equation for a solver with
+  `equation="npbe"`.
+* `equation="lpbe"` stays the default and is bit-identical to the previous
+  commit. `npbe` needs `coulomb="grid"`.
+
+**Method.** On the interior nodes of a level the discrete equation is
+(APBS `Vc_vecpmg`, with the volume scaling of the linear operator):
+
+F(u) = A_ε u + V N(u) − 4π l_B q = 0,
+N(u) = κ̄²_c Σ_j −(c_j q_j / 2I) e^{−q_j u}.
+
+* **Terms.** A_ε is the 7-point operator without its ion term, κ̄²_c the ion
+  map, and c_j, q_j and I the ion concentrations, valences and ionic
+  strength. For a 1:1 salt N = κ̄² sinh u. The exponents are clamped to ±85
+  as in APBS.
+* **Newton steps.** Newton's method solves J δ = −F with
+  J = A_ε + V N'(u) and N'(u) = κ̄²_c Σ_j (c_j q_j² / 2I) e^{−q_j u}. J is
+  the linear operator with κ̄² replaced by N'(u), so every step is an
+  ordinary linear solve: multigrid CG on the CPU or the GPU, unchanged. The
+  Boltzmann terms and the residual are evaluated on the host.
+* **Damping and accuracy.** Steps are halved until ‖F‖ decreases (Armijo),
+  which is the damping the roadmap asks for [Holst & Saied 1995]. The
+  iteration starts from the linearized solution solved to 1e-3. It is
+  inexact [Dembo et al. 1982; Holst et al. 1994]: each step's linear solve
+  stops at η = min(0.1, ‖F‖/‖b‖), and no tighter than the final target
+  ‖F‖ ≤ `tol`·‖b‖ needs. This cut the CG iterations of 1YCR from 36 to 15
+  per level, with the same energy to 1e-6 kcal/mol.
+
+**Energy.** APBS' free-energy functional (`Vpmg_energy` for `npbe` with
+ions) is the energy-density form of Sharp & Honig (1990):
+
+G = Σ q u − ½ Σ_faces ε (Δu)² c_a / 4π l_B − V Σ_nodes κ̄²_c Σ_j (c_j / 2I)(e^{−q_j u} − 1) / 4π l_B.
+
+* **Stationary.** Its gradient is −F/4π l_B, so G is stationary at the
+  discrete solution (tested).
+* **Outer terms.** APBS adds, for every coarser focusing level, the
+  dielectric and ion terms of its nodes outside the next finer box
+  (`Vpmg_extEnergy`). This is invisible with `lpbe`, whose energy is
+  ½ Σ q u, but with salt it is a sizeable part of the functional: 17 kT of
+  ion energy and 6 kT of field energy for a −30 e sphere in a small fine
+  box.
+* **APBS quirks.** pbsolve reproduces the coarse nodes' weights
+  (`Vpmg_setPart`: a node with any share of the finer box counts there)
+  and APBS' face loop.
+
+**Choices, with the evidence:**
+* **Prototype first.** A Python prototype on `Solver.maps` and
+  `solve_maps` first matched APBS 3.4.1's potential (6.5e-6, its
+  constants). The energies differed by 1.9e-5. With APBS' source constant
+  emulated, Σ q u agreed to 7e-9 and the dielectric term to 1e-7, but the
+  ion term was 0.34 % high. APBS' log showed the outer terms; adding them
+  gave 7e-9 and 5e-6. The Rust implementation equals the prototype to
+  5e-15.
+* **Box dependence.** At weak potentials the potential is the linearized
+  one, to 1.6e-10 of its maximum (and ∝ q²). The `npbe` and `lpbe` energies
+  nevertheless differ by up to 0.09 % on small boxes, independently of the
+  charge scale. The difference shrinks with the box (9e-4 → 5e-5 for fadd
+  12 → 30 Å), so it is the field energy the functional misses beyond the
+  boxes, not a nonlinear effect. APBS has the same property. The
+  Sharp–Honig volume form ½ Σ q u − ∫[½ ρ_ion u + kT Σ c_j (e^{−q_j u} − 1)]
+  has no boundary term and converges faster with the box:
+
+  | npbe − lpbe (kcal/mol) | coarse box | APBS functional | volume form |
+  |---|---|---|---|
+  | −8 e sphere, 0.15 M | 28 Å (default) | −1.173 | −1.423 |
+  | | 38 Å | −1.542 | −1.594 |
+  | | 48 Å | −1.632 | −1.643 |
+  | | 68 Å | −1.654 | −1.655 |
+  | −20 e helix, 0.15 M | 42 Å (default) | −2.195 | −2.539 |
+  | | 88 Å | −2.879 | −2.880 |
+  | | 132 Å | −2.875 | −2.875 |
+
+  pbsolve keeps APBS' functional, which matches APBS. For strongly
+  charged molecules the default boxes miss 20–30 % of the nonlinear
+  correction; enlarge `cfac` and `fadd`. The volume form is a possible
+  opt-in.
+
+**APBS 3.4.1** (`pbsolve apbs compare --equation npbe`, 0.5 Å, `etol`
+1e-10, CUDA; the maps were identical in every case):
+
+| System | levels | ΔG_polar npbe, pbsolve / APBS (kcal/mol) | rel. (APBS units) | solvated energy rel. (APBS units) | npbe − lpbe, pbsolve / APBS |
+|---|---|---|---|---|---|
+| 1YCR, 0.15 M | 2 | −1221.2952 / −1221.3095 | −4.8e-7 | −5.0e-11 | — |
+| −8 e sphere (a = 4 Å), 0.15 M | 1 | −2673.1706 / −2673.1952 | −3.0e-6 | −8.3e-11 | −1.1728 / −1.1729 |
+| −20 e helix (20 phosphates), 0.15 M | 2 | −5752.7325 / −5752.7723 | −5.3e-6 | −2.3e-9 | −2.2046 / −2.2047 |
+| −30 e sphere, 0.1 M | 1 | −37657.0556 / −37657.4025 | −3.0e-6 | +1.6e-10 | −97.50 / — |
+| same, small fine box (cfac 3, fadd 8) | 2 | −37670.9226 / −37671.2508 | −3.5e-6 | +9.7e-12 | — |
+
+* **The solvated nonlinear energies agree to ≤ 2.3e-9 in APBS units.**
+  The remaining 3–5e-6 of ΔG_polar is the reference state's `mdh` boundary
+  constants (see *Comparing with APBS*), the same as with `lpbe`.
+* **The nonlinear correction agrees to 1e-4 kcal/mol** (npbe − lpbe, both
+  programs).
+* **The potentials** differ by 6.3–6.5e-6 of their maximum, APBS' source
+  constant; injected into pbsolve's solver, APBS' own maps give the same.
+* **Strong nonlinearity.** At the −30 e sphere the linearized potential
+  at the ions is −21.9 kT/e, the nonlinear one −7.5. Newton converges in
+  32 CG iterations in total.
+
+**Checks:**
+* Rust (`nonlinear.rs`, 6 tests):
+  * 1:1 salt terms are sinh and cosh, clamped at 85; any electroneutral
+    salt has N(0) = 0 and N'(0) = 1;
+  * `Vpmg_setPart` shares;
+  * the functional is stationary at the solution (halving a perturbation
+    quarters the change, ratio 4.00 ± 0.05);
+  * weak potentials give the linearized potential to O(q²), with an energy
+    gap that does not depend on the charge scale;
+  * strong charges converge, with a more negative ΔG_polar;
+  * the outer terms equal an independent sum over the nodes beyond the
+    finer box.
+* Mutations caught: 15/15. In `nonlinear.rs`, 12:
+  * signs, powers and clamp of the Boltzmann terms;
+  * the energy's factors and charges;
+  * the Newton direction and the residual's volume;
+  * the outer weights and shares, the face weights.
+
+  In `pb.rs`, 3: the outer terms dropped or added with the wrong sign,
+  caught by the APBS tests after the functional was computed in one place
+  for `polar_solvation` and `potential`.
+* `tests/test_nonlinear.py` (6 tests, 2 s):
+  * weak and strong potentials;
+  * the energies and `potential()` on a two-level grid;
+  * `solve_maps`;
+  * the parameter and the APBS keyword;
+  * the command line.
+* `tests/test_apbs_parity.py`, with APBS:
+  * `npbe` on the synthetic molecule with a 1:1 salt (`mdh`), a 2:1 salt
+    (`sdh`, `pdie` 2) and `zero`/`vdw`/`spl2`;
+  * three focusing levels;
+  * the −30 e sphere;
+  * an existing APBS input with `npbe` (`pbsolve apbs run`).
+* GPU: `nonlinear_pb_matches_the_cpu` (one to three levels, 1:1 and 2:1
+  salts): ≤ 1e-10. The field solve's functional equals
+  `polar_solvation`'s.
+* Default path: the fingerprint set is bit-identical on CPU and CUDA.
+
+**Cost** (0.15 M, default `tol`, seconds per calculation; the reference
+state is the same):
+
+| | lpbe | npbe | CG iterations per level, lpbe / npbe |
+|---|---|---|---|
+| 1YCR 0.5 Å, CUDA | 0.20 | 0.41 | 12 / 15 |
+| 1YCR 0.5 Å, CPU | 1.56 | 2.16 | 12 / 15 |
+| 1YCR 0.25 Å, CUDA | 1.04 | 2.67 | 13 / 16 |
+| 1YCR 0.25 Å, CPU | 13.1 | 18.1 | 13 / 16 |
+| 5DK3 0.5 Å, CUDA | 4.27 | 12.6 | 19–20 / 38 |
+
+On the CPU `npbe` costs 1.4 times `lpbe`. On CUDA it costs 2–3 times as
+much, for three reasons:
+* the multigrid hierarchy is rebuilt for every Newton step (5DK3: 2.2 s
+  instead of 0.43);
+* the Boltzmann terms and residuals are evaluated on the host, and u and δ
+  cross the bus every step;
+* the operator is reassembled every step.
+
+Reusing the hierarchy across steps and device kernels for the Boltzmann
+terms are the follow-ups.
+
+**Not done:** the Sharp–Honig volume form as an option; ion-size effects
+(size-modified PB, roadmap 4.11); forces.
+
+Reproduce: `pbsolve apbs compare complex.pqr --ionic-strength 0.15
+--equation npbe --spacing 0.5`; `pytest tests/test_apbs_parity.py -k
+nonlinear`.
 
 ## Sensitivity of the sharp dielectric boundary
 
