@@ -194,8 +194,10 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   summation order of `dot`, bit-identical; CPU calculations 1.03–1.07×
   (1.13× with Jacobi), the CUDA CG vector kernels 1.11×. A p with pᵀAp stays
   two kernels on CUDA: on the reduction grid the stencil loses its L2 reuse.
-* *Next:* measure both fused steps on an idle GPU. The host `mdh` sum (~3 s
-  for 5DK3) still bounds CUDA calculations with the default boundary.
+* Both fusions measured on an idle GPU (done): solve stage 1.21–1.26×,
+  calculation 1.09–1.12×, energies bit-identical. With the default `mdh`
+  boundary the host's sum (5DK3 ~2.2 s of 4.2 s) is now the largest stage
+  of a CUDA calculation; `mdh-fast` avoids it.
 
 ### v0.2 — Accuracy
 

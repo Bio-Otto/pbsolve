@@ -66,8 +66,8 @@ should update the status table below.
 | GPU memory kept during a calculation (unreleased) | The CUDA memory pool keeps the buffers a calculation frees between focusing levels and returns them when it ends (release threshold raised by the calculation's `worker_device_bytes`, restored and trimmed at the end, also on errors): exactly one hold per calculation (core test with a recording backend, CI), threshold and pool usage back to idle after single, failing and concurrent calculations (GPU test), 10/10 mutations caught; every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); APBS 1YCR on CUDA unchanged; solve stage 1.05–1.10× faster, a calculation 1.03–1.08× with `sdh` on a shared GPU; see *GPU memory kept during a calculation* |
 | `mdh` boundary vectorised and overlapped (unreleased) | Exact `mdh` sums on AVX2 (bit-identical to the scalar sums and the direct `dh` sum) and, on CUDA, the solvated state's surface and outermost boundary built while the reference state is solved: every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds), also from a recording device backend with 1 and 3 threads (CI); 6/6 mutations caught; APBS 1YCR on CUDA unchanged; CUDA calculation 1.21–1.25× faster with `mdh` (5DK3 6.60 → 5.28 s), CPU boundary 1.18–1.24×; a GPU `mdh` kernel ruled out on consumer GPUs; see *The `mdh` boundary: vectorised and overlapped* |
 | Solvated setup before its boundary (unreleased) | On CUDA the solvated state's outermost level builds maps, operator and multigrid before waiting for its boundary from the background (`pcg_setup` + `PreparedPcg::solve` = `pcg_on` bit for bit, also for b = 0): a test backend that delivers the boundary only during the setup proves the order; every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); 5/5 mutations caught; APBS 1YCR on CUDA unchanged; CUDA `mdh` 1.05–1.06× (5DK3 5.42 → 5.10 s); see *Solvated setup before its boundary* |
-| Fused multigrid smoother (unreleased) | The V-cycle's residuals and Chebyshev updates run as one pass each (`Backend::residual`, `chebyshev_first`, `chebyshev_next`; CPU loops and CUDA kernels with the separate operations' expressions): equal bit for bit to the step-by-step smoother (f64 and f32, degrees 1–3, semi-coarsening; CPU = CUDA for every step and a whole V-cycle) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); 6/6 mutations caught; Born table and APBS 1YCR on CUDA unchanged; CPU 1.17–1.25× per calculation, CUDA solve stage 1.17–1.26× (calculation 1.05–1.11×) on a shared GPU; see *Fused multigrid smoother* |
-| Fused CG steps (unreleased) | The CG update (x, r, ‖r‖², rᵀz, the f32 copy of r), the widening of the V-cycle's result with rᵀz and, on the CPU, A p with pᵀAp run as one pass each (`Backend::cg_update`, `promote_dot`, `apply_dot`), with the summation order of `dot`: the new CG loop equals the old one (kept in the tests) and a solve through `backend::Stepwise` bit for bit (3 preconditioners, 5 grids, CPU and CUDA), and so does every step (CPU and CUDA, both precisions); every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); 12/12 mutations caught; Born table and APBS 1YCR on CUDA unchanged; CPU 1.03–1.07× per calculation (1.13× with `jacobi`), CUDA f64 CG kernels 1.11× (2–4 % of the solve stage) on a shared GPU; see *Fused CG steps* |
+| Fused multigrid smoother (unreleased) | The V-cycle's residuals and Chebyshev updates run as one pass each (`Backend::residual`, `chebyshev_first`, `chebyshev_next`; CPU loops and CUDA kernels with the separate operations' expressions): equal bit for bit to the step-by-step smoother (f64 and f32, degrees 1–3, semi-coarsening; CPU = CUDA for every step and a whole V-cycle) and every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); 6/6 mutations caught; Born table and APBS 1YCR on CUDA unchanged; CPU 1.17–1.25× per calculation, CUDA solve stage 1.17–1.26× (calculation 1.05–1.11×) on a shared GPU and 1.16–1.26× on an idle one; see *Fused multigrid smoother* |
+| Fused CG steps (unreleased) | The CG update (x, r, ‖r‖², rᵀz, the f32 copy of r), the widening of the V-cycle's result with rᵀz and, on the CPU, A p with pᵀAp run as one pass each (`Backend::cg_update`, `promote_dot`, `apply_dot`), with the summation order of `dot`: the new CG loop equals the old one (kept in the tests) and a solve through `backend::Stepwise` bit for bit (3 preconditioners, 5 grids, CPU and CUDA), and so does every step (CPU and CUDA, both precisions); every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); 12/12 mutations caught; Born table and APBS 1YCR on CUDA unchanged; CPU 1.03–1.07× per calculation (1.13× with `jacobi`), CUDA f64 CG kernels 1.11× (2–4 % of the solve stage) on a shared GPU, solve stage 1.00–1.06× on an idle one; see *Fused CG steps* |
 | Batched solves (unreleased) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (unreleased): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark | **not yet run** |
@@ -1423,8 +1423,17 @@ other work was about 1; the GPU was shared at 79–97 % utilisation.
   GPU waits longer for the solvated state's boundary, which the host builds
   (1TII: 0.47–0.53 → 0.57 s). With `mdh-fast`, whose boundary takes 0.2 s,
   5DK3 gains 1.11×.
-* The CUDA numbers come from a shared GPU and should be repeated on an idle
-  one.
+* The CUDA numbers come from a shared GPU. On the idle GPU (no other job,
+  4 % utilisation before the run; two rounds against `54a0f8b`, energies
+  bit-identical) the solve stage gains 1.16–1.26× as well:
+
+  | Calculation | Solve stage before → after (s) | Gain |
+  |---|---|---|
+  | 1YCR `multigrid-f32` | 0.105 → 0.089 | 1.18× |
+  | 1YCR `multigrid` | 0.167 → 0.133 | 1.26× |
+  | 1YCR `jacobi` (no V-cycle) | 1.137 → 1.141 | 1.00× |
+  | 1TII `multigrid-f32` | 0.710 → 0.587 | 1.21× |
+  | 5DK3 `multigrid-f32`, `mdh` / `mdh-fast` | 1.603 → 1.379 / 1.591 → 1.339 | 1.16× / 1.19× |
 
 ## Fused CG steps
 
@@ -1544,8 +1553,16 @@ was shared at 75–98 % utilisation.
 * On CUDA the f64 CG kernels of a 1TII calculation take 198 ms instead of
   219 ms (nsys, all kernels 878 → 859 ms). That is 2–4 % of the solve stage
   and within the noise of a shared GPU for most rows; `jacobi` and
-  `mdh-fast` show 1.03–1.04×. The CUDA numbers should be repeated on an
-  idle GPU.
+  `mdh-fast` show 1.03–1.04×.
+* On the idle GPU (same runs as in *Fused multigrid smoother*, against
+  `6ae134a`, energies bit-identical) the solve stage gains 1.00–1.06×:
+  1YCR `multigrid-f32` 0.089 → 0.084 s, `jacobi` 1.141 → 1.095 s, 5DK3
+  1.379 → 1.329 s (`mdh`) and 1.339 → 1.302 s (`mdh-fast`); 1YCR `multigrid`
+  and 1TII are unchanged. Both fusions together: solve stage 1.21–1.26× with
+  multigrid, a calculation 1.09–1.12× (1YCR 0.209 → 0.192 s, 1TII
+  1.571 → 1.419 s, 5DK3 4.60 → 4.19 s with `mdh`, 2.52 → 2.26 s with
+  `mdh-fast`). With `mdh` the host's boundary sum (5DK3 2.1–2.3 s) is now
+  half of a large calculation.
 
 ## GPU runtime: NVRTC selection and CUBIN kernels
 
