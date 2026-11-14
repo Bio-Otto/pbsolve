@@ -34,7 +34,7 @@ use crate::cpu::CpuBackend;
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::molecule::{dist2, Atom};
-use crate::params::{PbParams, SurfaceMethod};
+use crate::params::{InterfaceMethod, PbParams, SurfaceMethod};
 use crate::spatial::CellList;
 use crate::units::kappa_bar_squared;
 use rayon::prelude::*;
@@ -110,6 +110,11 @@ pub fn maps_on<B: Backend>(
     let (pdie, sdie) = (params.pdie, params.sdie);
     let h = grid.spacing;
     let [eps_x, eps_y, eps_z] = match params.surface {
+        SurfaceMethod::Mol | SurfaceMethod::Vdw if params.interface == InterfaceMethod::Fractional => {
+            // Not an APBS option; built on the host.
+            let [x, y, z] = fractional_faces(grid, surf, pdie, sdie);
+            [be.upload_owned(x)?, be.upload_owned(y)?, be.upload_owned(z)?]
+        }
         SurfaceMethod::Mol | SurfaceMethod::Vdw => exactly(be.mark_maps(
             grid,
             &[[0.5 * h[0], 0.0, 0.0], [0.0, 0.5 * h[1], 0.0], [0.0, 0.0, 0.5 * h[2]]],
@@ -172,6 +177,159 @@ fn harmonic_faces(grid: &Grid, node: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     }
     let [x, y, z] = maps;
     (x, y, z)
+}
+
+/// Face dielectrics by the fractional harmonic average (`interface =
+/// "fractional"`): the grid edge between a face's two nodes is split exactly
+/// into its lengths inside and outside the solute of `surf` (solute spheres
+/// minus probe spheres), and ε = h / (ℓ_in/pdie + ℓ_out/sdie), the effective
+/// dielectric of that edge in one dimension. A face whose edge does not meet
+/// the surface gets `pdie` or `sdie`, as with the sharp marking.
+pub fn fractional_faces(grid: &Grid, surf: &MolecularSurface, pdie: f64, sdie: f64) -> [Vec<f64>; 3] {
+    let cells = |s: &[Sphere]| {
+        let centers: Vec<[f64; 3]> = s.iter().map(|s| s.center).collect();
+        let rmax = s.iter().map(|s| s.radius).fold(0.0, f64::max);
+        (CellList::new(&centers, rmax.max(1.0)), rmax)
+    };
+    let (solute, rsol) = cells(&surf.solute);
+    let (probes, rprobe) = cells(&surf.probes);
+    // Node classes for the edges that start there (any axis, length <= reach):
+    // `near` = 0, the edge cannot meet a solute sphere (sdie); `deep` = 1, it
+    // lies inside one and meets no probe (pdie). Only the rest is split.
+    let reach = grid.spacing.iter().copied().fold(0.0, f64::max) * (1.0 + 1e-6) + 1e-9;
+    let grown = |s: &[Sphere], d: f64| -> Vec<Sphere> {
+        s.iter()
+            .filter(|s| s.radius + d > 0.0)
+            .map(|s| Sphere {
+                center: s.center,
+                radius: s.radius + d,
+            })
+            .collect()
+    };
+    let near = mark_map(grid, [0.0; 3], 0.0, &[(&grown(&surf.solute, reach), 1.0)]);
+    let deep = mark_map(
+        grid,
+        [0.0; 3],
+        0.0,
+        &[(&grown(&surf.solute, -reach), 1.0), (&grown(&surf.probes, reach), 0.0)],
+    );
+    let [nx, ny, _] = grid.dims;
+    [0, 1, 2].map(|axis| {
+        let h = grid.spacing[axis];
+        let mut map = vec![sdie; grid.len()];
+        map.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+            let (mut inner, mut carved) = (Vec::new(), Vec::new());
+            for j in 0..ny {
+                for i in 0..nx {
+                    let node = i + nx * (j + ny * k);
+                    if near[node] == 0.0 {
+                        continue;
+                    }
+                    if deep[node] == 1.0 {
+                        plane[i + nx * j] = pdie;
+                        continue;
+                    }
+                    let p = [0, 1, 2].map(|a| grid.origin[a] + [i, j, k][a] as f64 * grid.spacing[a]);
+                    let mut mid = p;
+                    mid[axis] += 0.5 * h;
+                    // Lengths along the edge, t in [0, h]: inside some solute sphere ...
+                    inner.clear();
+                    let covered = solute.any_near(mid, rsol + 0.5 * h, |n| match chord(&surf.solute[n], p, axis, h) {
+                        Some((t0, t1)) if t0 <= 0.0 && t1 >= h => true,
+                        Some(iv) => {
+                            inner.push(iv);
+                            false
+                        }
+                        None => false,
+                    });
+                    if covered {
+                        inner.clear();
+                        inner.push((0.0, h));
+                    }
+                    let length = merge(&mut inner);
+                    if length <= 0.0 {
+                        continue;
+                    }
+                    // ... minus the parts inside a probe sphere (one probe often removes all).
+                    let (first, last) = (inner[0].0, inner[inner.len() - 1].1);
+                    carved.clear();
+                    let cleared =
+                        probes.any_near(mid, rprobe + 0.5 * h, |n| match chord(&surf.probes[n], p, axis, h) {
+                            Some((t0, t1)) if t0 <= first && t1 >= last => true,
+                            Some(iv) => {
+                                carved.push(iv);
+                                false
+                            }
+                            None => false,
+                        });
+                    if cleared {
+                        continue;
+                    }
+                    merge(&mut carved);
+                    let f = (length - overlap(&inner, &carved)) / h;
+                    plane[i + nx * j] = if f >= 1.0 {
+                        pdie
+                    } else if f <= 0.0 {
+                        sdie
+                    } else {
+                        1.0 / (f / pdie + (1.0 - f) / sdie)
+                    };
+                }
+            }
+        });
+        map
+    })
+}
+
+/// The part `(t0, t1)`, 0 ≤ t0 < t1 ≤ h, of the segment `p + t e_axis`
+/// (0 ≤ t ≤ h) inside the sphere, if any.
+#[inline]
+fn chord(s: &Sphere, p: [f64; 3], axis: usize, h: f64) -> Option<(f64, f64)> {
+    let d2: f64 = (0..3)
+        .filter(|&a| a != axis)
+        .map(|a| (p[a] - s.center[a]).powi(2))
+        .sum();
+    let r2 = s.radius * s.radius;
+    if d2 >= r2 {
+        return None;
+    }
+    let half = (r2 - d2).sqrt();
+    let c = s.center[axis] - p[axis];
+    let (t0, t1) = ((c - half).max(0.0), (c + half).min(h));
+    (t1 > t0).then_some((t0, t1))
+}
+
+/// Sorts and merges intervals in place into disjoint ones; returns their total length.
+fn merge(iv: &mut Vec<(f64, f64)>) -> f64 {
+    iv.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let mut n = 0;
+    for m in 0..iv.len() {
+        if n > 0 && iv[m].0 <= iv[n - 1].1 {
+            iv[n - 1].1 = iv[n - 1].1.max(iv[m].1);
+        } else {
+            iv[n] = iv[m];
+            n += 1;
+        }
+    }
+    iv.truncate(n);
+    iv.iter().map(|(a, b)| b - a).sum()
+}
+
+/// Total length of the intersection of two sorted, disjoint interval lists.
+fn overlap(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
+    let (mut i, mut j, mut total) = (0, 0, 0.0);
+    while i < a.len() && j < b.len() {
+        let (lo, hi) = (a[i].0.max(b[j].0), a[i].1.min(b[j].1));
+        if hi > lo {
+            total += hi - lo;
+        }
+        if a[i].1 < b[j].1 {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    total
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -460,6 +618,80 @@ mod tests {
         assert_eq!(vdw[node], 80.0);
         // Far away (y = 3.9) is solvent for both.
         assert_eq!(ses[grid.index(40, 76, 40)], 80.0);
+    }
+
+    /// Fraction of an edge inside the solute, independently of `fractional_faces`:
+    /// split the edge at every sphere crossing and classify the midpoint of each piece.
+    fn sampled_fraction(surf: &MolecularSurface, p: [f64; 3], axis: usize, h: f64) -> f64 {
+        let mut ts = vec![0.0, h];
+        for s in surf.solute.iter().chain(&surf.probes) {
+            let d2: f64 = (0..3)
+                .filter(|&a| a != axis)
+                .map(|a| (p[a] - s.center[a]).powi(2))
+                .sum();
+            if d2 < s.radius * s.radius {
+                let half = (s.radius * s.radius - d2).sqrt();
+                ts.extend([s.center[axis] - p[axis] - half, s.center[axis] - p[axis] + half]);
+            }
+        }
+        ts.retain(|t| (0.0..=h).contains(t));
+        ts.sort_by(f64::total_cmp);
+        let inside = |q: [f64; 3], spheres: &[Sphere]| spheres.iter().any(|s| dist2(q, s.center) < s.radius * s.radius);
+        let mut length = 0.0;
+        for w in ts.windows(2) {
+            let mut q = p;
+            q[axis] += 0.5 * (w[0] + w[1]);
+            if inside(q, &surf.solute) && !inside(q, &surf.probes) {
+                length += w[1] - w[0];
+            }
+        }
+        length / h
+    }
+
+    #[test]
+    fn fractional_faces_split_every_edge_exactly() {
+        let atoms = [
+            atom([-1.6, 0.1, 0.0], 1.7),
+            atom([1.5, 0.0, 0.2], 1.6),
+            atom([0.0, 2.1, -0.3], 1.5),
+            atom([0.2, 0.9, 0.4], 0.0),
+        ];
+        let (pdie, sdie) = (2.0, 80.0);
+        for srad in [1.4, 0.0] {
+            let surf = MolecularSurface::new(&atoms, srad, 4.0, 1.9);
+            let grid = Grid::centered([0.05, 0.4, 0.1], [12.0, 10.5, 9.0], [25, 23, 21]).unwrap();
+            let maps = fractional_faces(&grid, &surf, pdie, sdie);
+            let mut partial = 0;
+            for (axis, map) in maps.iter().enumerate() {
+                let h = grid.spacing[axis];
+                let sharp = {
+                    let mut shift = [0.0; 3];
+                    shift[axis] = 0.5 * h;
+                    surf.dielectric_map(&grid, shift, pdie, sdie)
+                };
+                for k in 0..21 {
+                    for j in 0..23 {
+                        for i in 0..25 {
+                            let n = grid.index(i, j, k);
+                            let p = [0, 1, 2].map(|a| grid.origin[a] + [i, j, k][a] as f64 * grid.spacing[a]);
+                            let f = sampled_fraction(&surf, p, axis, h);
+                            let expected = 1.0 / (f / pdie + (1.0 - f) / sdie);
+                            assert!(
+                                (map[n] - expected).abs() <= 1e-12 * expected,
+                                "{srad} {axis} {i} {j} {k}"
+                            );
+                            if f == 0.0 || f == 1.0 {
+                                // The edge does not meet the surface: as the sharp marking.
+                                assert_eq!(map[n], sharp[n], "{srad} {axis} {i} {j} {k}");
+                            } else {
+                                partial += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(partial > 300, "{srad}: {partial} cut faces");
+        }
     }
 
     #[test]

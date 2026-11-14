@@ -166,6 +166,38 @@ impl ChargeMethod {
     }
 }
 
+/// Dielectric constant of the faces that the molecular surface cuts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InterfaceMethod {
+    /// `pdie` or `sdie` by the side of the surface the face's midpoint lies
+    /// on (APBS `srfm mol`, the default); first order.
+    #[default]
+    Sharp,
+    /// Harmonic average of `pdie` and `sdie` weighted by the lengths of the
+    /// face's grid edge inside and outside the solute, computed exactly
+    /// from the spheres of the surface. Not an APBS option.
+    Fractional,
+}
+
+impl InterfaceMethod {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "sharp" => Ok(Self::Sharp),
+            "fractional" => Ok(Self::Fractional),
+            other => invalid(format!(
+                "unknown interface method '{other}' (expected 'sharp' or 'fractional')"
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sharp => "sharp",
+            Self::Fractional => "fractional",
+        }
+    }
+}
+
 /// One mobile ion species (APBS `ion charge .. conc .. radius ..`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IonSpecies {
@@ -192,6 +224,8 @@ pub struct PbParams {
     /// Surface sphere density in points/Å² (molecular surface construction).
     pub sdens: f64,
     pub surface: SurfaceMethod,
+    /// Dielectric of the faces the surface cuts (`mol` and `vdw` only).
+    pub interface: InterfaceMethod,
     pub bcfl: BoundaryCondition,
     /// Charge assignment to the grid.
     pub chgm: ChargeMethod,
@@ -213,6 +247,7 @@ impl Default for PbParams {
             srad: 1.4,
             sdens: 10.0,
             surface: SurfaceMethod::Mol,
+            interface: InterfaceMethod::Sharp,
             bcfl: BoundaryCondition::Mdh,
             chgm: ChargeMethod::Trilinear,
             tol: 1.0e-8,
@@ -263,6 +298,9 @@ impl PbParams {
         }
         if self.srad < 0.0 || self.sdens <= 0.0 {
             return invalid("srad must be >= 0 and sdens > 0");
+        }
+        if self.interface == InterfaceMethod::Fractional && self.surface == SurfaceMethod::HarmonicMol {
+            return invalid("interface 'fractional' needs surface 'mol' or 'vdw'");
         }
         if self.tol.is_nan() || self.tol <= 0.0 || self.tol >= 1.0 || self.max_iter == 0 {
             return invalid("tol must be in (0, 1) and max_iter > 0");

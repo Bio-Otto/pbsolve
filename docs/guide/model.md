@@ -61,6 +61,27 @@ nodes (one map per axis). `surface` defines it:
 
 The defaults `srad=1.4` and `sdens=10.0` are APBS' usual values.
 
+With `"mol"` and `"vdw"`, `interface` sets the dielectric of the faces the
+surface cuts:
+
+| `interface` | Value of a cut face | Accuracy |
+|---|---|---|
+| `"sharp"` (default) | `pdie` or `sdie`, by the side of the surface the face's midpoint lies on | first order; as APBS |
+| `"fractional"` | h / (ℓ_in/`pdie` + ℓ_out/`sdie`), where ℓ_in and ℓ_out are the lengths of the face's grid edge inside and outside the solute, computed exactly from the atomic and probe spheres | close to second order; not an APBS option |
+
+`"fractional"` makes energies far less dependent on the spacing and on where
+the molecule sits on the grid. For 1YCR at 0.5 Å the spread over grid
+placements falls 5 times, and ΔΔG_polar of binding lies within 3 kcal/mol of
+its zero-spacing limit instead of 13 ([validation](../VALIDATION)). The
+solver itself is unchanged. The maps take extra time on the host: a
+calculation runs about 1.5 times as long on a GPU and as long on the CPU.
+Keep `"sharp"` to reproduce APBS.
+
+```python
+accurate = pbsolve.Solver(ionic_strength=0.15, interface="fractional")
+print(f"{accurate.polar_solvation(coords, charges, radii).energy:.2f} kcal/mol")
+```
+
 ## Charges
 
 Point charges are spread onto the grid nodes; `chgm` chooses how, with

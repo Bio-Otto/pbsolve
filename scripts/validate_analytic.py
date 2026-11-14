@@ -2,6 +2,7 @@
 """Observed convergence order of ΔG_polar against analytic references.
 
     python scripts/validate_analytic.py [--platform CPU] [--placements 6] [--surface mol] [--chgm spl0]
+                                        [--interface sharp]
 
 Born ion, Kirkwood spheres (`pbsolve.analytic.kirkwood_energy`) and two
 spheres (`two_sphere_energy`). With a sharp dielectric boundary the error
@@ -64,6 +65,7 @@ def main():
     ap.add_argument("--placements", type=int, default=6)
     ap.add_argument("--surface", default="mol")
     ap.add_argument("--chgm", default="spl0", choices=["spl0", "spl2", "spl4"])
+    ap.add_argument("--interface", default="sharp", choices=["sharp", "fractional"])
     ap.add_argument("--spacings", type=float, nargs="+", default=[0.5, 0.35, 0.25, 0.2])
     a = ap.parse_args()
     rng = np.random.default_rng(0)
@@ -78,7 +80,7 @@ def main():
         parts = [np.ones(len(owner), bool)] + ([owner == i for i in range(len(spheres))] if association else [])
         cells, means = [], []
         for h in hs:
-            s = pbsolve.Solver(platform=a.platform, grid_spacing=h, surface=a.surface, chgm=a.chgm, **kw)
+            s = pbsolve.Solver(platform=a.platform, grid_spacing=h, surface=a.surface, chgm=a.chgm, interface=a.interface, **kw)
             grid = s.make_grid(coords, radii)
             errs = []
             for k in range(a.placements):

@@ -45,6 +45,7 @@ Commands that solve take these options; they are the
 | `--ion-radius` | 2.0 | ion radius (Å) |
 | `--srad` | 1.4 | solvent probe radius (Å) |
 | `--surface` | `mol` | `mol`, `vdw` or `harmonic` |
+| `--interface` | `sharp` | dielectric of the faces the surface cuts: `sharp` (as APBS) or `fractional` (edge-weighted harmonic average, see [the model](model.md#dielectric-boundary)) |
 | `--bcfl` | `mdh` | `mdh`, `mdh-fast`, `sdh` or `zero` |
 | `--dime-policy` | `pbsolve` | grid node counts: `pbsolve` (8k+1) or `apbs` (values APBS keeps) |
 | `--preconditioner` | `multigrid-f32` | `multigrid-f32`, `multigrid` or `jacobi` |

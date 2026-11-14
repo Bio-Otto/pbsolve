@@ -3,7 +3,7 @@
 //!     cargo run --release -p pbsolve-core --example born
 
 use pbsolve_core::units::{bjerrum_length_vacuum, kt_in_kcal_per_mol};
-use pbsolve_core::{polar_solvation, Atom, CpuBackend, GridSpec, PbParams, SurfaceMethod};
+use pbsolve_core::{polar_solvation, Atom, CpuBackend, GridSpec, InterfaceMethod, PbParams, SurfaceMethod};
 use std::time::Instant;
 
 fn main() {
@@ -21,10 +21,15 @@ fn main() {
         "{:>10} {:>8} {:>12} {:>9} {:>10} {:>8}",
         "surface", "h (Å)", "ΔG kcal/mol", "error %", "CG iters", "time s"
     );
-    for surface in [SurfaceMethod::Mol, SurfaceMethod::HarmonicMol] {
+    for (surface, interface) in [
+        (SurfaceMethod::Mol, InterfaceMethod::Sharp),
+        (SurfaceMethod::HarmonicMol, InterfaceMethod::Sharp),
+        (SurfaceMethod::Mol, InterfaceMethod::Fractional),
+    ] {
         for h in [0.5, 0.35, 0.25, 0.2] {
             let params = PbParams {
                 surface,
+                interface,
                 ..base.clone()
             };
             let spec = GridSpec::auto(&atoms, h, 1.7, 12.0).unwrap();
@@ -38,7 +43,11 @@ fn main() {
                 .sum();
             println!(
                 "{:>10} {:>8.3} {:>12.3} {:>9.2} {:>10} {:>8.2}",
-                surface.as_str(),
+                if interface == InterfaceMethod::Fractional {
+                    "mol+frac"
+                } else {
+                    surface.as_str()
+                },
                 spec.fine_spacing()[0],
                 r.energy_kcal,
                 100.0 * (r.energy_kcal - exact) / exact.abs(),

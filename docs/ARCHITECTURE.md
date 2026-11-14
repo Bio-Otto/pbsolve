@@ -40,6 +40,11 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   APBS' `markSphere` arithmetic, so the maps are identical to APBS' `dielx/y/z`.
   `vdw` is the same with `srad = 0`; `harmonic` evaluates the surface at nodes
   and uses harmonic means on faces (no APBS equivalent).
+  `interface="fractional"` (with `mol` or `vdw`; `surface::fractional_faces`,
+  host) splits each face's grid edge exactly into its lengths inside and
+  outside the solute (chords through the solute spheres minus chords through
+  the probe spheres) and gives cut faces the harmonic average weighted by
+  them; `mark_map` first classifies the nodes whose edges cannot be cut.
 * **Ions:** κ̄² is zero inside `r_i + r_ion` (largest listed ion radius) of
   every atom with `r_i > 0`, marked the same way.
 * **Boundary conditions** (APBS `vpmg.c`): `mdh` sums Debye–Hückel spheres of
@@ -138,7 +143,8 @@ dot-product reduction order differs.
 The same holds for the assembly. `surface::maps_on` decides which spheres
 mark which value (solute spheres, probe spheres, ion-exclusion spheres) and
 calls `mark_maps`; the CPU backend runs `surface::mark_map`, the CUDA backend
-marks one sphere per warp with the host's node test. Charges are spread on
+marks one sphere per warp with the host's node test. The `harmonic` surface
+and the `fractional` interface are built on the host and uploaded. Charges are spread on
 the host (`spread_charges_sparse_with`, the same sums as `spread_charges_with`) and
 scattered on the device together with the boundary values; `pcg_on` then
 solves without any host copy of the operator. The solution stays on the

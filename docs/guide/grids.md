@@ -59,7 +59,10 @@ charges anywhere inside a sphere. {py:func}`pbsolve.analytic.kirkwood_energy`
 gives the exact energy of such a sphere [Kirkwood 1934], with or without
 salt, to check settings or new methods against;
 {py:func}`pbsolve.analytic.two_sphere_energy` does the same for two spheres.
-`scripts/validate_analytic.py` measures the order. Energy differences
+`scripts/validate_analytic.py` measures the order. With
+`interface="fractional"` ([dielectric boundary](model.md#dielectric-boundary))
+the errors at 0.5 Å are at most 0.7 % and fall about as h², and the placement
+spread shrinks 4–46 times. Energy differences
 computed on one grid, such as the association energy of the two spheres,
 are far more accurate than the energies themselves: within 0.002 kcal/mol
 with `surface="vdw"` and ~0.015 kcal/mol with the default `mol`, where the

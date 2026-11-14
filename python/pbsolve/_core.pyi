@@ -202,6 +202,13 @@ class Solver:
         (trilinear, 2 nodes per axis), "spl2" (B-spline of order 3, 3 nodes)
         or "spl4" (B-spline of order 5, 5 nodes). The energy uses the same
         weights with "spl2" and trilinear weights otherwise, as APBS does.
+    interface : str
+        Dielectric of the grid faces the surface cuts, with ``surface`` "mol"
+        or "vdw": "sharp" (``pdie`` or ``sdie`` by the side of the face's
+        midpoint, as APBS) or "fractional" (harmonic average of ``pdie`` and
+        ``sdie`` weighted by the lengths of the face's grid edge inside and
+        outside the solute; close to second order on the analytic references,
+        not an APBS option).
 
     Raises
     ------
@@ -240,6 +247,7 @@ class Solver:
         dime_policy: str = "pbsolve",
         preconditioner: str = "multigrid-f32",
         chgm: str = "spl0",
+        interface: str = "sharp",
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:

@@ -51,7 +51,9 @@ pub use cpu::{CpuBackend, CpuSingle};
 pub use error::{PbError, Result};
 pub use grid::Grid;
 pub use molecule::Atom;
-pub use params::{BoundaryCondition, ChargeMethod, IonSpecies, PbParams, Preconditioner, SurfaceMethod};
+pub use params::{
+    BoundaryCondition, ChargeMethod, InterfaceMethod, IonSpecies, PbParams, Preconditioner, SurfaceMethod,
+};
 pub use pb::{
     coefficient_maps, polar_solvation, solve_focused, solve_with_maps, FieldSolution, Medium, PolarSolvation, Timings,
 };

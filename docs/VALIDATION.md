@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Fractional dielectric interface (unreleased): `interface="fractional"` | faces split exactly against an independent computation (≤ 1e-12); default `sharp` bit-identical (CPU, CUDA); device maps = host maps; 10/11 mutations caught; analytic references with `vdw`: observed orders 1.6–2.5 (sharp 1.0–1.2), errors at 0.5 Å −0.14 … −0.71 % (sharp −2.3 … −4.7 %); with `mol` a +0.13–0.18 % plateau from APBS' sampled probe positions (gone with `sdens=100`); 1YCR placement sd 5–10× smaller, same extrapolated limit as sharp, ΔΔG_bind bias at 0.5 Å +2.7 instead of +13 kcal/mol; calculation 1.5× slower on CUDA, same on CPU; see *Fractional dielectric interface* |
 | Error estimates (unreleased): `estimate_error`, `pbsolve solvation --placements --extrapolate` | first placement = ordinary calculation bit for bit; on the analytic references, extrapolation from 0.35 and 0.25 Å leaves ≤ 0.3 % (means 1.1–1.8 % off), estimated errors within 30 % of the true ones; from 0.5/0.35 Å off by up to 2×; 1YCR: ΔG_polar −1234.7 / −1205.6 / −1190.5 kcal/mol at 0.48 / 0.34 / 0.25 Å, extrapolated −1152, ΔΔG_bind bias ~+6 kcal/mol at 0.25 Å; see *Error estimates* |
 | B-spline charges (unreleased): `chgm` `spl2`, `spl4` as APBS | weights: charge and centre to 1e-12, variance h²/4 and 5h²/12, exact on-node values; energies at the charged nodes = full-potential energies bit for bit (CPU, CUDA); `spl0` bit-identical to the previous commit; APBS 3.4.1: synthetic molecule and 1YCR complex with maps identical and ΔG ≤ 1.3e-6, ΔΔG +0.0012 kcal/mol in APBS units, as `spl0`; 6/6 mutations caught; accuracy: analytic errors and orders unchanged within 0.3 points, 1YCR placement sd 4.09 → 4.07 / 3.88 kcal/mol; cost on 5DK3 +1 % / +4 % (CUDA); see *Charge assignment: B-splines* |
 | Two spheres (unreleased): 5 and 4 Å spheres 15.8 Å apart, 0 and 0.15 M, complex and association ΔΔG on the complex's grid | reference: exact limits (no dielectric jump 7e-15, conductors 3e-12, far apart with salt 3e-13, charge–dipole asymptote) and converged to 1e-11; pbsolve: complex first order (1.11–1.17 `mol`, 1.02–1.06 `vdw`), association ΔΔG of 1.8 kcal/mol within 0.002 kcal/mol on average at every spacing with `vdw`; with `mol` 0.011–0.019 kcal/mol from APBS' sampled molecular surface; see *Analytic references: two spheres* |
@@ -2023,6 +2024,172 @@ association energies in kcal/mol):
   not measured here.
 * Placement sd: 4.1 kcal/mol at 0.5 Å (16 placements, *Charge assignment*),
   1.2 at 0.25 Å.
+
+## Fractional dielectric interface (`interface="fractional"`)
+
+**Change.** `Solver(interface="fractional")` and `--interface fractional`,
+for the surfaces `mol` and `vdw`:
+* A face whose grid edge (the segment between its two nodes) the surface
+  cuts gets ε = h / (ℓ_in/pdie + ℓ_out/sdie). Here ℓ_in and ℓ_out are the
+  lengths of the edge inside and outside the solute. This is the exact
+  effective dielectric of that edge in one dimension: harmonic averaging of
+  boundary dielectrics [Davis & McCammon 1991; Wang et al. 2012], weighted by
+  the exact cut of each edge.
+* ℓ_in is computed exactly from the spheres of the surface: the edge's
+  chords through the solute spheres (radius r + `srad`) minus its chords
+  through the probe spheres. Faces the surface does not cut keep `pdie` or
+  `sdie`, as with the sharp marking.
+* Only the dielectric maps change. The 7-point operator stays symmetric, so
+  CG and multigrid run unchanged (the Born ion takes 17 CG iterations, as
+  before). The ion map and the charges are unchanged.
+* The maps are built on the host for every backend and uploaded.
+  `interface="sharp"` stays the default and is bit-identical to the previous
+  commit. `fractional` has no APBS equivalent; `pbsolve.apbs` refuses it.
+
+**Choice of scheme.** A Python prototype on `Solver.solve_maps` compared
+three face rules on the Born and Kirkwood cases (6 placements, 0.5 / 0.35 /
+0.25 Å, `vdw`):
+* the edge rule above: errors −0.53 / −0.18 % at 0.5 Å (Born / Kirkwood),
+  orders 1.2–2.3;
+* the harmonic average with the fill fraction of the face's dual cell:
+  1.7–2.8 times larger errors;
+* an anisotropic rule n_a²·harmonic + (1 − n_a²)·arithmetic: −5 to −13 %,
+  worse than sharp.
+
+The Rust implementation equals the prototype to ≤ 6.5e-15 relative. The
+improved harmonic-average, IIM and MIB schemes of the roadmap were not
+evaluated: the edge rule already meets the roadmap's targets, needs no
+interface normals and keeps the symmetric operator.
+
+**Checks:**
+* `fractional_faces_split_every_edge_exactly` (Rust): every face of three
+  atoms with probes (`srad` 1.4 and 0) on an anisotropic grid
+  (0.5 / 0.477 / 0.45 Å) is checked against an independent split of its edge
+  at every sphere crossing, to ≤ 1e-12. Faces whose edge the surface does not
+  cut equal the sharp marking.
+* `tests/test_interface.py` (5 tests, 3 s):
+  * the Born ion and the Kirkwood sphere at 0.5 Å over 4 placements: every
+    error within 0.7 %, a range 3 times narrower than sharp;
+  * the maps differ from sharp only on cut faces, whose values lie strictly
+    between `pdie` and `sdie`; ions, charges and the reference state are
+    unchanged;
+  * unknown values, `surface="harmonic"` and APBS inputs are refused;
+  * solvers rebuilt from `params` keep the setting;
+  * the command line.
+* GPU: device maps equal the host maps bit for bit
+  (`device_coefficient_maps_equal_the_host_maps`). CUDA against CPU energies
+  (`test_cuda_matches_cpu`) agree to ≤ 4e-14 on the spheres.
+* Default path: the fingerprint set (energies, iterations, residuals) is
+  bit-identical on CPU and CUDA, and so are the sharp rows of the Born table.
+* The two shortcuts leave the maps bit-identical (1YCR, `mol` and `vdw`,
+  0.5 and 0.25 Å, both focusing levels):
+  * nodes whose edges cannot meet the surface are classified first with
+    `mark_map`;
+  * a probe that covers all of the solute part ends the search.
+* Mutations caught: 10/11 (arithmetic instead of harmonic mean, chord not
+  clipped at either end, interval merge and overlap, both node
+  classifications, both early exits, spacing of the wrong axis). Missed:
+  dropping the h/2 margin of the probe search radius, which the cell list's
+  rounding to whole cells covers in practice.
+
+**Born ion** (`cargo run --release -p pbsolve-core --example born`, one
+placement; the `mol` and `harmonic` rows are unchanged):
+
+| h (Å) | 0.5 | 0.333 | 0.25 | 0.2 |
+|---|---|---|---|---|
+| `mol`, sharp | −4.73 % | −1.08 % | −1.27 % | −0.94 % |
+| `mol`, fractional | −0.39 % | −0.06 % | +0.02 % | +0.07 % |
+
+**Analytic references** (`scripts/validate_analytic.py --placements 20
+--interface fractional`, CUDA; mean error over 20 placements and its range,
+as in the tables above):
+
+| Case | surface | h = 0.5 | h = 0.35 | h = 0.25 | h = 0.2 | order |
+|---|---|---|---|---|---|---|
+| Born ion, a = 2 Å | `vdw` | −0.51 % (−0.55 … −0.49) | −0.21 % (−0.21 … −0.20) | −0.11 % (−0.11 … −0.11) | −0.07 % (−0.07 … −0.07) | 2.15 |
+| | `mol` | −0.38 % (−0.40 … −0.34) | −0.07 % (−0.10 … −0.04) | +0.02 % (+0.01 … +0.03) | +0.06 % (+0.05 … +0.07) | – |
+| Kirkwood, 3 charges | `vdw` | −0.17 % (−0.37 … −0.05) | −0.09 % (−0.15 … −0.05) | −0.06 % (−0.06 … −0.05) | −0.04 % (−0.06 … −0.02) | 1.62 |
+| | `mol` | +0.04 % (−0.13 … +0.18) | +0.12 % (+0.06 … +0.17) | +0.16 % (+0.15 … +0.17) | +0.18 % (+0.13 … +0.22) | – |
+| same, 0.15 M | `vdw` | −0.16 % (−0.23 … −0.06) | −0.09 % (−0.15 … −0.04) | −0.05 % (−0.05 … −0.04) | −0.03 % (−0.05 … −0.01) | 1.88 |
+| same, 0.15 M, pdie 4 | `vdw` | −0.14 % (−0.37 … +0.00) | −0.07 % (−0.12 … −0.01) | −0.04 % (−0.04 … −0.03) | −0.03 % (−0.04 … −0.01) | 1.84 |
+| 2 charges 1.0–1.2 Å below the surface, 0.15 M | `vdw` | −0.71 % (−1.77 … +0.35) | −0.28 % (−0.69 … +0.05) | −0.13 % (−0.26 … −0.04) | −0.07 % (−0.20 … +0.07) | 2.51 |
+| | `mol` | −0.50 % (−1.49 … +0.53) | −0.07 % (−0.45 … +0.27) | +0.08 % (−0.05 … +0.17) | +0.15 % (+0.01 … +0.25) | – |
+| two spheres, 0 M | `vdw` | −0.23 % (−0.33 … −0.08) | −0.12 % (−0.21 … −0.06) | −0.06 % (−0.08 … −0.04) | −0.04 % (−0.06 … −0.03) | 1.84 |
+| | `mol` | −0.01 % (−0.10 … +0.15) | +0.09 % (+0.01 … +0.16) | +0.15 % (+0.12 … +0.18) | +0.17 % (+0.14 … +0.20) | – |
+| two spheres, 0.15 M | `vdw` | −0.27 % (−0.39 … −0.15) | −0.11 % (−0.19 … −0.04) | −0.06 % (−0.11 … −0.02) | −0.04 % (−0.05 … −0.01) | 2.14 |
+| association, 0 M (kcal/mol) | `vdw` | −0.001 (−0.004 … +0.000) | −0.002 (−0.003 … −0.001) | −0.001 (−0.002 … −0.001) | −0.002 (−0.002 … −0.001) | – |
+| | `mol` | −0.015 (−0.026 … −0.007) | −0.016 (−0.023 … −0.007) | −0.015 (−0.019 … −0.010) | −0.016 (−0.020 … −0.011) | – |
+| association, 0.15 M (kcal/mol) | `vdw` | −0.001 (−0.002 … +0.001) | −0.000 (−0.001 … +0.001) | −0.000 (−0.001 … +0.001) | −0.000 (−0.000 … +0.000) | – |
+| | `mol` | −0.012 (−0.018 … −0.003) | −0.012 (−0.017 … −0.007) | −0.010 (−0.015 … −0.005) | −0.011 (−0.013 … −0.009) | – |
+
+* **Second order with `vdw`.** The errors fall to zero with observed orders
+  1.6–2.5, against 1.0–1.2 for sharp (1.6 for the scattered near-surface
+  pair). At 0.5 Å they are −0.14 to −0.27 %
+  for charges 2–3 Å inside (sharp, `mol`: −2.3 to −3.4 %). They are
+  −0.51 % for the Born ion and −0.71 % for charges 1 Å below the surface
+  (sharp: −2.9 and −4.7 %).
+* **Placement scatter shrinks.** At 0.5 Å the range over the placements
+  (`mol`) falls 4 times for the Kirkwood charges, 5 times for the two
+  spheres, 6 times for the near-surface pair (11.5 → 2.0 points) and 46
+  times for the Born ion (2.8 → 0.06).
+* **With `mol` the error levels off at +0.13 … +0.18 %.** This is APBS'
+  surface, not the discretisation. The cusps between its sampled probe
+  positions (see *two spheres*) enlarge the cavity slightly, and the
+  fractional faces now resolve them. With `sdens=100` instead of 10 (cusps
+  ~10 times smaller; 6 placements) the Kirkwood error at 0.25 / 0.2 Å goes
+  from +0.16 / +0.19 % to −0.03 / −0.02 %. The two spheres go from +0.15 /
+  +0.17 % to −0.04 / −0.02 %, close to the `vdw` values. The orders of the
+  `mol` rows are therefore not meaningful.
+* **Association energies** keep their floors: 0.002 kcal/mol with `vdw` and
+  the cusps' 0.010–0.016 with `mol`. The single placements with `mol` now
+  scatter ±0.01 instead of ±0.1 kcal/mol at 0.5 Å.
+* Targets of roadmap 4.8: Born and Kirkwood errors below 0.5 % at 0.5 Å
+  are met, except the Born ion with `vdw` (−0.51 %) and the near-surface
+  pair (−0.50 % `mol`, −0.71 % `vdw`). The order was measured on energies,
+  not on the potential.
+
+**A protein** (1YCR, 0.15 M, CUDA, `pbsolve.estimate_error` with 8
+placements per spacing; ΔΔG_bind with receptor and ligand on the complex's
+grid):
+
+| h (Å) | ΔG_polar sharp: mean (sd) | ΔG_polar fractional: mean (sd) | ΔΔG_bind sharp: mean (sd) | ΔΔG_bind fractional: mean (sd) |
+|---|---|---|---|---|
+| 0.5 | −1234.72 (4.60) | −1165.02 (0.90) | 426.61 (2.66) | 416.16 (0.71) |
+| 0.35 | −1205.56 (2.50) | −1159.24 (0.26) | 421.56 (1.08) | 414.91 (0.22) |
+| 0.25 | −1190.53 (1.23) | −1157.00 (0.23) | 419.30 (0.43) | 414.49 (0.10) |
+| extrapolated from 0.341 / 0.245 Å | −1152.2 | −1151.3 | 413.5 | 413.4 |
+
+* **Placement sd shrinks 5–10 times** for ΔG_polar and 3.7–4.9 times for
+  ΔΔG_bind. The roadmap's target was 3 times.
+* **Both schemes extrapolate to the same limit** (−1152 and 413.4 kcal/mol),
+  so the fractional faces converge to the same solution, only faster.
+  Between 0.5 and 0.25 Å ΔG_polar changes by 0.7 % instead of 3.6 %.
+* **ΔΔG_bind bias** at 0.5 Å: +2.7 instead of +13 kcal/mol; at 0.25 Å +1.1
+  instead of +5.8. A fractional calculation at 0.5 Å is closer to the limit
+  than a sharp one at 0.25 Å and costs a third of it on CUDA (an eighth on
+  the CPU).
+
+**Cost** (1YCR, 0.15 M, best of 3, seconds; the maps of both focusing
+levels are built on the host):
+
+| | CUDA 0.5 Å | CUDA 0.25 Å | CPU 0.5 Å | CPU 0.25 Å |
+|---|---|---|---|---|
+| maps, sharp | 0.023 | 0.075 | 0.10 | 0.31 |
+| maps, fractional | 0.12 | 0.53 | 0.13 | 0.49 |
+| calculation, sharp | 0.19 | 1.00 | 1.52 | 13.0 |
+| calculation, fractional | 0.29 | 1.43 | 1.52 | 12.8 |
+
+At 0.25 Å, per level, 0.06 s go to the node classification and 0.16 s to
+splitting the 1.6–1.9 million edges near the surface (241 × 241 × 201 nodes,
+125 000 probe spheres). Without the two shortcuts the maps took 0.96 s
+(CUDA). On the CPU the solve dominates and the total is unchanged.
+
+**Not done:** the ion-accessibility map stays sharp, so with salt a small
+first-order part remains (the 0.15 M rows are as accurate as 0 M). Forces
+and nonlinear PB do not exist yet.
+
+Reproduce: `python scripts/validate_analytic.py --placements 20 --interface
+fractional [--surface vdw] --platform CUDA` (about 10 min for both).
 
 ## Sensitivity of the sharp dielectric boundary
 

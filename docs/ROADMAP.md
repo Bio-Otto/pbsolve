@@ -261,6 +261,23 @@ intersections) comes from an analytic or level-set SES.
 *Evidence:* second-order convergence of the potential on 4.7; Born and
 Kirkwood energy errors < 0.5 % at 0.5 Å; grid-shift spread of ΔG_polar on a
 protein reduced at least 3× relative to v0.0.1.
+*Status: done (unreleased) as `interface="fractional"`; the other schemes
+were not needed.*
+* Faces cut by the surface get the harmonic average of `pdie` and `sdie`
+  weighted by the exact lengths of their grid edge inside and outside the
+  solute [Davis & McCammon 1991; Wang et al. 2012], computed from the
+  spheres of the surface. The operator stays symmetric and the multigrid CG
+  unchanged; opt-in, the APBS-compatible `sharp` stays the default.
+* Analytic references with `vdw`: observed orders 1.6–2.5 on the energies
+  (sharp 1.0–1.2), errors at 0.5 Å −0.14 to −0.71 % (sharp −2.3 to
+  −4.7 %); the Born ion (−0.51 %) and charges 1 Å below the surface
+  (−0.71 %) narrowly miss the 0.5 % target. With `mol` the energies level
+  off 0.15 % above the spheres' because of APBS' sampled probe positions.
+* 1YCR: placement sd 5–10 times smaller, the same zero-spacing limit as
+  sharp, ΔΔG_bind bias at 0.5 Å +2.7 instead of +13 kcal/mol. Calculations
+  take 1.5 times longer on CUDA (maps on the host), the same on the CPU.
+* Not done: the potential's order, a smoothed ion map, and the
+  improved harmonic-average, IIM and MIB schemes.
 
 **4.9 Error estimates.** Every energy optionally comes with a numerical
 uncertainty from grid-shift averaging and two-spacing extrapolation, so users
@@ -464,6 +481,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Chen D, Chen Z, Chen C, Geng W, Wei GW. MIBPB: a software package for electrostatic analysis. J. Comput. Chem. 32, 756 (2011).
 * Chen et al. Poisson–Boltzmann-based machine learning model for electrostatic analysis. Biophys. J. (2024).
 * Chern IL, Liu JG, Wang WC. Accurate evaluation of electrostatics for macromolecules in solution. Methods Appl. Anal. 10, 309 (2003).
+* Davis ME, McCammon JA. Dielectric boundary smoothing in finite difference solutions of the Poisson equation: an approach to improve accuracy and convergence. J. Comput. Chem. 12, 909 (1991).
 * Decherchi S, Rocchia W. A general and robust ray-casting-based algorithm for triangulating surfaces at the nanoscale. PLoS One 8, e59744 (2013).
 * Di Florio V, Ansalone P, Siryk SV, Decherchi S, de Falco C, Rocchia W. NextGenPB: an analytically-enhanced finite element solver for the linearized Poisson–Boltzmann equation. Comput. Phys. Commun. 317, 109816 (2025).
 * Duan L, Liu X, Zhang JZH. Interaction entropy: a new paradigm for highly efficient and reliable computation of protein–ligand binding free energy. J. Am. Chem. Soc. 138, 5722 (2016).
@@ -498,6 +516,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Wagoner JA, Baker NA. Assessing implicit models for nonpolar mean solvation forces: the importance of dispersion and volume terms. Proc. Natl. Acad. Sci. USA 103, 8331 (2006).
 * Wang E, Sun H, Wang J, Wang Z, Liu H, Zhang JZH, Hou T. End-point binding free energy calculation with MM/PBSA and MM/GBSA: strategies and applications in drug design. Chem. Rev. 119, 9478 (2019).
 * Wang J, Cai Q, Li ZL, Zhao HK, Luo R. Achieving energy conservation in Poisson–Boltzmann molecular dynamics: accuracy and precision with finite-difference algorithms. Chem. Phys. Lett. 468, 112 (2009).
+* Wang J, Cai Q, Xiang Y, Luo R. Reducing grid dependence in finite-difference Poisson–Boltzmann calculations. J. Chem. Theory Comput. 8, 2741 (2012).
 * Wang L, Li L, Alexov E. pKa predictions for proteins, RNAs, and DNAs with the Gaussian dielectric function using DelPhi pKa. Proteins 83, 2186 (2015).
 * Wang L, Krasny R, Tlupova S. A kernel-independent treecode based on barycentric Lagrange interpolation. Commun. Comput. Phys. 28, 1415 (2020).
 * Wang T, Cooper CD, Betcke T, Barba LA. High-productivity, high-performance workflow for virus-scale electrostatic simulations with Bempp-Exafmm. arXiv:2103.01048 (2021).

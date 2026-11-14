@@ -550,6 +550,13 @@ fn device_coefficient_maps_equal_the_host_maps() {
                 ..base.clone().with_salt(0.5, 1.5)
             },
         ),
+        (
+            "mol, fractional interface",
+            PbParams {
+                interface: pbsolve_core::InterfaceMethod::Fractional,
+                ..base.clone().with_salt(0.15, 2.0)
+            },
+        ),
     ];
     for (what, params) in cases {
         let surf = MolecularSurface::for_params(&atoms, &params);

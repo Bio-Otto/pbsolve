@@ -12,7 +12,8 @@ use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_p
 use pbsolve_core::{
     apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_solvation, solve_focused, solve_with_maps,
     Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps, CpuBackend, DimePolicy, Grid, GridSpec,
-    IonSpecies, Medium, PbError, PbParams, PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
+    InterfaceMethod, IonSpecies, Medium, PbError, PbParams, PolarSolvation, Preconditioner, SolveStats, SolverOptions,
+    SurfaceMethod,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -520,6 +521,13 @@ impl PyPolarResult {
 ///     (trilinear, 2 nodes per axis), "spl2" (B-spline of order 3, 3 nodes)
 ///     or "spl4" (B-spline of order 5, 5 nodes). The energy uses the same
 ///     weights with "spl2" and trilinear weights otherwise, as APBS does.
+/// interface : str
+///     Dielectric of the grid faces the surface cuts, with ``surface`` "mol"
+///     or "vdw": "sharp" (``pdie`` or ``sdie`` by the side of the face's
+///     midpoint, as APBS) or "fractional" (harmonic average of ``pdie`` and
+///     ``sdie`` weighted by the lengths of the face's grid edge inside and
+///     outside the solute; close to second order on the analytic references,
+///     not an APBS option).
 ///
 /// Raises
 /// ------
@@ -681,7 +689,7 @@ impl PySolver {
         ionic_strength = 0.0, ion_radius = 2.0, ions = None,
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
-        preconditioner = "multigrid-f32", chgm = "spl0"
+        preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -705,6 +713,7 @@ impl PySolver {
         dime_policy: &str,
         preconditioner: &str,
         chgm: &str,
+        interface: &str,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -715,6 +724,7 @@ impl PySolver {
             surface: SurfaceMethod::parse(surface).map_err(to_py)?,
             bcfl: BoundaryCondition::parse(bcfl).map_err(to_py)?,
             chgm: ChargeMethod::parse(chgm).map_err(to_py)?,
+            interface: InterfaceMethod::parse(interface).map_err(to_py)?,
             tol,
             max_iter,
             preconditioner: Preconditioner::parse(preconditioner).map_err(to_py)?,
@@ -766,6 +776,7 @@ impl PySolver {
         d.set_item("surface", p.surface.as_str())?;
         d.set_item("bcfl", p.bcfl.as_str())?;
         d.set_item("chgm", p.chgm.as_str())?;
+        d.set_item("interface", p.interface.as_str())?;
         d.set_item("tol", p.tol)?;
         d.set_item("max_iter", p.max_iter)?;
         d.set_item("preconditioner", p.preconditioner.as_str())?;

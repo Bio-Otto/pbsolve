@@ -48,6 +48,13 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
     p.add_argument("--srad", type=float, default=1.4)
     p.add_argument("--surface", default="mol", choices=["mol", "vdw", "harmonic"])
     p.add_argument(
+        "--interface",
+        default="sharp",
+        choices=["sharp", "fractional"],
+        help="dielectric of the grid faces the surface cuts (default sharp: as APBS; fractional: harmonic average "
+        "weighted by the edge length inside the solute, close to second order; mol and vdw surfaces)",
+    )
+    p.add_argument(
         "--bcfl",
         default="mdh",
         choices=["mdh", "mdh-fast", "sdh", "zero"],
@@ -87,6 +94,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         ion_radius=args.ion_radius,
         srad=args.srad,
         surface=args.surface,
+        interface=args.interface,
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,

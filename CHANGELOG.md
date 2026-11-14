@@ -121,6 +121,14 @@
   extrapolation is within 0.3 % on the analytic references. For 1YCR it
   shows a spacing error of ~3 % in ΔG_polar and ~6 kcal/mol in ΔΔG_polar at
   0.25 Å (`docs/VALIDATION.md`).
+- `Solver(interface="fractional")`, `--interface`: faces cut by the `mol` or
+  `vdw` surface get the harmonic average of `pdie` and `sdie` weighted by the
+  exact lengths of their grid edge inside and outside the solute. Energies
+  become close to second order: errors on the analytic references fall from
+  2.3–4.7 % to 0.1–0.7 % at 0.5 Å, and for 1YCR the placement spread shrinks
+  5–10 times and the ΔΔG_polar bias at 0.5 Å from +13 to +2.7 kcal/mol.
+  Opt-in: the default `"sharp"` (as APBS) is bit-identical to before
+  (`docs/VALIDATION.md`).
 - `Solver(chgm="spl2" | "spl4")`, `--chgm`: B-spline charge assignment as
   APBS `chgm spl2` and `spl4` (orders 3 and 5, 3 and 5 nodes per axis), with
   APBS' energy rule. The default `spl0` (trilinear) is unchanged. pbsolve's
