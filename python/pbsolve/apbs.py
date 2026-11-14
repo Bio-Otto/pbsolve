@@ -1,6 +1,6 @@
 """Reciprocal validation against APBS.
 
-pbsolve and APBS (multigrid, ``lpbe``, ``srfm mol``, ``chgm spl0``) can be run
+pbsolve and APBS (multigrid, ``lpbe``, ``srfm mol``, ``chgm spl0/spl2/spl4``) can be run
 on the same problem in both directions:
 
 * :func:`compare` — pbsolve settings → APBS input → run both → layered report;
@@ -125,6 +125,7 @@ class ElecCalc:
     srad: float = 1.4
     sdens: float = 10.0
     bcfl: str = "mdh"
+    chgm: str = "spl0"
     method: str = "mg-auto"  # or "mg-manual"
     mol: int = 1
     etol: Optional[float] = None
@@ -151,6 +152,7 @@ class ElecCalc:
             sdens=self.sdens,
             surface="mol",
             bcfl=self.bcfl,
+            chgm=self.chgm,
             tol=tol if tol is not None else min(self.etol or 1e-8, 1e-8),
             max_iter=max_iter,
             **_preconditioner(preconditioner),
@@ -199,6 +201,7 @@ def elec_from_solver(
         sdens=p["sdens"],
         # mdh-fast is pbsolve's interpolated evaluation of APBS' mdh.
         bcfl="mdh" if p["bcfl"] == "mdh-fast" else p["bcfl"],
+        chgm=p["chgm"],
         method="mg-auto" if grid.is_focused else "mg-manual",
         etol=etol if etol is not None else p["tol"],
         writes=list(writes),
@@ -233,7 +236,7 @@ def write_input(molecules: Sequence[PathLike], elecs: Sequence[ElecCalc], prints
         out.append(f"    pdie {_fmt(e.pdie)}")
         out.append(f"    sdie {_fmt(e.sdie)}")
         out.append("    srfm mol")
-        out.append("    chgm spl0")
+        out.append(f"    chgm {e.chgm}")
         out.append(f"    sdens {_fmt(e.sdens)}")
         out.append(f"    srad {_fmt(e.srad)}")
         out.append("    swin 0.3")
@@ -386,8 +389,9 @@ def parse_input(path: PathLike) -> ApbsInput:
                     e["srfm"] = s
                 elif tl == "chgm":
                     c = take().lower()
-                    if c != "spl0":
-                        raise NotImplementedError(f"chgm {c}: only 'chgm spl0' (trilinear) is supported")
+                    if c not in ("spl0", "spl2", "spl4"):
+                        raise NotImplementedError(f"chgm {c}: only spl0, spl2 and spl4 are supported")
+                    e["chgm"] = c
                 elif tl == "calcenergy":
                     e["calcenergy"] = take().lower()
                 elif tl == "calcforce":
@@ -487,6 +491,7 @@ def parse_input(path: PathLike) -> ApbsInput:
                 srad=e["srad"],
                 sdens=e.get("sdens", 10.0),
                 bcfl=e["bcfl"],
+                chgm=e.get("chgm", "spl0"),
                 method=method,
                 mol=e.get("mol", 1),
                 etol=e.get("etol"),
@@ -850,7 +855,11 @@ def compare(
             }
             for st in ("solvated", "reference"):
                 u, iters, resid = solver.solve_maps(*eps[st], kap[st], apbs_q, apbs_pot[st], ours["origin"], ours["spacing"])
-                e_inj = 0.5 * float(np.sum(apbs_q * u)) * kj
+                if solver.params["chgm"] == "spl4":
+                    # APBS takes the spl4 energy at the atoms with trilinear weights (Vpmg_qfEnergy).
+                    e_inj = 0.5 * float(np.sum(charges * _interp(u, ours["origin"], ours["spacing"], coords))) * kj
+                else:
+                    e_inj = 0.5 * float(np.sum(apbs_q * u)) * kj
                 report.injection[st] = {
                     "potential": _field_diff(u, apbs_pot[st]),
                     "energy_kj": e_inj,
@@ -1115,6 +1124,7 @@ def _add_solver_args(ap: argparse.ArgumentParser) -> None:
         choices=["mdh", "mdh-fast", "sdh", "zero"],
         help="boundary condition (mdh-fast: pbsolve's interpolated mdh; APBS runs mdh)",
     )
+    ap.add_argument("--chgm", default="spl0", choices=["spl0", "spl2", "spl4"], help="charge assignment (APBS chgm)")
     ap.add_argument("--cfac", type=float, default=1.7)
     ap.add_argument("--fadd", type=float, default=20.0)
     ap.add_argument("--tol", type=float, default=1e-8, help="pbsolve tolerance; also written as APBS etol")
@@ -1214,6 +1224,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 sdens=a.sdens,
                 surface=a.surface,
                 bcfl=a.bcfl,
+                chgm=a.chgm,
                 cfac=a.cfac,
                 fadd=a.fadd,
                 tol=a.tol,

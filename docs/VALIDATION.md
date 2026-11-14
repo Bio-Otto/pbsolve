@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| B-spline charges (unreleased): `chgm` `spl2`, `spl4` as APBS | weights: charge and centre to 1e-12, variance h²/4 and 5h²/12, exact on-node values; energies at the charged nodes = full-potential energies bit for bit (CPU, CUDA); `spl0` bit-identical to the previous commit; APBS 3.4.1: synthetic molecule and 1YCR complex with maps identical and ΔG ≤ 1.3e-6, ΔΔG +0.0012 kcal/mol in APBS units, as `spl0`; 6/6 mutations caught; accuracy: analytic errors and orders unchanged within 0.3 points, 1YCR placement sd 4.09 → 4.07 / 3.88 kcal/mol; cost on 5DK3 +1 % / +4 % (CUDA); see *Charge assignment: B-splines* |
 | Two spheres (unreleased): 5 and 4 Å spheres 15.8 Å apart, 0 and 0.15 M, complex and association ΔΔG on the complex's grid | reference: exact limits (no dielectric jump 7e-15, conductors 3e-12, far apart with salt 3e-13, charge–dipole asymptote) and converged to 1e-11; pbsolve: complex first order (1.11–1.17 `mol`, 1.02–1.06 `vdw`), association ΔΔG of 1.8 kcal/mol within 0.002 kcal/mol on average at every spacing with `vdw`; with `mol` 0.011–0.019 kcal/mol from APBS' sampled molecular surface; see *Analytic references: two spheres* |
 | Kirkwood sphere (unreleased): charges off the centre of a 5 Å sphere, 0 and 0.15 M, pdie 1 and 4; Born ion | reference = closed forms to ≤ 1e-13 (Born, Born–Debye–Hückel with Stern layer, grounded-sphere images for several charges) and the interface conditions to 1e-12; pbsolve, averaged over 20 grid placements: −2.3 to −2.9 % at 0.5 Å, −0.8 to −1.0 % at 0.2 Å, observed order 1.09–1.18 (first order, as expected for the sharp boundary); charges 1 Å below the surface scatter from −11 to 0 % per placement at 0.5 Å; see *Analytic references: Kirkwood sphere* |
 | Operator symmetry, charge conservation, SES crevice, SASA, APBS reference-sphere count, marking = brute force | pass (unit tests) |
@@ -1845,6 +1846,96 @@ errors are in kcal/mol.
 
 Reproduce: `python scripts/validate_analytic.py --placements 20` and the same
 with `--surface vdw` (20 min each on 18 threads).
+
+## Charge assignment: B-splines (`chgm spl2`, `spl4`)
+
+**Change.** `Solver(chgm=...)` and `--chgm` choose how point charges are
+spread onto the grid, with APBS 3.4.1's weights, node ranges and energy rule:
+
+| `chgm` | Weights | Nodes per axis | Energy ½ Σ q u |
+|---|---|---|---|
+| `spl0` (default, unchanged) | trilinear | 2 | trilinear at the atoms |
+| `spl2` | B-spline of order 3 (piecewise quadratic) | 3 | the same weights (`Vpmg_qfEnergyVolume`) |
+| `spl4` | B-spline of order 5 (piecewise quartic) | 5 | trilinear at the atoms (`Vpmg_qfEnergyPoint`) |
+
+* APBS documents `spl2` and `spl4` as cubic and quintic; its functions
+  (`bspline2`, `bspline4`) are the order-3 and order-5 B-splines above.
+* The host spreads the charges for every backend (the node charges reach
+  the GPU with `scatter`), so CPU and CUDA get the same source.
+* A spline needs room to the outer faces: 2 (`spl2`) and 3 (`spl4`) node
+  spacings, otherwise `ValueError`.
+* APBS inputs with `chgm spl2` or `spl4` are now accepted by
+  `pbsolve apbs run` and written by `pbsolve apbs compare`.
+
+**Checks.**
+* Weights (`charge.rs`): every spread keeps the charge and its centre to
+  1e-12, with variance h²/4 (`spl2`) and 5h²/12 (`spl4`) per axis (50 random
+  positions). The exact weights on a node are 1/8, 3/4 and 1/384, 19/96,
+  115/192. Sparse and dense spreading agree bit for bit for all three
+  methods, and each method refuses charges without room to the boundary.
+* Energies taken at the charged nodes equal the energies of the full
+  potentials bit for bit, and the potentials equal a host reference of the
+  pipeline (`spl2` on two levels, `spl4` on three). On the GPU the same
+  holds, and CPU and CUDA agree to < 1e-12 (cuda-12 and cuda-13 builds).
+* `spl0` results are bit-identical to the previous commit (13 cases + maps,
+  potentials, MM-PBSA species; CPU and CUDA).
+* APBS 3.4.1, synthetic molecule (`spl2`, `mdh`, 0.15 M; `spl4`, `sdh`, 0 M)
+  in `tests/test_apbs_parity.py`: all maps identical and energies within the
+  `spl0` tolerances.
+* APBS 3.4.1, 1YCR complex (0.15 M, `mdh`, ligand chain B, maps compared):
+
+  | `chgm` | ΔG_polar complex APBS / pbsolve | in APBS units | ΔΔG_bind APBS / pbsolve | in APBS units |
+  |---|---|---|---|---|
+  | `spl0` | −1221.2814 / −1221.2671 | −4.7e-7 | 422.8979 / 422.8939 | +0.0012 kcal/mol |
+  | `spl2` | −1218.9705 / −1218.9562 | −4.9e-7 | 422.6106 / 422.6066 | +0.0012 kcal/mol |
+  | `spl4` | −1219.0214 / −1219.0072 | −4.9e-7 | 422.4409 / 422.4369 | +0.0012 kcal/mol |
+
+  Dielectric and ion maps: 0 nodes differ; charge maps within 2.3e-7 of
+  their maximum (the DX format); per state ≤ 2.5e-10 (solvated) and
+  ≤ 3.7e-8 (reference) in APBS units, as with `spl0`. The comparison now
+  takes the `spl4` energy of the solve on APBS' maps at the atoms, as APBS
+  does (it was compared with the `spl4` weights and showed −0.3).
+* Mutations caught: 6/6 (node offset, `spl4` interior bound, `spl4` energy
+  with its own weights, a `bspline4` coefficient, energy from the source
+  charges, APBS input always `spl0`).
+
+**Accuracy.** The B-splines hardly change ΔG_polar:
+* Analytic references (`scripts/validate_analytic.py --chgm`, `mol`, 20
+  placements): mean errors at 0.5 / 0.2 Å, `spl0` → `spl2` → `spl4`:
+
+  | Case | `spl0` | `spl2` | `spl4` |
+  |---|---|---|---|
+  | Born ion | −2.94 / −0.96 % | −2.89 / −0.96 % | −2.91 / −0.96 % |
+  | Kirkwood, 3 charges | −2.77 / −0.98 % | −2.80 / −0.98 % | −2.78 / −0.98 % |
+  | Kirkwood, 2 charges below the surface | −4.68 / −1.10 % (−11.42 … +0.11 at 0.5 Å) | −4.41 / −1.11 % (−10.64 … −0.16) | −4.44 / −1.11 % (−10.77 … −0.21) |
+  | Two spheres, 0 M | −3.35 / −1.13 % | −3.40 / −1.13 % | −3.37 / −1.13 % |
+  | Association ΔΔG, 0 M | −0.015 / −0.016 kcal/mol | −0.015 / −0.016 | −0.015 / −0.016 |
+
+  Observed orders: 1.09–1.18, 1.10–1.19 and 1.09–1.18.
+* 1YCR (0.15 M, CUDA, h = 0.5 Å, one grid, 16 placements of the molecule):
+
+  | `chgm` | ΔG_polar mean, sd, range (kcal/mol) | ΔΔG_bind mean, sd, range |
+  |---|---|---|
+  | `spl0` | −1233.34, 4.09, 15.4 | 425.65, 1.57, 6.0 |
+  | `spl2` | −1230.63, 4.07, 14.9 | 425.20, 1.81, 6.9 |
+  | `spl4` | −1229.37, 3.88, 14.4 | 424.89, 1.62, 6.0 |
+
+* So the placement spread falls by at most 5 %, against the 3× the roadmap
+  hoped for. The error comes from the sharp dielectric boundary. The
+  self-energy of the spread charge, which the spline changes, cancels
+  between the solvated and the reference state.
+* The methods differ from each other by 0.2–0.3 % in ΔG_polar (1YCR,
+  5DK3), less than the spread over placements.
+* The placement spread of 1YCR (sd 4 kcal/mol, 0.3 %, at 0.5 Å) is the
+  baseline for the interface methods (4.8) and the error estimates (4.9).
+
+**Cost** (5DK3, 0.15 M, idle GPU): the host spreads 125 (`spl4`) or 27
+(`spl2`) contributions per charge instead of 8. The assembly stage takes
+0.05 → 0.10 → 0.44 s on CUDA (a calculation 4.17 → 4.21 → 4.34 s). On the
+CPU they added at most 4 % to a 28.5 s calculation (measured before the
+zero weights were skipped). Nodes whose weight is
+exactly 0 (one end node per axis) are skipped; that halved the `spl4`
+assembly (0.83 → 0.44 s) without changing the energy.
 
 ## Sensitivity of the sharp dielectric boundary
 

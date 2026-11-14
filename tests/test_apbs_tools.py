@@ -52,7 +52,7 @@ def test_to_apbs_is_full_precision(molecule):
 
 def test_input_round_trip(tmp_path, molecule, molecule_pqr):
     coords, _, radii = molecule
-    s = pbsolve.Solver(grid_spacing=0.5, ionic_strength=0.1, pdie=2.0, bcfl="sdh", dime_policy="apbs")
+    s = pbsolve.Solver(grid_spacing=0.5, ionic_strength=0.1, pdie=2.0, bcfl="sdh", chgm="spl4", dime_policy="apbs")
     grid = s.make_grid(coords, radii)
     solv = apbs.elec_from_solver(s, grid, "solv", writes=[("pot", "p")])
     refr = apbs.elec_from_solver(s, grid, "ref", reference=True)
@@ -63,7 +63,8 @@ def test_input_round_trip(tmp_path, molecule, molecule_pqr):
     e = back.elecs[0]
     assert e.grid.dims == grid.dims and e.grid.center == grid.center
     assert e.grid.coarse_length == grid.coarse_length and e.grid.fine_length == grid.fine_length
-    assert (e.pdie, e.sdie, e.bcfl, e.srad, e.sdens) == (2.0, 78.54, "sdh", 1.4, 10.0)
+    assert (e.pdie, e.sdie, e.bcfl, e.chgm, e.srad, e.sdens) == (2.0, 78.54, "sdh", "spl4", 1.4, 10.0)
+    assert e.solver().params["chgm"] == "spl4" and back.elecs[1].chgm == "spl4"
     assert e.ions == [(1.0, 0.1, 2.0), (-1.0, 0.1, 2.0)]
     assert back.elecs[1].sdie == 2.0 and back.elecs[1].ions == []
     assert back.prints == [[(1, "solv"), (-1, "ref")]]
@@ -109,7 +110,7 @@ def test_parse_input_mol_centering_and_reset(tmp_path, molecule, molecule_pqr):
 
 @pytest.mark.parametrize(
     "line, match",
-    [(" npbe\n", "nonlinear"), (" srfm smol\n", "srfm smol"), (" chgm spl2\n", "chgm spl2"), (" bcfl focus\n", "bcfl")],
+    [(" npbe\n", "nonlinear"), (" srfm smol\n", "srfm smol"), (" chgm spl1\n", "chgm spl1"), (" bcfl focus\n", "bcfl")],
 )
 def test_parse_input_rejects_unsupported(tmp_path, molecule_pqr, line, match):
     path = tmp_path / "x.in"

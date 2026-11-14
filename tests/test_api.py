@@ -27,6 +27,29 @@ def test_bad_inputs_raise_value_error():
         pbsolve.Solver(surface="spl9")
 
 
+def test_charge_methods():
+    """chgm as in APBS: the same sources spread over 2, 3 or 5 nodes per axis."""
+    energies = {}
+    for m, per_axis in (("spl0", 2), ("spl2", 3), ("spl4", 5)):
+        s = pbsolve.Solver(platform="CPU", chgm=m)
+        assert s.params["chgm"] == m
+        q = s.maps(DIPOLE, Q2, R2)["charge"]
+        assert abs(q.sum()) < 1e-14 and 0 < np.count_nonzero(q) <= 2 * per_axis**3
+        energies[m] = s.polar_solvation(DIPOLE, Q2, R2).energy
+    assert len(set(energies.values())) == 3
+    assert all(abs(e / energies["spl0"] - 1) < 0.03 for e in energies.values())
+    with pytest.raises(ValueError, match="charge method"):
+        pbsolve.Solver(chgm="spl3")
+    # One level with h = 0.5 from −4 Å: 2.3 nodes from the boundary is room
+    # enough for spl0 and spl2, not for spl4.
+    grid = pbsolve.GridSpec([0.0, 0.0, 0.0], [17, 17, 17], [8.0] * 3, [8.0] * 3)
+    atom = np.array([[-4.0 + 2.3 * 0.5, 0.0, 0.0]]), np.array([1.0]), np.array([1.0])
+    for m in ("spl0", "spl2"):
+        pbsolve.Solver(platform="CPU", chgm=m).polar_solvation(*atom, grid=grid)
+    with pytest.raises(ValueError, match="too close to the boundary"):
+        pbsolve.Solver(platform="CPU", chgm="spl4").polar_solvation(*atom, grid=grid)
+
+
 def test_cuda_request_without_gpu_raises():
     if "CUDA" in pbsolve.available_platforms():
         pytest.skip("CUDA is available here")

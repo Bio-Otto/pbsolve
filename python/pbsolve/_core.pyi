@@ -197,6 +197,11 @@ class Solver:
         "multigrid-f32" (single-precision multigrid V-cycle inside the f64
         conjugate gradients), "multigrid" (the V-cycle in f64) or "jacobi".
         Energies of the multigrid variants agree to 1e-12 relative.
+    chgm : str
+        Assignment of the charges to the grid (APBS ``chgm``): "spl0"
+        (trilinear, 2 nodes per axis), "spl2" (B-spline of order 3, 3 nodes)
+        or "spl4" (B-spline of order 5, 5 nodes). The energy uses the same
+        weights with "spl2" and trilinear weights otherwise, as APBS does.
 
     Raises
     ------
@@ -234,6 +239,7 @@ class Solver:
         max_iter: int = 20000,
         dime_policy: str = "pbsolve",
         preconditioner: str = "multigrid-f32",
+        chgm: str = "spl0",
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:

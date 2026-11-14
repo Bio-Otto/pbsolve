@@ -209,8 +209,17 @@ improves at coarse spacing. It is also the formulation that interface methods
 and forces build on. The current "same grid" reference-state method stays
 available and is the default until the new path is validated.
 
-**4.6 Charge assignment.** Cubic and quintic B-spline spreading (smoother
-source, less grid-position dependence) next to trilinear, selectable per run.
+**4.6 Charge assignment.** B-spline spreading (smoother source, less
+grid-position dependence) next to trilinear, selectable per run.
+*Status: done (unreleased); the expected gain did not appear.*
+* `chgm="spl2"` and `"spl4"`: the order-3 and order-5 B-splines (3 and 5
+  nodes per axis) that APBS calls cubic and quintic, with APBS' weights and
+  energy rule. Maps and energies agree with APBS 3.4.1 as for `spl0`.
+* They change ΔG_polar by 0.2–0.3 %, the analytic errors by ≤ 0.3 points, and
+  the placement spread of 1YCR by ≤ 5 % (sd 4.1 → 3.9 kcal/mol at 0.5 Å).
+  The error comes from the sharp dielectric boundary, and the spread
+  charge's self-energy cancels between the two states. Grid-position
+  dependence is therefore left to 4.8 and 4.9.
 
 **4.7 Analytic and semi-analytic test suite.** Kirkwood's solution for
 off-centre charges in a sphere, with and without salt [Kirkwood 1934]; two

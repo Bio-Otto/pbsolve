@@ -54,6 +54,8 @@ def _check(rep, bcfl):
         dict(ionic_strength=0.15, bcfl="sdh", pdie=2.0),
         dict(ionic_strength=0.0, bcfl="sdh"),
         dict(ionic_strength=0.05, bcfl="zero", surface="vdw"),
+        dict(ionic_strength=0.15, bcfl="mdh", chgm="spl2"),
+        dict(ionic_strength=0.0, bcfl="sdh", chgm="spl4"),
     ],
 )
 def test_layered_parity(tmp_path, molecule_pqr, kw):

@@ -59,8 +59,26 @@ nodes (one map per axis). `surface` defines it:
 | `"vdw"` | union of the atomic spheres (`"mol"` with a zero probe) | `srfm mol` with `srad 0` |
 | `"harmonic"` | molecular surface evaluated on the nodes; the face values are harmonic means of the neighbouring nodes (smoother) | none; this is **not** APBS `srfm smol` |
 
-The defaults `srad=1.4` and `sdens=10.0` are APBS' usual values. Charges are
-spread onto the grid trilinearly (APBS `chgm spl0`).
+The defaults `srad=1.4` and `sdens=10.0` are APBS' usual values.
+
+## Charges
+
+Point charges are spread onto the grid nodes; `chgm` chooses how, with
+APBS' names and weights:
+
+| `chgm` | Weights | Nodes per axis |
+|---|---|---|
+| `"spl0"` (default) | trilinear | 2 |
+| `"spl2"` | B-spline of order 3 (piecewise quadratic; APBS calls it cubic) | 3 |
+| `"spl4"` | B-spline of order 5 (piecewise quartic; APBS calls it quintic) | 5 |
+
+The energy ½ Σ q u is taken with the same weights for `"spl2"` and with
+trilinear weights for `"spl0"` and `"spl4"`, as APBS does. The wider
+splines need room to the grid's outer faces (2 and 3 node spacings).
+They hardly change ΔG_polar: its discretisation error comes from the sharp
+dielectric boundary, and the self-energy of the spread charge cancels
+between the solvated and the reference state ([validation](../VALIDATION)).
+Use them to reproduce APBS inputs that set them.
 
 ## Mobile ions
 

@@ -122,6 +122,50 @@ impl BoundaryCondition {
     }
 }
 
+/// Assignment of point charges to grid nodes (APBS `chgm`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ChargeMethod {
+    /// Trilinear, 2 nodes per axis (APBS `spl0`, the default).
+    #[default]
+    Trilinear,
+    /// B-spline of order 3 (piecewise quadratic, C¹), 3 nodes per axis
+    /// (APBS `spl2`). The energy is taken with the same weights.
+    Spline2,
+    /// B-spline of order 5 (piecewise quartic, C³), 5 nodes per axis (APBS
+    /// `spl4`). As in APBS, the energy is taken with trilinear weights.
+    Spline4,
+}
+
+impl ChargeMethod {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "spl0" => Ok(Self::Trilinear),
+            "spl2" => Ok(Self::Spline2),
+            "spl4" => Ok(Self::Spline4),
+            other => invalid(format!(
+                "unknown charge method '{other}' (expected 'spl0', 'spl2' or 'spl4')"
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Trilinear => "spl0",
+            Self::Spline2 => "spl2",
+            Self::Spline4 => "spl4",
+        }
+    }
+
+    /// The assignment whose weights give the energy ½ Σ q u (APBS
+    /// `Vpmg_qfEnergy`: the source's own weights for `spl2`, trilinear otherwise).
+    pub fn energy_method(&self) -> Self {
+        match self {
+            Self::Spline2 => Self::Spline2,
+            _ => Self::Trilinear,
+        }
+    }
+}
+
 /// One mobile ion species (APBS `ion charge .. conc .. radius ..`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IonSpecies {
@@ -149,6 +193,8 @@ pub struct PbParams {
     pub sdens: f64,
     pub surface: SurfaceMethod,
     pub bcfl: BoundaryCondition,
+    /// Charge assignment to the grid.
+    pub chgm: ChargeMethod,
     /// Relative residual tolerance ‖r‖/‖b‖ of the linear solver.
     pub tol: f64,
     /// Maximum number of linear-solver iterations per grid level.
@@ -168,6 +214,7 @@ impl Default for PbParams {
             sdens: 10.0,
             surface: SurfaceMethod::Mol,
             bcfl: BoundaryCondition::Mdh,
+            chgm: ChargeMethod::Trilinear,
             tol: 1.0e-8,
             max_iter: 20_000,
             preconditioner: Preconditioner::DEFAULT,

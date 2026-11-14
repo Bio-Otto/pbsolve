@@ -82,8 +82,9 @@ peptide_dg = solver.polar_solvation(
 ).energy
 ```
 
-Every charge must lie inside the grid, away from its outer faces; otherwise
-the calculation raises `ValueError`.
+Every charge must lie inside the grid, away from its outer faces (at least
+1, 2 or 3 node spacings with `chgm` `"spl0"`, `"spl2"` or `"spl4"`, see
+[charges](model.md#charges)); otherwise the calculation raises `ValueError`.
 
 ## Grids by hand
 

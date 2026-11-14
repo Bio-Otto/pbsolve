@@ -6,11 +6,11 @@ use crate::autogrid::GridSpec;
 use crate::backend::{Backend, MemoryHold};
 use crate::batch::worker_device_bytes;
 use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
-use crate::charge::{spread_charges, spread_charges_sparse};
+use crate::charge::{spread_charges_sparse_with, spread_charges_with};
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::molecule::Atom;
-use crate::params::PbParams;
+use crate::params::{ChargeMethod, PbParams};
 use crate::solver::{pcg_on, pcg_setup, SolveStats, SolverOptions};
 use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
@@ -322,12 +322,13 @@ fn add_boundary_values(grid: &Grid, u: &mut [f64], g: &[f64]) {
     });
 }
 
-/// Node charges of a level ([`spread_charges_sparse`]): nodes in increasing
-/// order and their charges.
+/// Node charges of a level ([`spread_charges_sparse_with`]): nodes in
+/// increasing order and their charges.
 type NodeCharges = (Vec<usize>, Vec<f64>);
 
 /// One LPBE solve on `grid` with Dirichlet values `g` (on
-/// `grid.boundary_indices()`). Also returns the node charges.
+/// `grid.boundary_indices()`). Also returns the node charges the energy is
+/// taken with ([`ChargeMethod::energy_method`]).
 fn solve_level<B: Backend>(
     be: &B,
     grid: Grid,
@@ -343,7 +344,7 @@ fn solve_level<B: Backend>(
     be.synchronize()?;
     timings.maps += t.elapsed().as_secs_f64();
     let t = Instant::now();
-    let (nodes, charges) = spread_charges_sparse(&grid, atoms)?;
+    let (nodes, charges) = spread_charges_sparse_with(&grid, atoms, params.chgm)?;
     let opts = SolverOptions {
         tol: params.tol,
         max_iter: params.max_iter,
@@ -364,7 +365,11 @@ fn solve_level<B: Backend>(
     timings.setup += stats.setup_seconds;
     timings.solve += stats.solve_seconds;
     timings.assembly += (total - solved.waited - stats.setup_seconds - stats.solve_seconds).max(0.0);
-    Ok((LevelSolution { grid, x, g }, stats, (nodes, charges)))
+    let energy_charges = match params.chgm.energy_method() {
+        m if m == params.chgm => (nodes, charges),
+        m => spread_charges_sparse_with(&grid, atoms, m)?,
+    };
+    Ok((LevelSolution { grid, x, g }, stats, energy_charges))
 }
 
 /// Boundary values of `fine` focused from the solution of the coarser level,
@@ -564,10 +569,11 @@ pub fn solve_focused<B: Backend>(
     })
 }
 
-/// ½ Σ q_i u(r_i) in kT (trilinear interpolation, identical to APBS
-/// `calcenergy total` with `chgm spl0`).
-pub fn electrostatic_energy_kt(sol: &FieldSolution, atoms: &[Atom]) -> Result<f64> {
-    let q = spread_charges(&sol.grid, atoms)?;
+/// ½ Σ q_i u(r_i) in kT, with the weights of `chgm`'s
+/// [`ChargeMethod::energy_method`] (as APBS `calcenergy total`: trilinear
+/// interpolation for `spl0` and `spl4`, the `spl2` weights for `spl2`).
+pub fn electrostatic_energy_kt(sol: &FieldSolution, atoms: &[Atom], chgm: ChargeMethod) -> Result<f64> {
+    let q = spread_charges_with(&sol.grid, atoms, chgm.energy_method())?;
     Ok(0.5 * q.iter().zip(&sol.potential).map(|(a, b)| a * b).sum::<f64>())
 }
 
@@ -870,7 +876,7 @@ mod tests {
                 Some((pg, pu)) => focus_boundary(&grid, pg, pu).unwrap(),
             };
             let maps = coefficient_maps(&grid, atoms, params, medium);
-            let q = spread_charges(&grid, atoms).unwrap();
+            let q = spread_charges_with(&grid, atoms, params.chgm).unwrap();
             let (u, _) = solve_with_maps(&be, &grid, maps, &q, &g, params.temperature, opts).unwrap();
             prev = Some((grid, u));
         }
@@ -881,7 +887,7 @@ mod tests {
     /// boundaries read at the stencil nodes only, equal the energies of the
     /// full potentials bit for bit; so do the potentials of `solve_focused`
     /// and of the host references. One to three focusing levels, every
-    /// boundary condition and preconditioner.
+    /// boundary condition, preconditioner and charge method.
     #[test]
     fn energies_from_the_charged_nodes_equal_the_full_potential_energies() {
         use crate::params::BoundaryCondition;
@@ -939,20 +945,35 @@ mod tests {
                     ..PbParams::default()
                 },
             ),
+            (
+                &two,
+                PbParams {
+                    chgm: ChargeMethod::Spline2,
+                    ..salt.clone()
+                },
+            ),
+            (
+                &three,
+                PbParams {
+                    chgm: ChargeMethod::Spline4,
+                    ..salt.clone()
+                },
+            ),
         ];
         let mut levels = Vec::new();
         for (spec, params) in cases {
             let be = CpuBackend::new();
             let r = polar_solvation(&be, &atoms, &params, spec).unwrap();
             let label = format!(
-                "{:?} {:?}, {} levels",
+                "{:?} {:?} {:?}, {} levels",
                 params.bcfl,
                 params.preconditioner,
+                params.chgm,
                 r.stats_solvated.len()
             );
             for (medium, kt) in [(Medium::Solvated, r.solvated_kt), (Medium::Reference, r.reference_kt)] {
                 let field = solve_focused(&be, spec, &atoms, &params, medium).unwrap();
-                let full = electrostatic_energy_kt(&field, &atoms).unwrap();
+                let full = electrostatic_energy_kt(&field, &atoms, params.chgm).unwrap();
                 assert_eq!(kt.to_bits(), full.to_bits(), "{label} {medium:?}: {kt} vs {full}");
                 let (grid, u) = host_focused(spec, &atoms, &params, medium);
                 assert_eq!(field.grid, grid);
@@ -964,7 +985,7 @@ mod tests {
             assert_eq!(r.energy_kt.to_bits(), (r.solvated_kt - r.reference_kt).to_bits());
             levels.push(r.stats_solvated.len());
         }
-        assert_eq!(levels, [2, 3, 1, 2, 2, 2, 3]);
+        assert_eq!(levels, [2, 3, 1, 2, 2, 2, 3, 2, 3]);
         let coarse = &flush.levels().unwrap()[0];
         let read = focus_nodes(&flush.levels().unwrap()[1], coarse).indices();
         assert!(read.iter().any(|&c| {
@@ -1162,7 +1183,7 @@ mod tests {
             .unwrap()
             .remove(0);
         let g = analytic_boundary_values(&grid, &atoms, params.bcfl, &boundary_medium(&params, Medium::Solvated));
-        let charges = spread_charges_sparse(&grid, &atoms).unwrap();
+        let charges = crate::charge::spread_charges_sparse(&grid, &atoms).unwrap();
         let case = std::sync::Arc::new(GateCase {
             atoms,
             params,

@@ -11,7 +11,7 @@ use pbsolve_core::charge::spread_charges;
 use pbsolve_core::operator::{assemble_rhs, StencilOperator};
 use pbsolve_core::solver::{pcg, SolveStats, SolverOptions};
 use pbsolve_core::units::bjerrum_length_vacuum;
-use pbsolve_core::{Atom, Backend, CoefficientMaps, CpuBackend, Grid, PbParams, Preconditioner};
+use pbsolve_core::{Atom, Backend, ChargeMethod, CoefficientMaps, CpuBackend, Grid, PbParams, Preconditioner};
 use pbsolve_cuda::{CodeType, CudaBackend};
 use std::sync::Arc;
 
@@ -858,13 +858,33 @@ fn device_energies_from_the_charged_nodes_equal_the_full_potential_energies() {
                 ..params.clone()
             },
         ),
+        (
+            spec(fine.map(|l| 2.0 * l)),
+            PbParams {
+                chgm: ChargeMethod::Spline2,
+                ..params.clone()
+            },
+        ),
+        (
+            spec(fine.map(|l| 2.0 * l)),
+            PbParams {
+                chgm: ChargeMethod::Spline4,
+                ..params.clone()
+            },
+        ),
     ];
     let mut levels = Vec::new();
     for (spec, params) in cases {
         let r = polar_solvation(&gpu, &atoms, &params, &spec).unwrap();
+        if params.chgm != ChargeMethod::Trilinear {
+            // The host spreads the charges for both backends; only the solves differ.
+            let cpu = polar_solvation(&CpuBackend::new(), &atoms, &params, &spec).unwrap();
+            let rel = (r.energy_kt - cpu.energy_kt).abs() / cpu.energy_kt.abs();
+            assert!(rel < 1e-12, "{:?}: CPU vs CUDA {rel:e}", params.chgm);
+        }
         for (medium, kt) in [(Medium::Solvated, r.solvated_kt), (Medium::Reference, r.reference_kt)] {
             let field = solve_focused(&gpu, &spec, &atoms, &params, medium).unwrap();
-            let full = electrostatic_energy_kt(&field, &atoms).unwrap();
+            let full = electrostatic_energy_kt(&field, &atoms, params.chgm).unwrap();
             assert_eq!(
                 kt.to_bits(),
                 full.to_bits(),
@@ -874,7 +894,7 @@ fn device_energies_from_the_charged_nodes_equal_the_full_potential_energies() {
         }
         levels.push(r.stats_solvated.len());
     }
-    assert_eq!(levels, [1, 2, 2, 3]);
+    assert_eq!(levels, [1, 2, 2, 3, 2, 2]);
 }
 
 /// Each fused smoother step on the GPU (one kernel) equals the same step run

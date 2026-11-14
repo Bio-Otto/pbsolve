@@ -67,6 +67,13 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
         help="preconditioner of the CG solver (default: multigrid-f32, the multigrid V-cycle in single precision "
         "inside the f64 CG; multigrid: the f64 V-cycle, bit-identical to earlier versions)",
     )
+    p.add_argument(
+        "--chgm",
+        default="spl0",
+        choices=["spl0", "spl2", "spl4"],
+        help="charge assignment to the grid, as APBS chgm (default spl0: trilinear; spl2, spl4: B-splines of "
+        "order 3 and 5 over 3 and 5 nodes per axis)",
+    )
 
 
 def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solver:
@@ -83,6 +90,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,
+        chgm=args.chgm,
     )
 
 

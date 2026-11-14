@@ -27,7 +27,9 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
 * **Discretisation:** cell-centred finite volumes on a regular grid, 7-point
   stencil, ε on the three staggered (face-centred) meshes, κ̄² on nodes. The
   matrix is scaled by the cell volume and is symmetric positive definite.
-* **Charges:** trilinear spreading (APBS `chgm spl0`).
+* **Charges:** trilinear spreading (APBS `chgm spl0`, the default) or the
+  order-3 and order-5 B-splines of APBS `chgm spl2` and `spl4` (`charge.rs`);
+  the energy uses the same weights for `spl2`, trilinear ones otherwise.
 * **Dielectric boundary:** `mol` reproduces APBS 3.x `srfm mol` operation for
   operation (`surface.rs`): face nodes inside `r_i + srad` of any atom become
   solute, then nodes within `srad` of an *accessible* SAS point become solvent
@@ -137,7 +139,7 @@ The same holds for the assembly. `surface::maps_on` decides which spheres
 mark which value (solute spheres, probe spheres, ion-exclusion spheres) and
 calls `mark_maps`; the CPU backend runs `surface::mark_map`, the CUDA backend
 marks one sphere per warp with the host's node test. Charges are spread on
-the host (`spread_charges_sparse`, the same sums as `spread_charges`) and
+the host (`spread_charges_sparse_with`, the same sums as `spread_charges_with`) and
 scattered on the device together with the boundary values; `pcg_on` then
 solves without any host copy of the operator. The solution stays on the
 backend: the next focusing level reads it with `gather` at the trilinear

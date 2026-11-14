@@ -1,11 +1,11 @@
 # Comparing with APBS
 
 With `surface="mol"` and `bcfl` `"mdh"`, `"sdh"` or `"zero"`, pbsolve follows
-APBS 3.4.1 (`mg-auto`, `lpbe`, `srfm mol`, `chgm spl0`) operation for
-operation: its focusing grids, dielectric and ion maps are identical to
-APBS', and its energies agree to a few parts per million. `pbsolve.apbs`
-runs both programs on the same problem and shows where they differ, if they
-do. It needs APBS 3.4.1 on the `PATH`
+APBS 3.4.1 (`mg-auto`, `lpbe`, `srfm mol`, `chgm spl0`, `spl2` or `spl4`)
+operation for operation: its focusing grids, dielectric and ion maps are
+identical to APBS', and its energies agree to a few parts per million.
+`pbsolve.apbs` runs both programs on the same problem and shows where they
+differ, if they do. It needs APBS 3.4.1 on the `PATH`
 (`conda install -c conda-forge apbs=3.4.1`).
 
 ## Comparing a structure

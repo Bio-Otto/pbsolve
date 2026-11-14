@@ -113,6 +113,12 @@
   ion at several spacings, averaged over grid placements, and the observed
   convergence order: 1.09–1.18, from about 2.3–2.9 % at 0.5 Å to 0.8–1.0 %
   at 0.2 Å (`docs/VALIDATION.md`).
+- `Solver(chgm="spl2" | "spl4")`, `--chgm`: B-spline charge assignment as
+  APBS `chgm spl2` and `spl4` (orders 3 and 5, 3 and 5 nodes per axis), with
+  APBS' energy rule. The default `spl0` (trilinear) is unchanged. pbsolve's
+  maps and energies agree with APBS 3.4.1 as for `spl0`, and
+  `pbsolve apbs run` now accepts inputs that set them. They hardly change
+  ΔG_polar or its dependence on the grid placement (`docs/VALIDATION.md`).
 - `pbsolve.analytic.two_sphere_energy`: the same for charges in two spheres,
   from a converged multipole solution. The association energy of two spheres
   computed on one grid, as in MM-PBSA, agrees with it to 0.002 kcal/mol with

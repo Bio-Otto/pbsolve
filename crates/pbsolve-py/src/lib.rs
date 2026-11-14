@@ -5,14 +5,14 @@
 use numpy::ndarray::ArrayView2;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pbsolve_core::batch::{device_workers, polar_solvation_batch as core_batch, worker_device_bytes, Job};
-use pbsolve_core::charge::spread_charges;
+use pbsolve_core::charge::spread_charges_with;
 use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
 use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
 use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, kt_in_kj_per_mol};
 use pbsolve_core::{
     apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_solvation, solve_focused, solve_with_maps,
-    Atom, Backend, BoundaryCondition, CoefficientMaps, CpuBackend, DimePolicy, Grid, GridSpec, IonSpecies, Medium,
-    PbError, PbParams, PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
+    Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps, CpuBackend, DimePolicy, Grid, GridSpec,
+    IonSpecies, Medium, PbError, PbParams, PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -515,6 +515,11 @@ impl PyPolarResult {
 ///     "multigrid-f32" (single-precision multigrid V-cycle inside the f64
 ///     conjugate gradients), "multigrid" (the V-cycle in f64) or "jacobi".
 ///     Energies of the multigrid variants agree to 1e-12 relative.
+/// chgm : str
+///     Assignment of the charges to the grid (APBS ``chgm``): "spl0"
+///     (trilinear, 2 nodes per axis), "spl2" (B-spline of order 3, 3 nodes)
+///     or "spl4" (B-spline of order 5, 5 nodes). The energy uses the same
+///     weights with "spl2" and trilinear weights otherwise, as APBS does.
 ///
 /// Raises
 /// ------
@@ -676,7 +681,7 @@ impl PySolver {
         ionic_strength = 0.0, ion_radius = 2.0, ions = None,
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
-        preconditioner = "multigrid-f32"
+        preconditioner = "multigrid-f32", chgm = "spl0"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -699,6 +704,7 @@ impl PySolver {
         max_iter: usize,
         dime_policy: &str,
         preconditioner: &str,
+        chgm: &str,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -708,6 +714,7 @@ impl PySolver {
             sdens,
             surface: SurfaceMethod::parse(surface).map_err(to_py)?,
             bcfl: BoundaryCondition::parse(bcfl).map_err(to_py)?,
+            chgm: ChargeMethod::parse(chgm).map_err(to_py)?,
             tol,
             max_iter,
             preconditioner: Preconditioner::parse(preconditioner).map_err(to_py)?,
@@ -758,6 +765,7 @@ impl PySolver {
         d.set_item("sdens", p.sdens)?;
         d.set_item("surface", p.surface.as_str())?;
         d.set_item("bcfl", p.bcfl.as_str())?;
+        d.set_item("chgm", p.chgm.as_str())?;
         d.set_item("tol", p.tol)?;
         d.set_item("max_iter", p.max_iter)?;
         d.set_item("preconditioner", p.preconditioner.as_str())?;
@@ -1027,7 +1035,7 @@ impl PySolver {
         let (sol, energy) = py
             .detach(|| -> Result<_, PbError> {
                 let sol = self.engine.field(&atoms, &self.params, &spec, medium)?;
-                let e = electrostatic_energy_kt(&sol, &atoms)?;
+                let e = electrostatic_energy_kt(&sol, &atoms, self.params.chgm)?;
                 Ok((sol, e))
             })
             .map_err(to_py)?;
@@ -1092,7 +1100,7 @@ impl PySolver {
         let medium = if reference { Medium::Reference } else { Medium::Solvated };
         let (maps, q) = py
             .detach(|| -> Result<_, PbError> {
-                let q = spread_charges(&g, &atoms)?;
+                let q = spread_charges_with(&g, &atoms, self.params.chgm)?;
                 Ok((coefficient_maps(&g, &atoms, &self.params, medium), q))
             })
             .map_err(to_py)?;

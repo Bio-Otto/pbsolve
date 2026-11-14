@@ -48,6 +48,7 @@ Commands that solve take these options; they are the
 | `--bcfl` | `mdh` | `mdh`, `mdh-fast`, `sdh` or `zero` |
 | `--dime-policy` | `pbsolve` | grid node counts: `pbsolve` (8k+1) or `apbs` (values APBS keeps) |
 | `--preconditioner` | `multigrid-f32` | `multigrid-f32`, `multigrid` or `jacobi` |
+| `--chgm` | `spl0` | charge assignment: `spl0` (trilinear), `spl2` or `spl4` (B-splines of order 3 and 5), as APBS `chgm` |
 
 ## `pbsolve info`
 
@@ -160,6 +161,7 @@ pbsolve reads (converted to PQR first).
 | `--sdens` | surface point density (points per Å², default 10) |
 | `--surface` | `mol` (default) or `vdw`; `harmonic` has no APBS equivalent |
 | `--bcfl` | `mdh` (default), `mdh-fast` (pbsolve's interpolated `mdh`; APBS runs `mdh`), `sdh` or `zero` |
+| `--chgm` | charge assignment, `spl0` (default), `spl2` or `spl4`, written as APBS `chgm` |
 | `--cfac`, `--fadd` | automatic grid sizing ([grids](grids.md)) |
 | `--tol` | pbsolve's CG tolerance, also written as APBS `etol` |
 | `--preconditioner` | pbsolve's preconditioner |

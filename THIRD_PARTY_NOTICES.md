@@ -15,6 +15,7 @@ derived from the APBS 3.4.1 source code (https://github.com/Electrostatics/apbs)
 | `crates/pbsolve-core/src/surface.rs` | `src/generic/vacc.c` (`VaccSurf_refSphere`, `Vacc_atomSurf`, `ivdwAccExclus`), `src/generic/vpbe.c` (cell-list radius), `src/mg/vpmg.c` (`markSphere`, `fillcoCoefMolDielNoSmooth`, `fillcoCoefMolIon`) |
 | `crates/pbsolve-core/src/boundary.rs` | `src/mg/vpmg.c` (`bcflnew`, `bcfl1sp`, `bcfl_sdh`, `multipolebc`) |
 | `crates/pbsolve-core/src/autogrid.rs` | `src/generic/mgparm.c` (`MGparm_check`), `src/generic/nosh.c` (`NOsh_setupCalcMGAUTO`) |
+| `crates/pbsolve-core/src/charge.rs` | `src/mg/vpmg.c` (`bspline2`, `bspline4`, `fillcoChargeSpline2`, `fillcoPermanentMultipole`, `Vpmg_qfEnergy`) |
 
 APBS is not bundled with pbsolve; `pbsolve.apbs` only runs an APBS executable
 that the user installed, for validation. pbsolve is an independent project and
