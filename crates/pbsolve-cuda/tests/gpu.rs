@@ -1152,3 +1152,51 @@ fn gpu_cg_solves_equal_the_stepwise_solves_bit_for_bit() {
         }
     }
 }
+
+/// The reaction-field decomposition (`coulomb = "analytic"`) gives the CPU's
+/// energies on the GPU: one to three focusing levels, both interfaces, with
+/// and without ions. The source is built on the host from maps read back
+/// from the device.
+#[test]
+fn analytic_coulomb_matches_the_cpu() {
+    use pbsolve_core::pb::polar_solvation;
+    use pbsolve_core::{CoulombMethod, GridSpec, InterfaceMethod};
+    if !gpu_present("analytic_coulomb_matches_the_cpu") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let atoms = cluster(150, 23);
+    let fine = [24.0, 22.0, 26.0];
+    let spec = |scale: f64| GridSpec {
+        center: [0.1, -0.2, 0.3],
+        dims: [49, 45, 53],
+        coarse_length: fine.map(|l| scale * l),
+        fine_length: fine,
+    };
+    for (scale, interface, salt) in [
+        (1.0, InterfaceMethod::Sharp, 0.15),
+        (2.0, InterfaceMethod::Fractional, 0.15),
+        (9.0, InterfaceMethod::Sharp, 0.0),
+    ] {
+        let params = PbParams {
+            pdie: 2.0,
+            interface,
+            coulomb: CoulombMethod::Analytic,
+            ..PbParams::default()
+        }
+        .with_salt(salt, 2.0);
+        let spec = spec(scale);
+        let r = polar_solvation(&gpu, &atoms, &params, &spec).unwrap();
+        let cpu = polar_solvation(&CpuBackend::new(), &atoms, &params, &spec).unwrap();
+        let rel = (r.energy_kt - cpu.energy_kt).abs() / cpu.energy_kt.abs();
+        assert!(
+            rel < 1e-10,
+            "{scale} {interface:?}: CPU {} vs CUDA {} ({rel:e})",
+            cpu.energy_kt,
+            r.energy_kt
+        );
+        assert_eq!(r.reference_kt.to_bits(), cpu.reference_kt.to_bits());
+        assert!(r.stats_reference.is_empty());
+        assert_eq!(r.stats_solvated.len(), cpu.stats_solvated.len());
+    }
+}

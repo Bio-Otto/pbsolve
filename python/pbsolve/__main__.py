@@ -55,6 +55,13 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
         "weighted by the edge length inside the solute, close to second order; mol and vdw surfaces)",
     )
     p.add_argument(
+        "--coulomb",
+        default="grid",
+        choices=["grid", "analytic"],
+        help="how dG_polar removes the Coulomb potential (default grid: reference state solved on the same grid, "
+        "as APBS; analytic: reaction-field decomposition, one solve instead of two)",
+    )
+    p.add_argument(
         "--bcfl",
         default="mdh",
         choices=["mdh", "mdh-fast", "sdh", "zero"],
@@ -95,6 +102,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         srad=args.srad,
         surface=args.surface,
         interface=args.interface,
+        coulomb=args.coulomb,
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,

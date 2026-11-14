@@ -47,6 +47,33 @@ grid cancels exactly. The energies of the single states
 depend on the grid; only their difference is physical. `result.energy` is in
 kcal/mol, the attributes ending in `_kt` are in kT.
 
+`coulomb="analytic"` replaces the reference state by the analytic Coulomb
+potential $G = l_B \sum_j q_j / (\varepsilon_p |\mathbf r - \mathbf r_j|)$
+(reaction-field decomposition). It writes $u = v + \chi G$, where $\chi$
+marks the grid nodes within 1 Å (at least two spacings) of an atomic
+sphere. Inside $\chi$ the charges are replaced by the discrete source of $G$,
+so only the reaction field $v$ is solved for, once per focusing level:
+
+$$
+\Delta G_\text{polar} = \tfrac12 \sum_i q_i\,\big[u(\mathbf r_i) - G(\mathbf r_i)\big].
+$$
+
+No grid self-energy appears. `result.reference_kt` is then the Coulomb energy
+of the charges in `pdie` and `result.solvated_kt` that plus ΔG_polar.
+
+| `coulomb` | Coulomb part | Accuracy and cost |
+|---|---|---|
+| `"grid"` (default) | reference state solved on the same grid | as APBS |
+| `"analytic"` | G subtracted near the solute | not an APBS option. With `interface="fractional"` the spread over grid placements halves, and the error of a protein (1YCR) at 0.5 Å shrinks by about 40 %; with the sharp interface it changes little. The CPU needs about 0.6 times the time. On a GPU it is faster for proteins of a few thousand atoms but slower for very large ones, because G is summed over all atoms. |
+
+```python
+decomposed = pbsolve.Solver(ionic_strength=0.15, interface="fractional", coulomb="analytic")
+print(f"{decomposed.polar_solvation(coords, charges, radii).energy:.2f} kcal/mol")
+```
+
+The derivation, the choice of $\chi$ and the related literature are in the
+[validation record](../VALIDATION).
+
 ## Dielectric boundary
 
 `pdie` and `sdie` are the dielectric constants of solute and solvent. The

@@ -47,6 +47,15 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   them; `mark_map` first classifies the nodes whose edges cannot be cut.
 * **Ions:** κ̄² is zero inside `r_i + r_ion` (largest listed ion radius) of
   every atom with `r_i > 0`, marked the same way.
+* **Coulomb part** (`coulomb.rs`): with `coulomb="analytic"` the finest level
+  solves A v = χ·A_p G − A(χG) for v = u − χG, where G is the Coulomb
+  potential in `pdie` and χ the interior nodes within max(1 Å, 2h) of an
+  atom. `Split` marks χ and the thin layer where the right-hand side can be
+  nonzero (with `mark_map`; deep nodes see only `pdie` faces and no ions).
+  It reads the maps on that layer back from the backend, sums G directly
+  there, and passes the result to the solver as node charges. The coarser
+  levels and the operator are those of the solvated state; no reference
+  state is solved.
 * **Boundary conditions** (APBS `vpmg.c`): `mdh` sums Debye–Hückel spheres of
   the atom radii; `sdh` uses charge + dipole + traceless quadrupole about the
   coordinate-box centre with the exact exterior solution of a sphere (ε_p

@@ -7,10 +7,11 @@ use crate::backend::{Backend, MemoryHold};
 use crate::batch::worker_device_bytes;
 use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
 use crate::charge::{spread_charges_sparse_with, spread_charges_with};
+use crate::coulomb::{coulomb_energy_kt, Split};
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::molecule::Atom;
-use crate::params::{ChargeMethod, PbParams};
+use crate::params::{ChargeMethod, CoulombMethod, PbParams};
 use crate::solver::{pcg_on, pcg_setup, SolveStats, SolverOptions};
 use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
@@ -328,7 +329,10 @@ type NodeCharges = (Vec<usize>, Vec<f64>);
 
 /// One LPBE solve on `grid` with Dirichlet values `g` (on
 /// `grid.boundary_indices()`). Also returns the node charges the energy is
-/// taken with ([`ChargeMethod::energy_method`]).
+/// taken with ([`ChargeMethod::energy_method`]). With `decompose` it solves
+/// for the reaction field v = u − χG instead of u ([`crate::coulomb`]) and
+/// also returns the region χ.
+#[allow(clippy::too_many_arguments)]
 fn solve_level<B: Backend>(
     be: &B,
     grid: Grid,
@@ -336,21 +340,28 @@ fn solve_level<B: Backend>(
     atoms: &[Atom],
     params: &PbParams,
     surf: Option<&MolecularSurface>,
+    decompose: bool,
     timings: &mut Timings,
-) -> Result<(LevelSolution<B>, SolveStats, NodeCharges)> {
+) -> Result<(LevelSolution<B>, SolveStats, NodeCharges, Option<Split>)> {
     let t = Instant::now();
     // Maps built from validated parameters are valid (ε > 0, κ̄² ≥ 0).
     let maps = maps_on(be, &grid, atoms, params, surf)?;
     be.synchronize()?;
     timings.maps += t.elapsed().as_secs_f64();
     let t = Instant::now();
-    let (nodes, charges) = spread_charges_sparse_with(&grid, atoms, params.chgm)?;
+    let lb0 = bjerrum_length_vacuum(params.temperature);
+    let (split, (nodes, charges)) = if decompose {
+        let split = Split::new(&grid, atoms);
+        let source = split.source(be, &grid, &maps, atoms, params.pdie, lb0)?;
+        (Some(split), source)
+    } else {
+        (None, spread_charges_sparse_with(&grid, atoms, params.chgm)?)
+    };
     let opts = SolverOptions {
         tol: params.tol,
         max_iter: params.max_iter,
         preconditioner: params.preconditioner,
     };
-    let lb0 = bjerrum_length_vacuum(params.temperature);
     let scatter = || be.scatter(grid.len(), &nodes, &charges);
     let solved = solve_assembled(be, &grid, &grid.boundary_indices(), g, maps, scatter, lb0, opts)?;
     let (x, g, mut stats) = (solved.x, solved.g, solved.stats);
@@ -366,10 +377,10 @@ fn solve_level<B: Backend>(
     timings.solve += stats.solve_seconds;
     timings.assembly += (total - solved.waited - stats.setup_seconds - stats.solve_seconds).max(0.0);
     let energy_charges = match params.chgm.energy_method() {
-        m if m == params.chgm => (nodes, charges),
+        m if m == params.chgm && split.is_none() => (nodes, charges),
         m => spread_charges_sparse_with(&grid, atoms, m)?,
     };
-    Ok((LevelSolution { grid, x, g }, stats, energy_charges))
+    Ok((LevelSolution { grid, x, g }, stats, energy_charges, split))
 }
 
 /// Boundary values of `fine` focused from the solution of the coarser level,
@@ -425,16 +436,20 @@ fn outer_boundary_of(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium:
 /// [`GridSpec::levels`]) of the state whose `inputs` are given: the outermost
 /// level takes their analytic boundary, every finer level takes its boundary
 /// from the previous one, read from the backend at the nodes it needs.
-/// `finish` turns the finest level's solution and node charges into the
-/// result. Time spent waiting for inputs from the background counts as map
-/// time (the surface) and boundary time (the boundary).
+/// With `decompose` the finest level solves for the reaction field
+/// ([`solve_level`]). `finish` turns the finest level's solution, node
+/// charges and region χ into the result. Time spent waiting for inputs from
+/// the background counts as map time (the surface) and boundary time (the
+/// boundary).
+#[allow(clippy::type_complexity)]
 fn focused<B: Backend, T>(
     be: &B,
     levels: &[Grid],
     atoms: &[Atom],
     params: &PbParams,
     inputs: StateInputs,
-    finish: impl FnOnce(LevelSolution<B>, NodeCharges, &mut Timings) -> Result<T>,
+    decompose: bool,
+    finish: impl FnOnce(LevelSolution<B>, NodeCharges, Option<Split>, &mut Timings) -> Result<T>,
 ) -> Result<(T, Vec<SolveStats>, Timings)> {
     let StateInputs {
         surf,
@@ -446,24 +461,36 @@ fn focused<B: Backend, T>(
     timings.maps += t.elapsed().as_secs_f64();
     let mut outer_boundary = Some(outer_boundary);
     let mut stats = Vec::with_capacity(levels.len());
-    let mut last: Option<(LevelSolution<B>, NodeCharges)> = None;
-    for grid in levels {
+    let mut last: Option<(LevelSolution<B>, NodeCharges, Option<Split>)> = None;
+    for (index, grid) in levels.iter().enumerate() {
         let t = Instant::now();
         let coarse = last.take();
         let g = match &coarse {
             None => outer_boundary.take().expect("the outermost level comes first"),
-            Some((coarse, _)) => Pending::Ready(focus_from(be, grid, coarse)?),
+            // Coarser levels solve for u itself (only the finest decomposes).
+            Some((coarse, _, _)) => Pending::Ready(focus_from(be, grid, coarse)?),
         };
         timings.boundary += t.elapsed().as_secs_f64();
         // The coarser level is released before this one allocates (freeing
         // memory belongs to no stage).
         drop(coarse);
-        let (sol, s, charges) = solve_level(be, grid.clone(), g, atoms, params, surf.as_ref(), &mut timings)?;
+        let finest = index + 1 == levels.len();
+        let solved = solve_level(
+            be,
+            grid.clone(),
+            g,
+            atoms,
+            params,
+            surf.as_ref(),
+            decompose && finest,
+            &mut timings,
+        )?;
+        let (sol, s, charges, split) = solved;
         stats.push(s);
-        last = Some((sol, charges));
+        last = Some((sol, charges, split));
     }
-    let (sol, charges) = last.expect("at least one level");
-    let out = finish(sol, charges, &mut timings)?;
+    let (sol, charges, split) = last.expect("at least one level");
+    let out = finish(sol, charges, split, &mut timings)?;
     Ok((out, stats, timings))
 }
 
@@ -541,7 +568,7 @@ pub fn solve_focused<B: Backend>(
     params.validate()?;
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
-    let field = |sol: LevelSolution<B>, _, timings: &mut Timings| {
+    let field = |sol: LevelSolution<B>, _, _, timings: &mut Timings| {
         let t = Instant::now();
         let field = sol.potential(be)?;
         timings.solve += t.elapsed().as_secs_f64();
@@ -549,7 +576,7 @@ pub fn solve_focused<B: Backend>(
     };
     let ((grid, potential), stats, timings) = match background_pool_for(be) {
         Some(pool) => with_background_inputs(&pool, &levels, atoms, params, medium, |inputs| {
-            focused(be, &levels, atoms, params, inputs, field)
+            focused(be, &levels, atoms, params, inputs, false, field)
         })?,
         None => focused(
             be,
@@ -557,6 +584,7 @@ pub fn solve_focused<B: Backend>(
             atoms,
             params,
             StateInputs::build(&levels, atoms, params, medium),
+            false,
             field,
         )?,
     };
@@ -585,16 +613,19 @@ fn energy_at_charges<B: Backend>(be: &B, sol: &LevelSolution<B>, (nodes, charges
     Ok(0.5 * charges.iter().zip(&u).map(|(a, b)| a * b).sum::<f64>())
 }
 
-/// Polar (electrostatic) solvation free energy on the given grid. The
-/// reference state is solved first; on a device backend the host builds the
-/// solvated state's surface and outermost boundary in the background.
+/// Polar (electrostatic) solvation free energy on the given grid. With
+/// [`CoulombMethod::Grid`] the reference state is solved first; on a device
+/// backend the host builds the solvated state's surface and outermost
+/// boundary in the background. With [`CoulombMethod::Analytic`] only the
+/// solvated state is solved, its finest level for the reaction field
+/// ([`crate::coulomb`]).
 pub fn polar_solvation<B: Backend>(
     be: &B,
     atoms: &[Atom],
     params: &PbParams,
     spec: &GridSpec,
 ) -> Result<PolarSolvation> {
-    let energy = |sol: LevelSolution<B>, charges, timings: &mut Timings| {
+    let energy = |sol: LevelSolution<B>, charges, _, timings: &mut Timings| {
         let t = Instant::now();
         let e = energy_at_charges(be, &sol, charges)?;
         timings.energy += t.elapsed().as_secs_f64();
@@ -603,6 +634,43 @@ pub fn polar_solvation<B: Backend>(
     params.validate()?;
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
+    let result = |solvated_kt: f64, reference_kt: f64, stats_solvated, stats_reference, timings| {
+        let energy_kt = solvated_kt - reference_kt;
+        PolarSolvation {
+            energy_kcal: energy_kt * kt_in_kcal_per_mol(params.temperature),
+            energy_kt,
+            solvated_kt,
+            reference_kt,
+            stats_solvated,
+            stats_reference,
+            grid: spec.clone(),
+            timings,
+        }
+    };
+    if params.coulomb == CoulombMethod::Analytic {
+        let lb0 = bjerrum_length_vacuum(params.temperature);
+        let reaction =
+            |sol: LevelSolution<B>, (nodes, charges): NodeCharges, split: Option<Split>, timings: &mut Timings| {
+                let t = Instant::now();
+                let v = sol.values_at(be, &nodes)?;
+                let split = split.expect("the finest level is decomposed");
+                let e = split.reaction_energy(&sol.grid, atoms, params.pdie, lb0, (&nodes, &charges), &v);
+                timings.energy += t.elapsed().as_secs_f64();
+                Ok(e)
+            };
+        let run = |inputs| focused(be, &levels, atoms, params, inputs, true, reaction);
+        let (energy_kt, stats, mut timings) = match background_pool_for(be) {
+            Some(pool) => with_background_inputs(&pool, &levels, atoms, params, Medium::Solvated, run)?,
+            None => run(StateInputs::build(&levels, atoms, params, Medium::Solvated))?,
+        };
+        hold.release()?;
+        // The single states without self-energies: the Coulomb energy in pdie,
+        // and that plus the reaction-field energy.
+        let t = Instant::now();
+        let coulomb_kt = coulomb_energy_kt(atoms, params.pdie, lb0);
+        timings.energy += t.elapsed().as_secs_f64();
+        return Ok(result(coulomb_kt + energy_kt, coulomb_kt, stats, Vec::new(), timings));
+    }
     // The states are independent, so their order does not change any result.
     // The reference state, whose inputs are cheap (no surface, no `exp` in
     // its boundary), is solved first. On a device backend the host builds
@@ -621,29 +689,25 @@ pub fn polar_solvation<B: Backend>(
                 params,
                 Medium::Solvated,
                 |solvated| -> Result<_> {
-                    let reference = focused(be, &levels, atoms, params, reference, energy)?;
-                    Ok((reference, focused(be, &levels, atoms, params, solvated, energy)?))
+                    let reference = focused(be, &levels, atoms, params, reference, false, energy)?;
+                    Ok((reference, focused(be, &levels, atoms, params, solvated, false, energy)?))
                 },
             )?,
             None => {
-                let reference = focused(be, &levels, atoms, params, reference, energy)?;
+                let reference = focused(be, &levels, atoms, params, reference, false, energy)?;
                 let solvated = StateInputs::build(&levels, atoms, params, Medium::Solvated);
-                (reference, focused(be, &levels, atoms, params, solvated, energy)?)
+                (reference, focused(be, &levels, atoms, params, solvated, false, energy)?)
             }
         };
     timings += ref_timings;
     hold.release()?;
-    let energy_kt = solvated_kt - reference_kt;
-    Ok(PolarSolvation {
-        energy_kcal: energy_kt * kt_in_kcal_per_mol(params.temperature),
-        energy_kt,
+    Ok(result(
         solvated_kt,
         reference_kt,
         stats_solvated,
         stats_reference,
-        grid: spec.clone(),
         timings,
-    })
+    ))
 }
 
 #[cfg(test)]

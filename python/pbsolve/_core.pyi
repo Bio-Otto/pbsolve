@@ -105,7 +105,8 @@ class PolarResult:
 
     The per-solve lists (:attr:`iterations`, :attr:`residuals`,
     :attr:`preconditioners`, :attr:`levels`) hold the solvated state's levels
-    (coarse first), then the reference state's.
+    (coarse first), then the reference state's; with ``coulomb="analytic"``
+    there is no reference solve.
     """
 
     energy: float
@@ -113,9 +114,12 @@ class PolarResult:
     energy_kt: float
     """ΔG_polar in kT."""
     solvated_kt: float
-    """Electrostatic energy ½Σqu of the solvated state in kT."""
+    """Electrostatic energy ½Σqu of the solvated state in kT (with
+    ``coulomb="analytic"``: :attr:`reference_kt` + :attr:`energy_kt`)."""
     reference_kt: float
-    """Electrostatic energy ½Σqu of the reference state in kT."""
+    """Electrostatic energy ½Σqu of the reference state in kT (with
+    ``coulomb="analytic"``: the Coulomb energy of the charges in ``pdie``,
+    without self-energies)."""
     iterations: list[int]
     """CG iterations of each linear solve."""
     residuals: list[float]
@@ -209,6 +213,15 @@ class Solver:
         ``sdie`` weighted by the lengths of the face's grid edge inside and
         outside the solute; close to second order on the analytic references,
         not an APBS option).
+    coulomb : str
+        How ΔG_polar removes the Coulomb potential of the charges, and with it
+        the grid's self-energy: "grid" (solve a reference state with ε =
+        ``pdie`` and no ions on the same grid and subtract it, as APBS) or
+        "analytic" (reaction-field decomposition: subtract the analytic
+        Coulomb potential near the solute and solve only for the reaction
+        field, one solve instead of two; not an APBS option). Affects
+        :meth:`polar_solvation` and the functions built on it, not
+        :meth:`potential`.
 
     Raises
     ------
@@ -248,6 +261,7 @@ class Solver:
         preconditioner: str = "multigrid-f32",
         chgm: str = "spl0",
         interface: str = "sharp",
+        coulomb: str = "grid",
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:
@@ -294,7 +308,9 @@ class Solver:
 
         Solves the solvated state (``sdie``, ions) and the reference state
         (``pdie`` everywhere, no ions) on the same grid; ΔG_polar is
-        ½Σq(u_solvated − u_reference).
+        ½Σq(u_solvated − u_reference). With ``coulomb="analytic"`` it solves
+        only for the reaction field u − G (G the Coulomb potential in
+        ``pdie``) and ΔG_polar is ½Σq(u − G).
 
         Parameters
         ----------

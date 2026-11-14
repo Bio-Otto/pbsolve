@@ -30,6 +30,7 @@ pub mod backend;
 pub mod batch;
 pub mod boundary;
 pub mod charge;
+pub mod coulomb;
 pub mod cpu;
 pub mod error;
 pub mod grid;
@@ -52,7 +53,8 @@ pub use error::{PbError, Result};
 pub use grid::Grid;
 pub use molecule::Atom;
 pub use params::{
-    BoundaryCondition, ChargeMethod, InterfaceMethod, IonSpecies, PbParams, Preconditioner, SurfaceMethod,
+    BoundaryCondition, ChargeMethod, CoulombMethod, InterfaceMethod, IonSpecies, PbParams, Preconditioner,
+    SurfaceMethod,
 };
 pub use pb::{
     coefficient_maps, polar_solvation, solve_focused, solve_with_maps, FieldSolution, Medium, PolarSolvation, Timings,

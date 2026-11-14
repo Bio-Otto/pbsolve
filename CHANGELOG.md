@@ -129,6 +129,15 @@
   5–10 times and the ΔΔG_polar bias at 0.5 Å from +13 to +2.7 kcal/mol.
   Opt-in: the default `"sharp"` (as APBS) is bit-identical to before
   (`docs/VALIDATION.md`).
+- `Solver(coulomb="analytic")`, `--coulomb`: reaction-field decomposition.
+  The analytic Coulomb potential of the charges is subtracted near the
+  solute, and ΔG_polar comes from one solve per focusing level, without a
+  reference state or grid self-energy. With the fractional interface the
+  placement spread halves, and 1YCR's ΔG_polar error at 0.5 Å falls from
+  10 to 6 kcal/mol, with the same zero-spacing limit. The CPU needs 0.6
+  times the time. On CUDA it is 7–20 % faster for 1YCR and slower for very
+  large proteins (direct Coulomb sum). Opt-in: the default `"grid"` (as
+  APBS) is bit-identical to before (`docs/VALIDATION.md`).
 - `Solver(chgm="spl2" | "spl4")`, `--chgm`: B-spline charge assignment as
   APBS `chgm spl2` and `spl4` (orders 3 and 5, 3 and 5 nodes per axis), with
   APBS' energy rule. The default `spl0` (trilinear) is unchanged. pbsolve's

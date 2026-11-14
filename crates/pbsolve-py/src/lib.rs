@@ -11,9 +11,9 @@ use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
 use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, kt_in_kj_per_mol};
 use pbsolve_core::{
     apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_solvation, solve_focused, solve_with_maps,
-    Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps, CpuBackend, DimePolicy, Grid, GridSpec,
-    InterfaceMethod, IonSpecies, Medium, PbError, PbParams, PolarSolvation, Preconditioner, SolveStats, SolverOptions,
-    SurfaceMethod,
+    Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps, CoulombMethod, CpuBackend, DimePolicy, Grid,
+    GridSpec, InterfaceMethod, IonSpecies, Medium, PbError, PbParams, PolarSolvation, Preconditioner, SolveStats,
+    SolverOptions, SurfaceMethod,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -379,16 +379,20 @@ impl PyGridSpec {
 ///
 /// The per-solve lists (:attr:`iterations`, :attr:`residuals`,
 /// :attr:`preconditioners`, :attr:`levels`) hold the solvated state's levels
-/// (coarse first), then the reference state's.
+/// (coarse first), then the reference state's; with ``coulomb="analytic"``
+/// there is no reference solve.
 #[pyclass(name = "PolarResult", module = "pbsolve", frozen, get_all)]
 struct PyPolarResult {
     /// Polar solvation free energy ΔG_polar in kcal/mol.
     energy: f64,
     /// ΔG_polar in kT.
     energy_kt: f64,
-    /// Electrostatic energy ½Σqu of the solvated state in kT.
+    /// Electrostatic energy ½Σqu of the solvated state in kT (with
+    /// ``coulomb="analytic"``: :attr:`reference_kt` + :attr:`energy_kt`).
     solvated_kt: f64,
-    /// Electrostatic energy ½Σqu of the reference state in kT.
+    /// Electrostatic energy ½Σqu of the reference state in kT (with
+    /// ``coulomb="analytic"``: the Coulomb energy of the charges in ``pdie``,
+    /// without self-energies).
     reference_kt: f64,
     /// CG iterations of each linear solve.
     iterations: Vec<usize>,
@@ -528,6 +532,15 @@ impl PyPolarResult {
 ///     ``sdie`` weighted by the lengths of the face's grid edge inside and
 ///     outside the solute; close to second order on the analytic references,
 ///     not an APBS option).
+/// coulomb : str
+///     How ΔG_polar removes the Coulomb potential of the charges, and with it
+///     the grid's self-energy: "grid" (solve a reference state with ε =
+///     ``pdie`` and no ions on the same grid and subtract it, as APBS) or
+///     "analytic" (reaction-field decomposition: subtract the analytic
+///     Coulomb potential near the solute and solve only for the reaction
+///     field, one solve instead of two; not an APBS option). Affects
+///     :meth:`polar_solvation` and the functions built on it, not
+///     :meth:`potential`.
 ///
 /// Raises
 /// ------
@@ -689,7 +702,7 @@ impl PySolver {
         ionic_strength = 0.0, ion_radius = 2.0, ions = None,
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
-        preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp"
+        preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid"
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -714,6 +727,7 @@ impl PySolver {
         preconditioner: &str,
         chgm: &str,
         interface: &str,
+        coulomb: &str,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -725,6 +739,7 @@ impl PySolver {
             bcfl: BoundaryCondition::parse(bcfl).map_err(to_py)?,
             chgm: ChargeMethod::parse(chgm).map_err(to_py)?,
             interface: InterfaceMethod::parse(interface).map_err(to_py)?,
+            coulomb: CoulombMethod::parse(coulomb).map_err(to_py)?,
             tol,
             max_iter,
             preconditioner: Preconditioner::parse(preconditioner).map_err(to_py)?,
@@ -777,6 +792,7 @@ impl PySolver {
         d.set_item("bcfl", p.bcfl.as_str())?;
         d.set_item("chgm", p.chgm.as_str())?;
         d.set_item("interface", p.interface.as_str())?;
+        d.set_item("coulomb", p.coulomb.as_str())?;
         d.set_item("tol", p.tol)?;
         d.set_item("max_iter", p.max_iter)?;
         d.set_item("preconditioner", p.preconditioner.as_str())?;
@@ -840,7 +856,9 @@ impl PySolver {
     ///
     /// Solves the solvated state (``sdie``, ions) and the reference state
     /// (``pdie`` everywhere, no ions) on the same grid; ΔG_polar is
-    /// ½Σq(u_solvated − u_reference).
+    /// ½Σq(u_solvated − u_reference). With ``coulomb="analytic"`` it solves
+    /// only for the reaction field u − G (G the Coulomb potential in
+    /// ``pdie``) and ΔG_polar is ½Σq(u − G).
     ///
     /// Parameters
     /// ----------

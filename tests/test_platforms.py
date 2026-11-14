@@ -13,10 +13,11 @@ needs_cuda = pytest.mark.skipif("CUDA" not in pbsolve.available_platforms(), rea
 
 @needs_cuda
 @pytest.mark.parametrize("interface", ["sharp", "fractional"])
-def test_cuda_matches_cpu(interface):
+@pytest.mark.parametrize("coulomb", ["grid", "analytic"])
+def test_cuda_matches_cpu(interface, coulomb):
     coords = np.array([[-1.0, 0.0, 0.0], [1.2, 0.3, 0.0], [0.0, 1.5, -0.4]])
     q, r = np.array([0.6, -0.9, 0.3]), np.array([1.7, 1.5, 1.2])
-    kw = dict(grid_spacing=0.4, ionic_strength=0.15, interface=interface)
+    kw = dict(grid_spacing=0.4, ionic_strength=0.15, interface=interface, coulomb=coulomb)
     cpu = pbsolve.Solver(platform="CPU", **kw).polar_solvation(coords, q, r)
     gpu = pbsolve.Solver(platform="CUDA", **kw).polar_solvation(coords, q, r)
     assert gpu.platform == "CUDA"

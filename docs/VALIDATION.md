@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Reaction-field decomposition (unreleased): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
 | Fractional dielectric interface (unreleased): `interface="fractional"` | faces split exactly against an independent computation (≤ 1e-12); default `sharp` bit-identical (CPU, CUDA); device maps = host maps; 10/11 mutations caught; analytic references with `vdw`: observed orders 1.6–2.5 (sharp 1.0–1.2), errors at 0.5 Å −0.14 … −0.71 % (sharp −2.3 … −4.7 %); with `mol` a +0.13–0.18 % plateau from APBS' sampled probe positions (gone with `sdens=100`); 1YCR placement sd 5–10× smaller, same extrapolated limit as sharp, ΔΔG_bind bias at 0.5 Å +2.7 instead of +13 kcal/mol; calculation 1.5× slower on CUDA, same on CPU; see *Fractional dielectric interface* |
 | Error estimates (unreleased): `estimate_error`, `pbsolve solvation --placements --extrapolate` | first placement = ordinary calculation bit for bit; on the analytic references, extrapolation from 0.35 and 0.25 Å leaves ≤ 0.3 % (means 1.1–1.8 % off), estimated errors within 30 % of the true ones; from 0.5/0.35 Å off by up to 2×; 1YCR: ΔG_polar −1234.7 / −1205.6 / −1190.5 kcal/mol at 0.48 / 0.34 / 0.25 Å, extrapolated −1152, ΔΔG_bind bias ~+6 kcal/mol at 0.25 Å; see *Error estimates* |
 | B-spline charges (unreleased): `chgm` `spl2`, `spl4` as APBS | weights: charge and centre to 1e-12, variance h²/4 and 5h²/12, exact on-node values; energies at the charged nodes = full-potential energies bit for bit (CPU, CUDA); `spl0` bit-identical to the previous commit; APBS 3.4.1: synthetic molecule and 1YCR complex with maps identical and ΔG ≤ 1.3e-6, ΔΔG +0.0012 kcal/mol in APBS units, as `spl0`; 6/6 mutations caught; accuracy: analytic errors and orders unchanged within 0.3 points, 1YCR placement sd 4.09 → 4.07 / 3.88 kcal/mol; cost on 5DK3 +1 % / +4 % (CUDA); see *Charge assignment: B-splines* |
@@ -2034,7 +2035,9 @@ for the surfaces `mol` and `vdw`:
   lengths of the edge inside and outside the solute. This is the exact
   effective dielectric of that edge in one dimension: harmonic averaging of
   boundary dielectrics [Davis & McCammon 1991; Wang et al. 2012], weighted by
-  the exact cut of each edge.
+  the exact cut of each edge. Wang et al. (2009, Eq. 3) define the same
+  edge-weighted harmonic average ("HA") with the interface point on the
+  edge.
 * ℓ_in is computed exactly from the spheres of the surface: the edge's
   chords through the solute spheres (radius r + `srad`) minus its chords
   through the probe spheres. Faces the surface does not cut keep `pdie` or
@@ -2162,7 +2165,10 @@ grid):
 * **Placement sd shrinks 5–10 times** for ΔG_polar and 3.7–4.9 times for
   ΔΔG_bind. The roadmap's target was 3 times.
 * **Both schemes extrapolate to the same limit** (−1152 and 413.4 kcal/mol),
-  so the fractional faces converge to the same solution, only faster.
+  so the fractional faces converge to the same solution, only faster. (This
+  extrapolation is linear; fitted with its observed order of about 2.9 the
+  fractional sequence gives −1155.6 and 414.3, see *Reaction-field
+  decomposition*.)
   Between 0.5 and 0.25 Å ΔG_polar changes by 0.7 % instead of 3.6 %.
 * **ΔΔG_bind bias** at 0.5 Å: +2.7 instead of +13 kcal/mol; at 0.25 Å +1.1
   instead of +5.8. A fractional calculation at 0.5 Å is closer to the limit
@@ -2190,6 +2196,237 @@ and nonlinear PB do not exist yet.
 
 Reproduce: `python scripts/validate_analytic.py --placements 20 --interface
 fractional [--surface vdw] --platform CUDA` (about 10 min for both).
+
+## Reaction-field decomposition (`coulomb="analytic"`)
+
+**Change.** `Solver(coulomb="analytic")` and `--coulomb analytic`:
+* ΔG_polar comes from one solve per focusing level instead of two. The
+  reference state (ε = `pdie`, no ions) is not solved: the analytic Coulomb
+  potential G of the charges is subtracted near the solute, and the finest
+  level solves for the reaction field. The coarser levels solve the solvated
+  state as before; they only supply boundary values.
+* The grid self-energy never enters, so nothing has to cancel. Removing it
+  analytically instead of with a second finite-difference calculation is an
+  old idea [Luty et al. 1992; Zhou et al. 1996], and so is splitting the
+  potential into a singular Coulomb part and a regular reaction field
+  [Chern et al. 2003; Chen et al. 2007; Geng et al. 2007; Cai et al. 2009;
+  Holst et al. 2012]. The discrete form below is pbsolve's own.
+* `coulomb="grid"` stays the default and is bit-identical to the previous
+  commit. `analytic` has no APBS equivalent; `pbsolve.apbs` refuses it.
+  `Solver.potential` is not affected.
+* `reference_kt` becomes the Coulomb energy of the charges in `pdie`, without
+  self-energies; `solvated_kt` is that plus ΔG_polar. `stats_reference` (the
+  reference solves' iterations) is empty.
+
+**Method.** The discrete solvated state is A u = f. A is the volume-scaled
+7-point operator with the face dielectrics ε_f and κ̄²; f = 4π l_B q are the
+spread charges. The default computes
+
+ΔG_polar = ½ qᵀ (A⁻¹ f − A_p⁻¹ f),
+
+with A_p the operator of the reference state (ε = `pdie`, no ions). The
+spread charges' grid self-energy ½ qᵀ A_p⁻¹ f is in both terms and cancels.
+
+*The decomposition.* G = l_B Σ_j q_j / (pdie |r − r_j|) is the Coulomb
+potential in a homogeneous `pdie` medium; χ is a set of interior nodes that
+contains the charges. The substitution u = v + χG is exact for any χ:
+
+A v = f − A(χG).
+
+Inside χ the charges are the sources of G (−pdie ∇²G = 4π l_B ρ). The
+decomposition replaces f there by the discrete source of G, A_p G, and
+outside χ by zero, the continuous source:
+
+A v = χ·A_p G − A(χG) =: r.     (1)
+
+That is the only approximation. Written out per node (c_a the face
+coefficient h_b h_c / h_a, V the cell volume, nb the six neighbours across
+the faces f):
+
+* for c in χ: r_c = Σ_f c_a [(pdie − ε_f)(G_c − G_nb) − ε_f (1 − χ_nb) G_nb] − κ̄²_c V G_c;
+* for c outside χ: r_c = Σ_f c_a ε_f χ_nb G_nb.
+
+r vanishes at a node that lies in χ together with its neighbours, sees only
+`pdie` faces and no ions. It lives on a thin layer: the edge of χ, plus the
+dielectric and ionic boundaries inside χ. G is evaluated only there.
+Equation (1) has the operator and the solvers of the solvated state, so CG,
+multigrid and the CUDA kernels are unchanged. v is the reaction field u − G
+inside χ and the total potential outside, so
+
+ΔG_polar = ½ Σ_i q_i (u − G)(r_i) = ½ Σ_nodes q [v − (1 − χ) G],
+
+with the energy's charge weights (`chgm`).
+
+*Where the accuracy comes from.* With χ = every node, (1) becomes
+A w = −(A − A_p) G for w = u − G. The default satisfies exactly the same
+equation with G replaced by the discrete potential of the spread charges,
+u_ref = A_p⁻¹ f, because A⁻¹f − A_p⁻¹f = −A⁻¹(A − A_p) A_p⁻¹f. A − A_p is
+nonzero only on the dielectric and ionic boundaries. The two methods
+therefore differ only in the Coulomb field those boundaries see: G itself, or
+the discrete field of the spread charges, which deviates from G within a few
+node spacings of a charge. Wang et al. (2009) describe the same effect: the
+finite-volume charge distribution "does distort the otherwise singular
+Coulombic potential especially when it is close to a grid charge".
+
+*The region χ.* The prototype (below) settled this:
+* χ = every node needs G at every node with ions, that is most of the grid.
+  Holst et al. (2012) also show that this two-term splitting is unstable for
+  the potential in the solvent: there G is much larger than u.
+* χ = the nodes whose six faces are `pdie` puts the edge just inside the
+  dielectric boundary. Then the boundary sees the discrete field of the
+  charges again: the Born ion's placement scatter grows 5 to 20 times.
+* χ = the nodes within r_i + D of an atom. For any D ≥ 0 the spheres give the
+  same energies, to 0.003 points. For D < 0 the error grows as the edge
+  approaches a charge: for 2 charges 1.0–1.2 Å deep at 0.5 Å, D = −0.25,
+  −0.5 and −1 Å give −0.25, +0.94 and −181 %, against −0.59 % for D ≥ 0.
+  In a protein, D = 0 is not enough: 109 of 1YCR's 1670 charges, hydrogens
+  of radius 0, lie only 0.72–0.8 Å inside the union of the spheres. At 0.5 Å
+  D = 0 differs from D = 0.5–2.5 Å by 1.8 kcal/mol, while those agree to
+  0.02. At 0.25 Å, D = 0.5–1.5 Å agree to 0.002 and D = 0.25 Å is off by 0.04.
+
+pbsolve uses D = max(1 Å, 2h): the edge stays at least 1.7 Å and two node
+spacings from every charge. In the papers we could read the regular part
+starts at the dielectric boundary [Cai et al. 2009; Wang et al. 2009; Geng
+et al. 2007; Holst et al. 2012], where it needs interface jump conditions.
+Here χ is a set of nodes beyond the atoms and (1) follows from the exact
+substitution; we did not find this discrete form, or the margin, in the
+literature we could read. The full texts of Zhou et al. (1996) and Cai et
+al. (2009) were not accessible; their methods are cited from their
+abstracts and from Wang et al. (2009).
+
+**Prototype.** A Python prototype on `Solver.maps` and `Solver.solve_maps`:
+* reproduced the default to 1e-13;
+* compared the choices of χ above, on the analytic references and 1YCR;
+* decomposing every focusing level or only the finest gave the same 1YCR
+  energies to 0.001 kcal/mol (0.5 and 0.25 Å).
+
+The Rust implementation equals the prototype to ≤ 4e-15 relative: 5
+spheres × 3 settings and 1YCR, with both interfaces.
+
+**Checks:**
+* `source_equals_the_dense_formula_and_vanishes_off_the_layer` (Rust): the
+  sparse right-hand side equals χ·A_p G − A(χG) evaluated at every node to
+  1e-11 of its largest value, and vanishes off the layer. It covers `mol`,
+  `vdw` and `harmonic`, both interfaces, with and without ions, and two
+  spheres 0.1 Å apart whose gap lies between two nodes.
+* `a_fine_grid_through_the_solute`: a fine grid that cuts an atom (focusing
+  on part of a molecule) agrees with the reference method as closely as one
+  that holds it.
+* Further Rust tests: the Born ion; the result fields; outside χ the
+  reaction field is v − G; a charge on a node where G is needed gives an
+  error, not a NaN.
+* Mutations caught: 11/11. They cover:
+  * each term of r, the scale 1/(4π l_B), and the Coulomb energy;
+  * a layer that misses the nodes outside χ, a deep region that is too large;
+  * χ on the grid boundary, a zero margin, the energy outside χ.
+* `tests/test_coulomb.py` (7 tests, 3 s):
+  * the placement spread at 0.5 Å (fractional) narrows by more than a
+    quarter, and the means stay within 0.05 points;
+  * the two methods approach each other with refinement;
+  * one solve per level, and the Coulomb energy in `reference_kt`;
+  * parameter, APBS refusal, error message and the command line.
+* GPU: `analytic_coulomb_matches_the_cpu` (one to three levels, both
+  interfaces, with and without ions): ≤ 1e-10 relative, the Coulomb energy
+  bit for bit. `test_cuda_matches_cpu` for all four combinations. On 1YCR
+  and 5DK3, CPU and CUDA agree to ≤ 4e-11 and 8e-9 kcal/mol.
+* Default path: the fingerprint set is bit-identical on CPU and CUDA.
+
+**Analytic references**, fractional interface (`scripts/validate_analytic.py
+--placements 10 --interface fractional --coulomb grid|analytic`, CUDA; mean
+error and range over the same 10 placements):
+
+| Case | surface | 0.5 Å, grid | 0.5 Å, analytic | 0.25 Å, grid | 0.25 Å, analytic | order grid / analytic |
+|---|---|---|---|---|---|---|
+| Born ion, a = 2 Å | `vdw` | −0.52 (−0.55 … −0.49) | −0.47 (−0.50 … −0.45) | −0.11 (−0.11 … −0.11) | −0.11 (−0.11 … −0.11) | 2.17 / 2.06 |
+|  | `mol` | −0.38 (−0.40 … −0.35) | −0.33 (−0.35 … −0.30) | +0.01 (+0.01 … +0.03) | +0.02 (+0.01 … +0.03) | – |
+| Kirkwood, 3 charges | `vdw` | −0.16 (−0.24 … −0.06) | −0.16 (−0.20 … −0.11) | −0.06 (−0.06 … −0.05) | −0.05 (−0.06 … −0.05) | 1.58 / 1.64 |
+|  | `mol` | +0.05 (−0.03 … +0.16) | +0.05 (+0.00 … +0.11) | +0.16 (+0.15 … +0.17) | +0.16 (+0.15 … +0.17) | – |
+| same, 0.15 M | `vdw` | −0.19 (−0.36 … −0.06) | −0.17 (−0.26 … −0.10) | −0.05 (−0.05 … −0.05) | −0.05 (−0.05 … −0.04) | 1.93 / 1.93 |
+|  | `mol` | −0.01 (−0.18 … +0.13) | +0.01 (−0.08 … +0.08) | +0.13 (+0.13 … +0.14) | +0.14 (+0.13 … +0.14) | – |
+| same, 0.15 M, pdie 4 | `vdw` | −0.18 (−0.29 … +0.00) | −0.15 (−0.21 … −0.06) | −0.04 (−0.04 … −0.03) | −0.03 (−0.04 … −0.03) | 2.12 / 2.05 |
+|  | `mol` | +0.01 (−0.12 … +0.18) | +0.03 (−0.04 … +0.12) | +0.14 (+0.14 … +0.15) | +0.15 (+0.14 … +0.15) | – |
+| 2 charges 1.0–1.2 Å below the surface, 0.15 M | `vdw` | −0.65 (−1.54 … −0.11) | −0.51 (−0.97 … −0.17) | −0.13 (−0.23 … +0.03) | −0.12 (−0.17 … −0.03) | 2.17 / 2.03 |
+|  | `mol` | −0.42 (−1.27 … +0.13) | −0.28 (−0.71 … +0.06) | +0.08 (−0.01 … +0.25) | +0.09 (+0.05 … +0.19) | – |
+| two spheres, 0 M | `vdw` | −0.28 (−0.46 … −0.16) | −0.25 (−0.33 … −0.19) | −0.07 (−0.10 … −0.04) | −0.06 (−0.08 … −0.05) | 2.11 / 2.00 |
+|  | `mol` | −0.07 (−0.25 … +0.04) | −0.03 (−0.12 … +0.03) | +0.14 (+0.12 … +0.17) | +0.15 (+0.13 … +0.16) | – |
+| two spheres, 0.15 M | `vdw` | −0.24 (−0.31 … −0.18) | −0.22 (−0.25 … −0.20) | −0.06 (−0.10 … −0.03) | −0.05 (−0.07 … −0.04) | 2.13 / 2.12 |
+|  | `mol` | −0.06 (−0.12 … +0.00) | −0.04 (−0.07 … −0.01) | +0.12 (+0.08 … +0.15) | +0.13 (+0.11 … +0.14) | – |
+| association, 0 M (kcal/mol) | `vdw` | −0.002 (−0.003 … +0.000) | −0.001 (−0.002 … −0.000) | −0.002 (−0.002 … −0.001) | −0.001 (−0.002 … −0.001) | – |
+|  | `mol` | −0.017 (−0.027 … −0.007) | −0.016 (−0.026 … −0.007) | −0.016 (−0.019 … −0.011) | −0.015 (−0.018 … −0.011) | – |
+| association, 0.15 M (kcal/mol) | `vdw` | −0.000 (−0.002 … +0.001) | −0.000 (−0.001 … +0.001) | −0.000 (−0.001 … +0.001) | +0.000 (−0.000 … +0.000) | – |
+|  | `mol` | −0.011 (−0.017 … −0.001) | −0.011 (−0.017 … −0.002) | −0.011 (−0.016 … −0.005) | −0.011 (−0.015 … −0.005) | – |
+
+* **The placement spread halves.** At 0.5 Å the range falls 1.8 times for
+  the charges 1.0–1.2 Å deep (`vdw`: 1.43 → 0.80 points), 2 times for the
+  Kirkwood charges and 2 times for the two spheres. At 0.25 Å the ranges
+  are already small (≤ 0.26 points) and fall up to 2 times.
+* **The means move a little toward zero** at 0.5 Å, most for the
+  near-surface pair (−0.65 → −0.51 % `vdw`, −0.42 → −0.28 % `mol`) and the
+  Born ion (−0.52 → −0.47 %). The orders are unchanged (about 2). The `mol`
+  plateau of +0.13–0.16 % is APBS' surface and stays.
+* **With the sharp interface** nothing changes: the means move by at most
+  0.16 points and the ranges stay the same. There the error of the boundary
+  itself (first order, several %) dominates.
+
+**A protein** (1YCR, 0.15 M, CUDA, 8 placements per spacing on a fixed grid,
+the same for both methods; ΔΔG_bind with receptor and ligand on the complex's
+grid; mean (sd) in kcal/mol):
+
+| h (Å) | interface | ΔG_polar, grid | ΔG_polar, analytic | ΔΔG_bind, grid | ΔΔG_bind, analytic |
+|---|---|---|---|---|---|
+| 0.5 | sharp | −1230.27 (4.99) | −1224.06 (4.32) | 425.20 (2.16) | 424.31 (1.79) |
+| 0.35 | sharp | −1206.19 (1.80) | −1204.67 (1.68) | 421.45 (0.59) | 421.17 (0.54) |
+| 0.25 | sharp | −1190.83 (0.78) | −1190.48 (0.77) | 419.46 (0.42) | 419.36 (0.41) |
+| 0.5 | fractional | −1165.69 (1.08) | −1161.38 (0.49) | 415.92 (0.59) | 415.32 (0.37) |
+| 0.35 | fractional | −1159.18 (0.50) | −1157.90 (0.25) | 414.87 (0.22) | 414.68 (0.09) |
+| 0.25 | fractional | −1156.93 (0.15) | −1156.64 (0.07) | 414.53 (0.08) | 414.45 (0.04) |
+
+* **Fractional: the same limit, reached sooner.** Each sequence is fitted
+  with its own observed order: 2.9 / 2.8 for ΔG_polar, 3.1 / 2.8 for
+  ΔΔG_bind. The limits agree: ΔG_polar −1155.6 / −1155.8 and ΔΔG_bind
+  414.3 / 414.3 kcal/mol (grid / analytic). The errors against these limits:
+
+  | | ΔG_polar, grid | ΔG_polar, analytic | ΔΔG_bind, grid | ΔΔG_bind, analytic |
+  |---|---|---|---|---|
+  | 0.5 Å | −10.1 | −5.6 | +1.6 | +1.0 |
+  | 0.25 Å | −1.4 | −0.8 | +0.19 | +0.15 |
+
+  The placement sd halves at every spacing. The fractional section above
+  extrapolates linearly to −1151.3, which overshoots for energies that
+  converge this fast.
+* **Sharp: a small gain.** The two methods differ by 6.2, 1.5 and
+  0.35 kcal/mol at 0.5, 0.35 and 0.25 Å, and the sd falls by up to 13 %.
+  The boundary's first-order error (tens of kcal/mol) dominates.
+
+**Cost** (0.15 M, best of 2 on CUDA, 1 on the CPU, seconds per calculation):
+
+| | CUDA, grid | CUDA, analytic | CPU, grid | CPU, analytic |
+|---|---|---|---|---|
+| 1YCR 0.5 Å, sharp | 0.20 | 0.16 | 1.57 | 0.97 |
+| 1YCR 0.5 Å, fractional | 0.29 | 0.27 | 1.58 | 0.96 |
+| 1YCR 0.25 Å, sharp | 1.04 | 0.86 | 13.3 | 7.7 |
+| 1YCR 0.25 Å, fractional | 1.49 | 1.35 | 13.0 | 7.4 |
+| 5DK3 0.5 Å (20 179 atoms), sharp | 4.30 | 5.75 | 30.0 | 21.6 |
+
+* **Speed-up.** Dropping the reference solves saves 38–43 % on the CPU
+  for 1YCR (28 % for 5DK3) and 7–20 % on CUDA.
+* **Cost of G.** G is summed directly over all atoms at the layer's nodes.
+  The layer's right-hand side takes 0.03 s for 1YCR at 0.5 Å, 0.18 s at
+  0.25 Å and 2.1 s for 5DK3 (CUDA runs). For large proteins on a GPU this
+  costs more than the reference solve it replaces.
+* **Follow-up.** A treecode or multilevel summation would make G cheap.
+
+**Limits.**
+* A charge exactly on a node where G is needed (next to the dielectric
+  boundary, or a charge in the solvent) cannot be decomposed. It raises an
+  error that names the node.
+* The coarser focusing levels are not decomposed; they only provide
+  boundary values.
+* Forces, which the roadmap builds on this decomposition (4.12), do not
+  exist yet.
+
+Reproduce: `python scripts/validate_analytic.py --placements 10 --interface
+fractional --coulomb analytic [--surface vdw] --platform CUDA`.
 
 ## Sensitivity of the sharp dielectric boundary
 

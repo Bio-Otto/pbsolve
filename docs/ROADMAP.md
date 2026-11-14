@@ -208,6 +208,25 @@ grid self-energy, so the reference solve is no longer needed, and accuracy
 improves at coarse spacing. It is also the formulation that interface methods
 and forces build on. The current "same grid" reference-state method stays
 available and is the default until the new path is validated.
+*Status: done (unreleased) as `coulomb="analytic"`.*
+* u = v + χG with G the Coulomb potential in `pdie` and χ the nodes within
+  max(1 Å, 2h) of an atom. The substitution is exact; the one approximation
+  replaces the charges inside χ by the discrete source of G. The right-hand
+  side then lives on a thin layer, and the solvated operator and solvers are
+  reused unchanged. One solve per focusing level, only the finest level
+  decomposed.
+* Related work: the reference calculation was removed by Luty et al. (1992)
+  and Zhou et al. (1996). Chern et al. (2003), Chen et al. (2007), Geng et
+  al. (2007), Cai et al. (2009) and Holst et al. (2012) split the potential
+  into a singular and a regular part. Their regular part starts at the
+  dielectric boundary; here χ extends beyond the atoms, because an edge
+  close to a charge costs accuracy (docs/VALIDATION.md).
+* With the fractional interface the placement spread halves (analytic
+  references and 1YCR), and 1YCR's ΔG_polar at 0.5 Å moves toward its limit.
+  With the sharp interface nothing changes beyond 0.16 points.
+* Cost: 1.7× faster on the CPU, 7–20 % faster on CUDA for 1YCR. G is a
+  direct sum, so 5DK3 on CUDA takes 5.75 instead of 4.30 s; a treecode is
+  the follow-up.
 
 **4.6 Charge assignment.** B-spline spreading (smoother source, less
 grid-position dependence) next to trilinear, selectable per run.
@@ -477,9 +496,11 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Bashford D, Karplus M. pKa's of ionizable groups in proteins: atomic detail from a continuum electrostatic model. Biochemistry 29, 10219 (1990).
 * Borukhov I, Andelman D, Orland H. Steric effects in electrolytes: a modified Poisson–Boltzmann equation. Phys. Rev. Lett. 79, 435 (1997).
 * Bosy M, Scroggs MW, Betcke T, Burman E, Cooper CD. Coupling finite and boundary element methods to solve the Poisson–Boltzmann equation for electrostatics in molecular solvation. J. Comput. Chem. (2024).
+* Cai Q, Wang J, Zhao HK, Luo R. On removal of charge singularity in Poisson–Boltzmann equation. J. Chem. Phys. 130, 145101 (2009).
 * Cai Q, Ye X, Wang J, Luo R. Dielectric boundary forces in numerical Poisson–Boltzmann methods: theory and numerical strategies. Chem. Phys. Lett. 514, 368 (2011).
 * Chen D, Chen Z, Chen C, Geng W, Wei GW. MIBPB: a software package for electrostatic analysis. J. Comput. Chem. 32, 756 (2011).
 * Chen et al. Poisson–Boltzmann-based machine learning model for electrostatic analysis. Biophys. J. (2024).
+* Chen L, Holst MJ, Xu J. The finite element approximation of the nonlinear Poisson–Boltzmann equation. SIAM J. Numer. Anal. 45, 2298 (2007).
 * Chern IL, Liu JG, Wang WC. Accurate evaluation of electrostatics for macromolecules in solution. Methods Appl. Anal. 10, 309 (2003).
 * Davis ME, McCammon JA. Dielectric boundary smoothing in finite difference solutions of the Poisson equation: an approach to improve accuracy and convergence. J. Comput. Chem. 12, 909 (1991).
 * Decherchi S, Rocchia W. A general and robust ray-casting-based algorithm for triangulating surfaces at the nanoscale. PLoS One 8, e59744 (2013).
@@ -492,6 +513,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Grant JA, Pickup BT, Nicholls A. A smooth permittivity function for Poisson–Boltzmann solvation methods. J. Comput. Chem. 22, 608 (2001).
 * Greene D, Qi R, Nguyen R, Qiu T, Luo R. Heterogeneous dielectric implicit membrane model for the calculation of MMPBSA binding free energies. J. Chem. Inf. Model. 59, 3041 (2019).
 * Hahn DF, et al. Best practices for constructing, preparing, and evaluating protein–ligand binding affinity benchmarks. Living J. Comp. Mol. Sci. 4, 1497 (2022).
+* Holst M, McCammon JA, Yu Z, Zhou YC, Zhu Y. Adaptive finite element modeling techniques for the Poisson–Boltzmann equation. Commun. Comput. Phys. 11, 179 (2012).
 * Holst M, Saied F. Multigrid solution of the Poisson–Boltzmann equation. J. Comput. Chem. 14, 105 (1993).
 * Holst MJ, Saied F. Numerical solution of the nonlinear Poisson–Boltzmann equation: developing more robust and efficient methods. J. Comput. Chem. 16, 337 (1995).
 * Huang et al. Neural network Poisson–Boltzmann electrostatics for biomolecular interactions. J. Comput. Phys. (2025); preprint HKU IMR2025-01.
@@ -500,6 +522,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Katzberger P, Riniker S. Implicit solvent approach based on generalized Born and transferable graph neural networks for molecular dynamics simulations. J. Chem. Phys. 158, 204101 (2023); A general graph neural network based implicit solvation model for organic molecules in water. Chem. Sci. (2024).
 * Kirkwood JG. Theory of solutions of molecules containing widely separated charges with special application to zwitterions. J. Chem. Phys. 2, 351 (1934).
 * Li L, Li C, Zhang Z, Alexov E. On the dielectric "constant" of proteins: smooth dielectric function for macromolecular modeling and its implementation in DelPhi. J. Chem. Theory Comput. 9, 2126 (2013).
+* Luty BA, Davis ME, McCammon JA. Electrostatic energy calculations by a finite-difference method: rapid calculation of charge–solvent interaction energies. J. Comput. Chem. 13, 768 (1992).
 * McCormick SF, Benzaken J, Tamstorf R. Algebraic error analysis for mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S392 (2021a).
 * Miller BR, McGee TD, Swails JM, Homeyer N, Gohlke H, Roitberg AE. MMPBSA.py: an efficient program for end-state free energy calculations. J. Chem. Theory Comput. 8, 3314 (2012).
 * Mobley DL, Guthrie JP. FreeSolv: a database of experimental and calculated hydration free energies, with input files. J. Comput. Aided Mol. Des. 28, 711 (2014).
@@ -528,6 +551,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Wilson L, Geng W, Krasny R. TABI-PB 2.0: an improved version of the treecode-accelerated boundary integral Poisson–Boltzmann solver. J. Phys. Chem. B 126, 7104 (2022).
 * Wu et al. End-to-end reaction field energy modeling via deep learning based voxel-to-voxel transform (PBNeF). arXiv:2410.03927 (2024).
 * Zhou YC, Feig M, Wei GW. Highly accurate biomolecular electrostatics in continuum dielectric environments. J. Comput. Chem. 29, 87 (2008).
+* Zhou Z, Payne P, Vasquez M, Kuhn N, Levitt M. Finite-difference solution of the Poisson–Boltzmann equation: complete elimination of self-energy. J. Comput. Chem. 17, 1344 (1996).
 * Achieving all-atom molecular dynamics accuracy from the Poisson–Boltzmann method through machine learning. J. Chem. Phys. 164, 054107 (2026).
 * Improving the predictive performance of binding affinities and poses for protein–cyclic peptide complexes through fine-tuned MM/PBSA(GBSA)-based methods. Brief. Bioinform. 26, bbaf632 (2025).
 * Enhancing MM/P(G)BSA methods: integration of formulaic entropy. ChemRxiv, doi:10.26434/chemrxiv-2024-9308m (2024, preprint).

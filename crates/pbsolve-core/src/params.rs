@@ -198,6 +198,39 @@ impl InterfaceMethod {
     }
 }
 
+/// How ΔG_polar removes the Coulomb potential of the charges, and with it
+/// the grid's self-energy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CoulombMethod {
+    /// Solve a reference state (ε = `pdie`, no ions) on the same grid and
+    /// subtract it (APBS, the default): two solves per grid level.
+    #[default]
+    Grid,
+    /// Reaction-field decomposition: the analytic Coulomb potential is
+    /// subtracted near the solute and only the reaction field is solved
+    /// for, one solve per grid level. Not an APBS option.
+    Analytic,
+}
+
+impl CoulombMethod {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "grid" => Ok(Self::Grid),
+            "analytic" => Ok(Self::Analytic),
+            other => invalid(format!(
+                "unknown coulomb method '{other}' (expected 'grid' or 'analytic')"
+            )),
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Grid => "grid",
+            Self::Analytic => "analytic",
+        }
+    }
+}
+
 /// One mobile ion species (APBS `ion charge .. conc .. radius ..`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IonSpecies {
@@ -226,6 +259,9 @@ pub struct PbParams {
     pub surface: SurfaceMethod,
     /// Dielectric of the faces the surface cuts (`mol` and `vdw` only).
     pub interface: InterfaceMethod,
+    /// How ΔG_polar removes the Coulomb potential (reference solve or
+    /// reaction-field decomposition).
+    pub coulomb: CoulombMethod,
     pub bcfl: BoundaryCondition,
     /// Charge assignment to the grid.
     pub chgm: ChargeMethod,
@@ -248,6 +284,7 @@ impl Default for PbParams {
             sdens: 10.0,
             surface: SurfaceMethod::Mol,
             interface: InterfaceMethod::Sharp,
+            coulomb: CoulombMethod::Grid,
             bcfl: BoundaryCondition::Mdh,
             chgm: ChargeMethod::Trilinear,
             tol: 1.0e-8,
