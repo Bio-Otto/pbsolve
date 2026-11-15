@@ -114,7 +114,10 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   coordinates use APBS' formula (`xmin = c − (n−1)h/2`).
 * **Energy:** ΔG_polar = ½ Σ q_i [u_solv(r_i) − u_ref(r_i)], with the reference
   state (ε = pdie everywhere, no ions) solved on the *same* grids so the grid
-  self-energy cancels exactly.
+  self-energy cancels exactly. Each atom's term (`charge::atom_energies`,
+  the energy's weights applied to the potential at the charged nodes that
+  the energy reads anyway) is kept as `PolarSolvation::atom_energies_kcal`;
+  the energy itself is summed as before, so it is unchanged bit for bit.
 * **Linear solver:** preconditioned CG, written once against `Backend`.
   Preconditioner: one geometric multigrid V-cycle (`multigrid.rs`):
   per-axis vertex coarsening `n → n/2 + 1` (any grid size; axes with < 5 nodes

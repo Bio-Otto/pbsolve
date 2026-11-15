@@ -129,6 +129,16 @@ coarser focusing levels. On 1YCR and on strongly charged test systems (up to
 a −30 e sphere) the solvated energies agree to ≤ 2.3e-9 in APBS units, and
 the nonlinear correction (npbe − lpbe) agrees to 1e-4 kcal/mol.
 
+**Per-atom energies.** With `--atom-energies` (Python: `atom_energies=True`)
+APBS writes ½ q_i u(r_i) of every atom in both states (`calcenergy comps`),
+and the report compares their difference with
+{py:attr}`pbsolve.PolarResult.atom_energies`. They agree to ≤ 3e-6 of the
+largest share with `mdh` (the boundary constants again) and to ≤ 3e-8 with
+`bcfl zero`, on the synthetic molecule and on 1YCR. With `chgm spl2` APBS
+takes its energy with the spl2 weights but its per-atom energies with
+trilinear ones, so they do not add up there; pbsolve refuses that
+comparison.
+
 **Non-polar terms.** {py:func}`pbsolve.apbs.apolar_energy` runs APBS
 `apolar` on the input of {py:func}`pbsolve.apolar_energy` and returns its
 terms in the same form. Every atom becomes a residue of its own, with a

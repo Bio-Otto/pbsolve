@@ -419,6 +419,11 @@ struct PyPolarResult {
     grid: PyGridSpec,
     /// Platform the calculation ran on, "CPU" or "CUDA".
     platform: String,
+    /// ΔG_polar of every atom in kcal/mol, shape (N,), each ½ q_i times
+    /// the reaction field at the atom (the energy's charge weights); they
+    /// sum to :attr:`energy`. ``None`` for ``equation="npbe"`` and
+    /// ``"smpbe"`` with ions, whose energy is not a sum over the charges.
+    atom_energies: Option<Py<PyArray1<f64>>>,
 }
 
 #[pymethods]
@@ -446,9 +451,10 @@ fn timings_map(t: &pbsolve_core::Timings) -> std::collections::BTreeMap<&'static
 }
 
 impl PyPolarResult {
-    fn from_core(r: PolarSolvation, platform: &str) -> Self {
+    fn from_core(py: Python<'_>, r: PolarSolvation, platform: &str) -> Self {
         let stats = r.stats_solvated.iter().chain(&r.stats_reference);
         Self {
+            atom_energies: r.atom_energies_kcal.map(|e| PyArray1::from_vec(py, e).unbind()),
             energy: r.energy_kcal,
             energy_kt: r.energy_kt,
             solvated_kt: r.solvated_kt,
@@ -978,7 +984,7 @@ impl PySolver {
         let res = py
             .detach(|| self.engine.polar(&atoms, &self.params, &spec))
             .map_err(to_py)?;
-        Ok(PyPolarResult::from_core(res, self.engine.platform()))
+        Ok(PyPolarResult::from_core(py, res, self.engine.platform()))
     }
 
     /// Polar solvation free energy ΔG_polar and the forces on the atoms.
@@ -1043,7 +1049,7 @@ impl PySolver {
             qf: array(&res.qf)?,
             db: array(&res.db)?,
             ib: array(&res.ib)?,
-            result: Py::new(py, PyPolarResult::from_core(res.solvation, self.engine.platform()))?,
+            result: Py::new(py, PyPolarResult::from_core(py, res.solvation, self.engine.platform()))?,
         })
     }
 
@@ -1141,7 +1147,10 @@ impl PySolver {
         let workers = self.workers_for(workers)?;
         let out = py.detach(|| self.run_batch(&atoms, &specs, workers)).map_err(to_py)?;
         let platform = self.engine.platform();
-        Ok(out.into_iter().map(|r| PyPolarResult::from_core(r, platform)).collect())
+        Ok(out
+            .into_iter()
+            .map(|r| PyPolarResult::from_core(py, r, platform))
+            .collect())
     }
 
     /// Number of calculations the batch methods run at once on ``grid``.

@@ -6,7 +6,7 @@ use crate::autogrid::GridSpec;
 use crate::backend::{Backend, MemoryHold};
 use crate::batch::calculation_device_bytes;
 use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
-use crate::charge::{spread_charges_sparse_with, spread_charges_with};
+use crate::charge::{atom_energies, spread_charges_sparse_with, spread_charges_with};
 use crate::coulomb::{coulomb_energy_kt, Split};
 use crate::error::{invalid, PbError, Result};
 use crate::forces::{state_forces, ForceTerms};
@@ -100,6 +100,12 @@ pub struct PolarSolvation {
     pub grid: GridSpec,
     /// Both states and the energy evaluation.
     pub timings: Timings,
+    /// ΔG_polar of every atom in kcal/mol, ½ q_i [u_solvated − u_reference]
+    /// at the atom with the energy's charge weights (with `coulomb =
+    /// analytic`: ½ q_i times the reaction field); they sum to
+    /// `energy_kcal`. `None` for the nonlinear equations with ions, whose
+    /// energy is not a sum over the charges.
+    pub atom_energies_kcal: Option<Vec<f64>>,
 }
 
 /// ΔG_polar with the forces on the atoms ([`polar_forces`]).
@@ -766,9 +772,25 @@ pub fn electrostatic_energy_kt(sol: &FieldSolution, atoms: &[Atom], chgm: Charge
 /// [`electrostatic_energy_kt`] of the finest level from u at the charged
 /// nodes only: the same products in the same order without the zero terms,
 /// hence the same value (a total of exactly zero may differ in its sign).
-fn energy_at_charges<B: Backend>(be: &B, sol: &LevelSolution<B>, (nodes, charges): NodeCharges) -> Result<f64> {
+/// Also every atom's share ([`atom_energies`]).
+fn energy_at_charges<B: Backend>(
+    be: &B,
+    sol: &LevelSolution<B>,
+    (nodes, charges): NodeCharges,
+    atoms: &[Atom],
+    params: &PbParams,
+) -> Result<(f64, Vec<f64>)> {
     let u = sol.values_at(be, &nodes)?;
-    Ok(0.5 * charges.iter().zip(&u).map(|(a, b)| a * b).sum::<f64>())
+    let energy = 0.5 * charges.iter().zip(&u).map(|(a, b)| a * b).sum::<f64>();
+    let at = |c: usize| {
+        u[nodes
+            .binary_search(&c)
+            .expect("an atom's stencil node is a charged node")]
+    };
+    Ok((
+        energy,
+        atom_energies(&sol.grid, atoms, params.chgm.energy_method(), at)?,
+    ))
 }
 
 /// Polar (electrostatic) solvation free energy on the given grid. With
@@ -860,25 +882,31 @@ fn polar<B: Backend>(
               extra: LevelExtra,
               external: [f64; 2],
               timings: &mut Timings|
-              -> Result<(f64, Option<ForceTerms>)> {
+              -> Result<(f64, Option<ForceTerms>, Option<Vec<f64>>)> {
             let t = Instant::now();
             let nonlinear = nonlinear_energy(&extra, params, lb0, (&nodes, &charges), external);
             let out = if forces {
                 let (grid, u) = sol.potential(be)?;
-                let e = match nonlinear {
-                    Some(e) => e,
-                    None => 0.5 * charges.iter().zip(&nodes).map(|(q, &c)| q * u[c]).sum::<f64>(),
+                let (e, per_atom) = match nonlinear {
+                    Some(e) => (e, None),
+                    None => (
+                        0.5 * charges.iter().zip(&nodes).map(|(q, &c)| q * u[c]).sum::<f64>(),
+                        Some(atom_energies(&grid, atoms, params.chgm.energy_method(), |c| u[c])?),
+                    ),
                 };
                 (
                     e,
                     Some(state_forces(&grid, atoms, params, &u, medium == Medium::Solvated)?),
+                    per_atom,
                 )
             } else {
-                let e = match nonlinear {
-                    Some(e) => e,
-                    None => energy_at_charges(be, &sol, (nodes, charges))?,
-                };
-                (e, None)
+                match nonlinear {
+                    Some(e) => (e, None, None),
+                    None => {
+                        let (e, per_atom) = energy_at_charges(be, &sol, (nodes, charges), atoms, params)?;
+                        (e, None, Some(per_atom))
+                    }
+                }
             };
             timings.energy += t.elapsed().as_secs_f64();
             Ok(out)
@@ -887,10 +915,11 @@ fn polar<B: Backend>(
     params.validate()?;
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
-    let result = |solvated_kt: f64, reference_kt: f64, stats_solvated, stats_reference, timings| {
+    let kt = kt_in_kcal_per_mol(params.temperature);
+    let result = |solvated_kt: f64, reference_kt: f64, stats_solvated, stats_reference, timings, atom_energies_kcal| {
         let energy_kt = solvated_kt - reference_kt;
         PolarSolvation {
-            energy_kcal: energy_kt * kt_in_kcal_per_mol(params.temperature),
+            energy_kcal: energy_kt * kt,
             energy_kt,
             solvated_kt,
             reference_kt,
@@ -898,6 +927,7 @@ fn polar<B: Backend>(
             stats_reference,
             grid: spec.clone(),
             timings,
+            atom_energies_kcal,
         }
     };
     if params.coulomb == CoulombMethod::Analytic {
@@ -907,12 +937,22 @@ fn polar<B: Backend>(
             let LevelExtra::Split(split) = extra else {
                 unreachable!("the finest level is decomposed")
             };
-            let e = split.reaction_energy(&sol.grid, atoms, params.pdie, lb0, (&nodes, &charges), &v);
+            let rf = split.reaction_field(&sol.grid, atoms, params.pdie, lb0, &nodes, &v);
+            let mut sum = 0.0;
+            for (q, rf) in charges.iter().zip(&rf) {
+                sum += q * rf;
+            }
+            let at = |c: usize| {
+                rf[nodes
+                    .binary_search(&c)
+                    .expect("an atom's stencil node is a charged node")]
+            };
+            let per_atom = atom_energies(&sol.grid, atoms, params.chgm.energy_method(), at)?;
             timings.energy += t.elapsed().as_secs_f64();
-            Ok(e)
+            Ok((0.5 * sum, per_atom))
         };
         let run = |inputs| focused(be, &levels, atoms, params, inputs, true, reaction);
-        let (energy_kt, stats, mut timings) = match background_pool_for(be) {
+        let ((energy_kt, per_atom), stats, mut timings) = match background_pool_for(be) {
             Some(pool) => with_background_inputs(&pool, &levels, atoms, params, Medium::Solvated, run)?,
             None => run(StateInputs::build(&levels, atoms, params, Medium::Solvated))?,
         };
@@ -922,8 +962,16 @@ fn polar<B: Backend>(
         let t = Instant::now();
         let coulomb_kt = coulomb_energy_kt(atoms, params.pdie, lb0);
         timings.energy += t.elapsed().as_secs_f64();
+        let per_atom = per_atom.into_iter().map(|e| e * kt).collect();
         return Ok((
-            result(coulomb_kt + energy_kt, coulomb_kt, stats, Vec::new(), timings),
+            result(
+                coulomb_kt + energy_kt,
+                coulomb_kt,
+                stats,
+                Vec::new(),
+                timings,
+                Some(per_atom),
+            ),
             None,
         ));
     }
@@ -937,8 +985,8 @@ fn polar<B: Backend>(
     // solvated inputs for the same threads.
     let reference = StateInputs::build(&levels, atoms, params, Medium::Reference);
     let (
-        ((reference_kt, ref_forces), stats_reference, ref_timings),
-        ((solvated_kt, forces), stats_solvated, mut timings),
+        ((reference_kt, ref_forces, ref_atoms), stats_reference, ref_timings),
+        ((solvated_kt, forces, solv_atoms), stats_solvated, mut timings),
     ) = match background_pool_for(be) {
         Some(pool) => with_background_inputs(
             &pool,
@@ -963,7 +1011,17 @@ fn polar<B: Backend>(
     };
     timings += ref_timings;
     hold.release()?;
-    let res = result(solvated_kt, reference_kt, stats_solvated, stats_reference, timings);
+    let per_atom = solv_atoms
+        .zip(ref_atoms)
+        .map(|(s, r)| s.iter().zip(&r).map(|(s, r)| (s - r) * kt).collect());
+    let res = result(
+        solvated_kt,
+        reference_kt,
+        stats_solvated,
+        stats_reference,
+        timings,
+        per_atom,
+    );
     Ok((res, forces.zip(ref_forces).map(|(s, r)| [s, r])))
 }
 
@@ -1025,6 +1083,136 @@ mod tests {
             });
         }
         atoms
+    }
+
+    /// Four charged atoms of different radii, off the grid lines.
+    fn quartet() -> Vec<Atom> {
+        [
+            ([0.13, -0.21, 0.07], 0.6, 1.8),
+            ([1.91, 0.52, -0.33], -0.4, 1.5),
+            ([-1.2, 1.37, 0.48], 0.35, 1.6),
+            ([0.4, -1.6, 1.71], -0.25, 1.4),
+        ]
+        .map(|(position, charge, radius)| Atom {
+            position,
+            charge,
+            radius,
+        })
+        .to_vec()
+    }
+
+    #[test]
+    fn atom_energies_sum_to_the_energy() {
+        use crate::params::{ChargeMethod, CoulombMethod, Equation, InterfaceMethod};
+        let atoms = quartet();
+        let base = PbParams::default().with_salt(0.15, 2.0);
+        let cases = [
+            base.clone(),
+            PbParams {
+                chgm: ChargeMethod::Spline2,
+                ..base.clone()
+            },
+            PbParams {
+                chgm: ChargeMethod::Spline4,
+                ..base.clone()
+            },
+            PbParams {
+                coulomb: CoulombMethod::Analytic,
+                interface: InterfaceMethod::Fractional,
+                ..base.clone()
+            },
+        ];
+        for params in cases {
+            let r = solve(&atoms, &params, 0.5);
+            let per_atom = r.atom_energies_kcal.expect("lpbe decomposes");
+            let sum: f64 = per_atom.iter().sum();
+            assert!(
+                (sum - r.energy_kcal).abs() < 1e-12 * r.energy_kcal.abs(),
+                "{sum} vs {}",
+                r.energy_kcal
+            );
+        }
+        // The forces path gives the same per-atom energies.
+        let spline = PbParams {
+            surface: SurfaceMethod::Spline2,
+            ..base.clone()
+        };
+        let spec = GridSpec::auto(&atoms, 0.5, 1.7, 12.0).unwrap();
+        let plain = polar_solvation(&CpuBackend::new(), &atoms, &spline, &spec).unwrap();
+        let forces = polar_forces(&CpuBackend::new(), &atoms, &spline, &spec).unwrap();
+        assert_eq!(plain.atom_energies_kcal, forces.solvation.atom_energies_kcal);
+        // The nonlinear energy is a functional, not a sum over the charges.
+        let npbe = PbParams {
+            equation: Equation::Nonlinear,
+            ..base
+        };
+        assert!(solve(&atoms, &npbe, 0.5).atom_energies_kcal.is_none());
+    }
+
+    /// The per-atom energies are the linear response: E_i of all charges is
+    /// E_i of charge i alone plus its pair terms with every other charge,
+    /// on the same grid and dielectric (focusing and `mdh` included); with
+    /// one level and zero boundary values the pair terms are symmetric.
+    #[test]
+    fn atom_energies_superpose() {
+        use crate::params::BoundaryCondition;
+        let atoms = quartet();
+        let n = atoms.len();
+        for (params, spec) in [
+            (
+                PbParams {
+                    tol: 1e-11,
+                    ..PbParams::default().with_salt(0.1, 2.0)
+                },
+                GridSpec::auto(&atoms, 0.45, 1.7, 12.0).unwrap(),
+            ),
+            (
+                PbParams {
+                    tol: 1e-11,
+                    bcfl: BoundaryCondition::Zero,
+                    ..PbParams::default()
+                },
+                GridSpec::single([0.21, 0.03, 0.4], [16.5, 15.0, 14.5], [41, 39, 37]),
+            ),
+        ] {
+            let with = |keep: &[usize]| -> Vec<f64> {
+                let only: Vec<Atom> = atoms
+                    .iter()
+                    .enumerate()
+                    .map(|(k, a)| Atom {
+                        charge: if keep.contains(&k) { a.charge } else { 0.0 },
+                        ..*a
+                    })
+                    .collect();
+                polar_solvation(&CpuBackend::new(), &only, &params, &spec)
+                    .unwrap()
+                    .atom_energies_kcal
+                    .unwrap()
+            };
+            let all = with(&[0, 1, 2, 3]);
+            let single: Vec<Vec<f64>> = (0..n).map(|i| with(&[i])).collect();
+            let scale = all.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+            let mut pair = vec![vec![0.0; n]; n]; // pair[i][j]: E_i's term from charge j
+            for i in 0..n {
+                for j in (i + 1)..n {
+                    let both = with(&[i, j]);
+                    pair[i][j] = both[i] - single[i][i];
+                    pair[j][i] = both[j] - single[j][j];
+                }
+            }
+            for i in 0..n {
+                let sum = single[i][i] + (0..n).filter(|&j| j != i).map(|j| pair[i][j]).sum::<f64>();
+                assert!((all[i] - sum).abs() < 1e-8 * scale, "atom {i}: {} vs {sum}", all[i]);
+            }
+            if params.bcfl == BoundaryCondition::Zero {
+                for (i, row) in pair.iter().enumerate() {
+                    for (j, &pij) in row.iter().enumerate().skip(i + 1) {
+                        let pji = pair[j][i];
+                        assert!((pij - pji).abs() < 1e-8 * scale, "{i} {j}: {pij} vs {pji}");
+                    }
+                }
+            }
+        }
     }
 
     fn solve(atoms: &[Atom], params: &PbParams, spacing: f64) -> PolarSolvation {

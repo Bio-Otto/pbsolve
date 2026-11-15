@@ -282,17 +282,17 @@ impl Split {
         Ok((nodes.clone(), values))
     }
 
-    /// ½ Σ q [v − (1−χ) G] over the energy's node charges, with v at those
-    /// nodes, in the nodes' order.
-    pub fn reaction_energy(
+    /// The reaction field v − (1−χ) G at the energy's nodes, with v at those
+    /// nodes.
+    pub fn reaction_field(
         &self,
         grid: &Grid,
         atoms: &[Atom],
         pdie: f64,
         lb0: f64,
-        (nodes, charges): (&[usize], &[f64]),
+        nodes: &[usize],
         v: &[f64],
-    ) -> f64 {
+    ) -> Vec<f64> {
         let outside: Vec<usize> = nodes.iter().copied().filter(|&c| !self.chi[c]).collect();
         let points: Vec<[f64; 3]> = outside
             .iter()
@@ -303,17 +303,18 @@ impl Split {
             .collect();
         let g = coulomb_potential(atoms, pdie, lb0, &points);
         let mut next = 0;
-        let mut sum = 0.0;
-        for ((&c, q), v) in nodes.iter().zip(charges).zip(v) {
-            let rf = if self.chi[c] {
-                *v
-            } else {
-                next += 1;
-                v - g[next - 1]
-            };
-            sum += q * rf;
-        }
-        0.5 * sum
+        nodes
+            .iter()
+            .zip(v)
+            .map(|(&c, v)| {
+                if self.chi[c] {
+                    *v
+                } else {
+                    next += 1;
+                    v - g[next - 1]
+                }
+            })
+            .collect()
     }
 }
 
@@ -460,22 +461,21 @@ mod tests {
 
     /// Outside χ, v is the total potential: the reaction field there is v − G.
     #[test]
-    fn reaction_energy_subtracts_g_outside_chi() {
+    fn reaction_field_subtracts_g_outside_chi() {
         let atoms = molecule();
         let grid = Grid::centered([0.05, 0.4, 0.1], [12.0, 10.5, 9.0], [25, 23, 21]).unwrap();
         let split = Split::new(&grid, &atoms, 0.0);
         let inside = (0..grid.len()).find(|&c| split.chi[c]).unwrap();
         let outside = [0, grid.len() / 2 + 3].map(|c| (c..grid.len()).find(|&c| !split.chi[c]).unwrap());
         let nodes = [inside, outside[0], outside[1]];
-        let (q, v) = ([0.3, -0.2, 0.7], [1.5, 2.5, -4.0]);
+        let v = [1.5, 2.5, -4.0];
         let points = nodes.map(|c| {
             let (i, j, k) = grid.ijk(c);
             grid.position(i, j, k)
         });
         let g = coulomb_potential(&atoms, 2.0, 7.0, &points);
-        let expected = 0.5 * (q[0] * v[0] + q[1] * (v[1] - g[1]) + q[2] * (v[2] - g[2]));
-        let e = split.reaction_energy(&grid, &atoms, 2.0, 7.0, (&nodes, &q), &v);
-        assert!((e - expected).abs() < 1e-14 * expected.abs(), "{e} vs {expected}");
+        let rf = split.reaction_field(&grid, &atoms, 2.0, 7.0, &nodes, &v);
+        assert_eq!(rf, vec![v[0], v[1] - g[1], v[2] - g[2]]);
     }
 
     fn solve(atoms: &[Atom], params: &PbParams, spacing: f64) -> crate::pb::PolarSolvation {

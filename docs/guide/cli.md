@@ -131,6 +131,7 @@ and:
 | `-I`, `--include` | GROMACS include directory (repeatable) |
 | `--start`, `--stop`, `--step` | frames to use (0-based, as a Python slice) |
 | `--csv` | write the per-frame terms to this CSV file |
+| `--per-residue` | write every residue's share of ΔG_polar, ΔG_nonpolar and ΔG_solv of binding (mean over frames, and the standard error of the total) to this CSV file; residues are named `chain:resname:resid`; β belongs to no residue |
 | `--workers` | calculations solved at once (default 2 on the CPU, 3 on CUDA, fewer if the GPU memory is short); results do not depend on it |
 
 ## `pbsolve prep`
@@ -171,6 +172,7 @@ pbsolve reads (converted to PQR first).
 | `--surface` | `mol` (default), `vdw`, `spl2` or `spl4`; `harmonic` and `gauss` have no APBS equivalent |
 | `--swin` | with `spl2`/`spl4`: half-width of the switching window (Å, default 0.3), written as APBS `swin` |
 | `--forces` | also compare the per-atom forces (APBS `calcforce comps`; needs `--surface spl2` or `spl4`) |
+| `--atom-energies` | also compare every atom's ΔG_polar (APBS `calcenergy comps`); not with `--chgm spl2` |
 | `--bcfl` | `mdh` (default), `mdh-fast` (pbsolve's interpolated `mdh`; APBS runs `mdh`), `sdh` or `zero` |
 | `--chgm` | charge assignment, `spl0` (default), `spl2` or `spl4`, written as APBS `chgm` |
 | `--equation` | `lpbe` (default) or `npbe`, written as the APBS keyword |

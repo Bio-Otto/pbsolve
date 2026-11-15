@@ -25,7 +25,7 @@ pub fn spread_charges(grid: &Grid, atoms: &[Atom]) -> Result<Vec<f64>> {
 /// must be an interior node.
 pub fn spread_charges_with(grid: &Grid, atoms: &[Atom], method: ChargeMethod) -> Result<Vec<f64>> {
     let mut q = vec![0.0; grid.len()];
-    for_each_contribution(grid, atoms, method, |c, v| q[c] += v)?;
+    for_each_contribution(grid, atoms, method, |_, c, v| q[c] += v)?;
     Ok(q)
 }
 
@@ -42,7 +42,7 @@ pub fn spread_charges_sparse(grid: &Grid, atoms: &[Atom]) -> Result<(Vec<usize>,
 /// [`spread_charges_with`].
 pub fn spread_charges_sparse_with(grid: &Grid, atoms: &[Atom], method: ChargeMethod) -> Result<(Vec<usize>, Vec<f64>)> {
     let mut contrib: Vec<(usize, f64)> = Vec::with_capacity(8 * atoms.len());
-    for_each_contribution(grid, atoms, method, |c, v| contrib.push((c, v)))?;
+    for_each_contribution(grid, atoms, method, |_, c, v| contrib.push((c, v)))?;
     // Stable: equal nodes keep their contribution order.
     contrib.sort_by_key(|&(c, _)| c);
     let mut nodes: Vec<usize> = Vec::with_capacity(contrib.len());
@@ -155,13 +155,22 @@ pub(crate) fn dbspline4(x: f64) -> f64 {
     }
 }
 
-/// Calls `f(node, charge · weight)` for every charged atom and every node of
-/// its stencil, in atom order.
+/// ½ q_i Σ_n W_in u_n of every atom with the weights of `method`, `u(n)`
+/// being the potential at node n (0 for uncharged atoms). Their sum is the
+/// energy ½ Σ_n Q_n u_n of the spread charges, up to the order of the sums.
+pub fn atom_energies(grid: &Grid, atoms: &[Atom], method: ChargeMethod, u: impl Fn(usize) -> f64) -> Result<Vec<f64>> {
+    let mut e = vec![0.0; atoms.len()];
+    for_each_contribution(grid, atoms, method, |n, c, v| e[n] += v * u(c))?;
+    Ok(e.into_iter().map(|x| 0.5 * x).collect())
+}
+
+/// Calls `f(atom, node, charge · weight)` for every charged atom and every
+/// node of its stencil, in atom order.
 fn for_each_contribution(
     grid: &Grid,
     atoms: &[Atom],
     method: ChargeMethod,
-    mut f: impl FnMut(usize, f64),
+    mut f: impl FnMut(usize, usize, f64),
 ) -> Result<()> {
     for (n, a) in atoms.iter().enumerate() {
         if a.charge == 0.0 {
@@ -190,7 +199,7 @@ fn for_each_contribution(
                 }
                 let (idx, w) = grid.trilinear(a.position).expect("checked above");
                 for m in 0..8 {
-                    f(idx[m], a.charge * w[m]);
+                    f(n, idx[m], a.charge * w[m]);
                 }
                 continue;
             }
@@ -234,7 +243,7 @@ fn for_each_contribution(
                         ChargeMethod::Spline2 => a.charge * mx * my * mz,
                         _ => mx * my * mz * a.charge,
                     };
-                    f(grid.index(i as usize, j as usize, k as usize), v);
+                    f(n, grid.index(i as usize, j as usize, k as usize), v);
                 }
             }
         }

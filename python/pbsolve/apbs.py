@@ -551,6 +551,8 @@ class ApbsCalcOutput:
     lengths: tuple[float, float, float]
     center: tuple[float, float, float]
     energy_kj: Optional[float]
+    # ½ q_i u(r_i) of every atom (kJ/mol), with ``calcenergy comps``.
+    atom_energies_kj: Optional[list[float]] = None
 
 
 @dataclass
@@ -585,6 +587,7 @@ def parse_output(text: str) -> ApbsOutput:
             return (conv(mm.group(1)), conv(mm.group(2)), conv(mm.group(3)))
 
         em = re.search(rf"Total electrostatic energy = ({_NUM}) kJ/mol", block)
+        atom_lines = re.findall(rf"^\s+Atom (\d+):\s+({_NUM}) kJ/mol\s*$", block, re.M)
         calcs.append(
             ApbsCalcOutput(
                 index=int(m.group(1)),
@@ -594,6 +597,7 @@ def parse_output(text: str) -> ApbsOutput:
                 lengths=triple("Grid lengths", float),
                 center=triple("Grid center", float),
                 energy_kj=float(em.group(1)) if em else None,
+                atom_energies_kj=[float(v) for _, v in atom_lines] or None,
             )
         )
     prints = [
@@ -715,11 +719,14 @@ class ComparisonReport:
     unit_factor: float = 1.0  # apbs_unit_factor(T): expected E_APBS / E_pbsolve
     # Per-atom forces (if compared): term -> {max_abs, max_rel_to_max} in kJ/mol/Å, APBS units.
     forces: dict[str, Any] = field(default_factory=dict)
+    # Per-atom ΔG_polar (if compared): {largest, max_abs, max_rel_to_max} in kcal/mol, APBS units.
+    atom_energies: dict[str, Any] = field(default_factory=dict)
 
     def passed(self, energy_rtol: float = 1e-3) -> bool:
         """Grids identical, maps (if compared) identical up to ties, injection
         potential within 1e-4 of the potential scale, forces (if compared)
-        within 1e-5 of the largest force, and ``|ΔG|`` relative difference ≤
+        within 1e-5 of the largest force, per-atom ΔG_polar (if compared)
+        within 1e-5 of the largest, and ``|ΔG|`` relative difference ≤
         ``energy_rtol``."""
         if self.grid_issues:
             return False
@@ -733,6 +740,8 @@ class ComparisonReport:
             if inj["potential"]["max_rel_to_max"] > 1e-4:
                 return False
         if any(v["max_rel_to_max"] > 1e-5 for k, v in self.forces.items() if k != "largest"):
+            return False
+        if self.atom_energies.get("max_rel_to_max", 0.0) > 1e-5:
             return False
         return abs(self.delta_g["rel"]) <= energy_rtol
 
@@ -793,6 +802,12 @@ class ComparisonReport:
                     if k != "largest"
                 )
             )
+        a = self.atom_energies
+        if a:
+            lines.append(
+                f"  per-atom ΔG_polar (kcal/mol, APBS units; largest {a['largest']:.4g}): "
+                f"max |Δ| {a['max_abs']:.2e} ({a['max_rel_to_max']:.1e})"
+            )
         lines.append(f"  verdict: {'PASS' if self.passed() else 'FAIL'}")
         return "\n".join(lines)
 
@@ -809,18 +824,24 @@ def compare(
     etol: Optional[float] = None,
     atoms: Optional[tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]] = None,
     forces: bool = False,
+    atom_energies: bool = False,
 ) -> ComparisonReport:
     """Run pbsolve and APBS on ``pqr`` with ``solver``'s settings and compare.
 
     ``forces=True`` also compares the per-atom forces (APBS ``calcforce
     comps``, ``print force``) with :meth:`Solver.polar_forces`; it needs
-    ``surface="spl2"`` or ``"spl4"``.
+    ``surface="spl2"`` or ``"spl4"``. ``atom_energies=True`` compares every
+    atom's ΔG_polar (APBS ``calcenergy comps``, solvated minus reference) with
+    :attr:`PolarResult.atom_energies`; not with ``chgm="spl2"``, whose energy
+    APBS takes with other weights than its per-atom energies.
 
     ``grid`` defaults to ``solver.make_grid`` — build the solver with
     ``dime_policy="apbs"`` so APBS accepts it. Raises :class:`GridMismatchError`
     if APBS ran different grids. ``atoms`` (coords, charges, radii) overrides
     reading ``pqr`` for pbsolve (values must match the file).
     """
+    if atom_energies and solver.params["chgm"] == "spl2":
+        raise ValueError("atom_energies: APBS takes the spl2 energy with other weights than its per-atom energies")
     pqr = pathlib.Path(pqr).resolve()
     work = pathlib.Path(workdir)
     coords, charges, radii = atoms if atoms is not None else read_pqr(pqr)
@@ -838,6 +859,8 @@ def compare(
     refr = elec_from_solver(solver, grid, "reference", reference=True, etol=etol, writes=[("pot", "reference_pot")])
     if forces:
         solv.calcforce = refr.calcforce = "comps"
+    if atom_energies:
+        solv.calcenergy = refr.calcenergy = "comps"
     force_prints = ["solvated - reference"] if forces else []
     out = run_apbs(write_input([pqr], [solv, refr], ["solvated - reference"], force_prints), work, exe)
     groups = _split_calcs([solv, refr], out)
@@ -887,6 +910,21 @@ def compare(
     )
     if forces:
         report.forces = _compare_forces(solver, (coords, charges, radii), grid, out, T)
+    if atom_energies:
+        s_at, r_at = groups[0][-1].atom_energies_kj, groups[1][-1].atom_energies_kj
+        if s_at is None or r_at is None or len(s_at) != len(charges) or len(r_at) != len(charges):
+            raise ApbsError("APBS printed no per-atom energy for every atom")
+        theirs_at = (np.array(s_at) - np.array(r_at)) * to_kcal
+        ours_at = solver.polar_solvation(coords, charges, radii, grid=grid).atom_energies
+        if ours_at is None:
+            raise ValueError("atom_energies: the nonlinear equation with ions has no per-atom energies")
+        diff = np.abs(ours_at * uf - theirs_at)
+        largest = float(np.max(np.abs(theirs_at)))
+        report.atom_energies = {
+            "largest": largest,
+            "max_abs": float(diff.max()),
+            "max_rel_to_max": float(diff.max() / largest) if largest > 0 else 0.0,
+        }
 
     if maps or inject:
         spline = solver.params["surface"] in ("spl2", "spl4")
@@ -1425,6 +1463,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     c.add_argument("--workdir", default="apbs_compare")
     c.add_argument("--no-maps", action="store_true", help="skip map comparison and injection (faster)")
     c.add_argument("--forces", action="store_true", help="also compare the per-atom forces (needs --surface spl2/spl4)")
+    c.add_argument("--atom-energies", action="store_true", help="also compare every atom's ΔG_polar (not with --chgm spl2)")
     c.add_argument("--apbs", help="APBS executable (default: $APBS or 'apbs' on PATH)")
     c.add_argument("--json", help="also write the report to this JSON file")
     c.add_argument("--energy-rtol", type=float, default=1e-3)
@@ -1486,7 +1525,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     sel = _selection(a.ligand_atoms, n)
                 rep = compare_binding(a.pqr, solver, sel, workdir=a.workdir, maps=maps, inject=maps, exe=a.apbs)
             else:
-                rep = compare(a.pqr, solver, workdir=a.workdir, maps=maps, inject=maps, exe=a.apbs, forces=a.forces)
+                rep = compare(
+                    a.pqr, solver, workdir=a.workdir, maps=maps, inject=maps, exe=a.apbs, forces=a.forces,
+                    atom_energies=a.atom_energies,
+                )
             ok = rep.passed(a.energy_rtol)
     except (ApbsError, NotImplementedError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

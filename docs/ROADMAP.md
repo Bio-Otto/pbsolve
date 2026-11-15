@@ -463,6 +463,17 @@ stays a research topic. Parameters fitted on openly licensed data only (e.g. Fre
 
 **4.15 Per-residue and pairwise decomposition** of polar and nonpolar terms
 (standard in MM-PBSA analysis tools [Miller et al. 2012; Valdés-Tresanco et al. 2021]).
+*Status: per-atom and per-residue done (unreleased); pairwise remains.*
+* Every polar energy comes per atom, ½ q_i φ_rf(r_i) with the energy's charge
+  weights (`PolarResult.atom_energies`), and sums to ΔG_polar; the binding
+  terms per atom and residue (`PBSAFrame.atom_terms`, `residue_terms`,
+  `pbsolve mmpbsa --per-residue`) [Gohlke, Kiel & Case 2003].
+* The shares are the linear response: E_i of all charges equals E_i of
+  charge i plus its pair terms (single and pair solves, to 1e-8), and with one
+  level and zero boundary values the pair terms are symmetric. APBS
+  `calcenergy comps` agrees to 3e-8 (`bcfl zero`) on 1YCR.
+* Remaining: pairwise residue terms (one solve per residue), and the
+  non-polar terms of `apolar_energy` per residue (the volume has no atoms).
 
 **4.16 Entropy and dielectric options.** Interaction entropy from the
 trajectory [Duan, Liu & Zhang 2016], which large benchmarks (summarised in
@@ -632,6 +643,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Geng W, Yu S, Wei GW. Treatment of charge singularities in implicit solvent models. J. Chem. Phys. 127, 114106 (2007).
 * Genheden S, Ryde U. The MM/PBSA and MM/GBSA methods to estimate ligand-binding affinities. Expert Opin. Drug Discov. 10, 449 (2015).
 * Gilson MK, Davis ME, Luty BA, McCammon JA. Computation of electrostatic forces on solvated molecules using the Poisson–Boltzmann equation. J. Phys. Chem. 97, 3591 (1993).
+* Gohlke H, Kiel C, Case DA. Insights into protein–protein binding by binding free energy calculation and free energy decomposition for the Ras–Raf and Ras–RalGDS complexes. J. Mol. Biol. 330, 891 (2003).
 * Golub GH, Ye Q. Inexact preconditioned conjugate gradient method with inner-outer iteration. SIAM J. Sci. Comput. 21, 1305 (1999).
 * Grant JA, Pickup BT, Nicholls A. A smooth permittivity function for Poisson–Boltzmann solvation methods. J. Comput. Chem. 22, 608 (2001).
 * Greene D, Qi R, Nguyen R, Qiu T, Luo R. Heterogeneous dielectric implicit membrane model for the calculation of MMPBSA binding free energies. J. Chem. Inf. Model. 59, 3041 (2019).

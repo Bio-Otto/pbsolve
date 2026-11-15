@@ -52,6 +52,7 @@ should update the status table below.
 | Spline surfaces and forces (0.0.2): `surface="spl2"`/`"spl4"`, `Solver.polar_forces` | APBS 3.4.1 spline maps equal to the 7 digits of its DX files, energies ≤ 1e-9 (solvated) and 3e-10 (ΔG, `bcfl zero`) in APBS units; forces (qf, db, ib; `lpbe`, `npbe`, `smpbe`) = the exact gradient of the discrete energy on one level with `bcfl zero` (2e-9 to 4e-9), APBS `calcforce comps` to ≤ 4e-7 of the largest force (≤ 6e-10 with `zero`); a charge in a dielectric sphere: Kirkwood's force at the surface's Born radius to 0.08 %, momentum balanced to 1 %; db scatters 5–10 % over grid placements; spline surfaces are a different model (Born −11…−16 %, 1YCR −2609 vs −1231 kcal/mol with `mol`); 14/14 mutations; default path bit-identical; `coulomb="analytic"` on spline surfaces fixed (now equal to `coulomb="grid"` within 1e-4 on an exact radial case); see *Spline surfaces and forces* |
 | Gaussian dielectric (0.0.2): `surface="gauss"`, `gauss_sigma`, `gauss_contour` | maps = the formulas to 1e-9 (ε and the ions' Born accessibility); reference state with the Gaussian ε inside the ε ≤ 20 contour (Li et al. 2014): one Gaussian atom against its exact radial solution within 1.0–3.2 % at 0.5 Å and 0.45–1.4 % at 0.18 Å, salt effect to 0.07 %; with a homogeneous reference 17–63 % off (charges' grid self-energies); 1YCR ΔΔG_polar 385.9 / 383.3 / 383.5 kcal/mol at 0.49 / 0.35 / 0.25 Å (`mol` 434.9 / 429.0 / 427.6); `npbe` refused (Born penalty bounded, density diverges at charges); CPU = CUDA; 9/9 mutations; default path bit-identical; see *Gaussian dielectric* |
 | Non-polar terms (0.0.2): `apolar_energy` (γ·SASA + p·SAV + WCA dispersion, as APBS `apolar`) | APBS' 11 alkane examples to every printed digit (totals ≤ 2.2e-13); APBS 3.4.1 live on neopentane, a synthetic molecule with radius-0 atoms and 1YCR (1670 atoms) ≤ 1.3e-12, volumes identical, per atom ≤ 5e-13; one sphere, two spheres and one atom's dispersion against closed forms (0.2–0.5 %); Lennard-Jones from OpenMM = APBS' AMBER parameters to 1e-9; 10/10 mutations; 1YCR 0.75 s on 18 threads (APBS 12.7 s); see *Non-polar terms* |
+| Per-atom and per-residue decomposition (unreleased): `PolarResult.atom_energies`, `PBSAFrame.atom_terms`/`residue_terms`, `pbsolve mmpbsa --per-residue` | shares sum to ΔG_polar (1e-12; `spl0`, `spl2`, `spl4`, `coulomb="analytic"`, forces path identical); linear response: E_i of all charges = E_i alone + pair terms from single and pair solves (1e-8, focusing and `mdh`), pair terms symmetric with one level and `zero` (1e-8); APBS 3.4.1 `calcenergy comps` per atom ≤ 2.8e-6 of the largest share with `mdh`, 1e-9 (synthetic) and 3.2e-8 (1YCR) with `zero`; 9/9 mutations; energies bit-identical (CPU, CUDA), the shares add ≤ 50 ms to 5DK3; see *Per-atom and per-residue decomposition* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3021,6 +3022,75 @@ The Gaussian maps are built on the host for both states (the reference
 needs them for its contour). One `exp` per atom and point took 2.05 s (CPU)
 and 2.29 s (CUDA); the per-axis factors halved that, and restricting each row
 to the cutoff sphere saved nothing measurable.
+
+## Per-atom and per-residue decomposition
+
+**Change.**
+* `PolarResult.atom_energies`: every atom's ΔG_polar in kcal/mol, ½ q_i
+  [u_solvated − u_reference] at the atom with the energy's charge weights
+  (`chgm`'s energy method: trilinear for `spl0` and `spl4`, the `spl2`
+  weights for `spl2`); with `coulomb="analytic"`, ½ q_i times the reaction
+  field. `None` for `npbe` and `smpbe` with ions, whose energy is a
+  functional rather than a sum over the charges.
+* `SolvationTerms.atom_polar` / `atom_nonpolar` (γ·SASA_i; β belongs to no
+  atom), `PBSAFrame.atom_terms()` (every complex atom's share of the binding
+  terms: the complex's minus the receptor's or ligand's),
+  `PBSAFrame.residue_terms(labels)` and `pbsolve mmpbsa --per-residue FILE`
+  (mean over frames, standard error of the total) [Gohlke, Kiel & Case 2003].
+* `pbsolve apbs compare --atom-energies` compares the shares with APBS
+  `calcenergy comps`.
+* The shares come from the potential at the charged nodes that the energy
+  reads anyway; the energy is summed as before and stays bit-identical.
+
+**Why the shares are well defined.** The polar energy of a linear state is
+½ Σ_ij q_i R_ij q_j with the discrete reaction-field operator R; atom i's
+share ½ q_i Σ_j R_ij q_j gives each charge its self term and half of each
+pair term. The shares therefore add up exactly and superpose linearly.
+
+**Checks** (`pb.rs`, `tests/test_decomposition.py`):
+* the shares sum to ΔG_polar to 1e-12 for `spl0`, `spl2`, `spl4` and
+  `coulomb="analytic"` with fractional faces; the forces path gives the same
+  shares bit for bit; uncharged atoms have none;
+* linear response, four charged atoms: E_i of all charges equals E_i of
+  charge i alone plus its pair terms E_i^(ij) − E_i^(i), from 4 single and
+  6 pair solves on the same grid and dielectric, to 1e-8 of the largest share
+  (two focusing levels, `mdh`); with one level and zero boundary values the
+  pair terms are symmetric to 1e-8;
+* the binding shares per atom sum to ΔΔG_polar (1e-11) and, with β added, to
+  ΔΔG_nonpolar; the `--per-residue` columns sum to the mean terms over the
+  frames.
+
+**APBS 3.4.1** (`calcenergy comps`: ½ q_i u(r_i) per atom in each state;
+largest difference relative to the largest share, APBS units):
+
+| system | `mdh` | `zero` |
+|---|---|---|
+| synthetic molecule, 0.15 M (`spl0`; `spl4`; `spl2` surface) | 2.2e-6; 2.2e-6; 1.7e-6 | 1.0e-9 (0.1 M) |
+| 1YCR, 0.15 M, 129³, two levels | 2.8e-6 | 3.2e-8 |
+
+As for the energies, the remainder with `mdh` is APBS' boundary constants.
+APBS takes the `spl2` energy with the `spl2` weights but its per-atom
+energies with trilinear ones, so they do not add up to its energy; the
+comparison refuses `chgm="spl2"`.
+
+**1YCR, binding shares** (pdb2pqr AMBER radii, 0.15 M, default grid;
+ΔΔG_polar = +423.7 kcal/mol). Most favourable: B:LYS:24 −37.8, the
+C-terminal A:VAL:109 −30.6, A:GLU:52 −24.2, A:GLU:95 −22.4, A:ASP:46 −17.1;
+most unfavourable: B:ASN:29 +89.2, B:GLU:28 +69.0, A:LYS:51 +55.6 (polar,
+kcal/mol). These are solvation shares; the Coulomb interaction in ΔE_MM
+offsets much of them.
+
+**Mutations.** 9/9 caught: the factor ½, the potential, the reference
+state, the energy's weights (`spl4`), the reaction field of the
+decomposition (only beyond χ: caught by a lone radius-0 charge whose `spl2`
+energy nodes reach out of it), the ligand's sign in `atom_terms`, the
+residues' non-polar sums, the CLI's columns and the reference state in the
+APBS comparison.
+
+**Cost.** The default-path fingerprints are bit-identical (CPU and CUDA).
+The shares reuse the potential at the charged nodes; the energy stage of
+5DK3 (20 179 atoms) grows from 3 to 10 ms on the CPU and from 5 to 53 ms on
+CUDA, under 1 % of the calculation (shared machine).
 
 ## Non-polar terms: surface, volume and dispersion (`apolar_energy`)
 

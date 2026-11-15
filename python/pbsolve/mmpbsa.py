@@ -8,8 +8,8 @@ energies come from your MM engine (e.g. OpenMM)::
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -45,12 +45,25 @@ def nonpolar_energy(
     return gamma * area + beta
 
 
+def _nonpolar_terms(
+    coords: npt.NDArray[np.float64], radii: npt.NDArray[np.float64], gamma: float, beta: float, probe: float
+) -> tuple[float, npt.NDArray[np.float64]]:
+    """:func:`nonpolar_energy` (the same value) and γ·SASA of every atom."""
+    area = sasa(coords, radii, probe=probe, n_points=960)
+    return gamma * float(np.sum(area)) + beta, gamma * area
+
+
 @dataclass(frozen=True)
 class SolvationTerms:
-    """Solvation free energy of one species (kcal/mol)."""
+    """Solvation free energy of one species (kcal/mol), also per atom."""
 
     polar: float
     nonpolar: float
+    atom_polar: Optional[npt.NDArray[np.float64]] = field(default=None, compare=False, repr=False)
+    """ΔG_polar of every atom (:attr:`PolarResult.atom_energies`); ``None``
+    for the nonlinear equations with ions."""
+    atom_nonpolar: Optional[npt.NDArray[np.float64]] = field(default=None, compare=False, repr=False)
+    """γ·SASA of every atom; the constant β belongs to no atom."""
 
     @property
     def total(self) -> float:
@@ -65,6 +78,65 @@ class PBSAFrame:
     complex: SolvationTerms
     receptor: SolvationTerms
     ligand: SolvationTerms
+    receptor_atoms: Optional[npt.NDArray[np.int64]] = field(default=None, compare=False, repr=False)
+    """The receptor's atoms in the complex (indices)."""
+    ligand_atoms: Optional[npt.NDArray[np.int64]] = field(default=None, compare=False, repr=False)
+    """The ligand's atoms in the complex (indices)."""
+
+    def atom_terms(self) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Every complex atom's share of :attr:`delta_polar` and :attr:`delta_nonpolar`.
+
+        Returns
+        -------
+        polar, nonpolar : numpy.ndarray, shape (N,)
+            The complex's per-atom terms minus those of the same atom in the
+            receptor or the ligand, kcal/mol. ``polar`` sums to
+            :attr:`delta_polar`; ``nonpolar`` sums to :attr:`delta_nonpolar`
+            + β, since β belongs to no atom.
+
+        Raises
+        ------
+        ValueError
+            If the frame has no per-atom terms (the nonlinear equations with
+            ions, or a frame not made by :func:`pbsa_solvation_frames`).
+        """
+        species = (self.complex, self.receptor, self.ligand)
+        if self.receptor_atoms is None or self.ligand_atoms is None or any(
+            t.atom_polar is None or t.atom_nonpolar is None for t in species
+        ):
+            raise ValueError("this frame has no per-atom terms (nonlinear equation with ions?)")
+        out = []
+        for part in ("atom_polar", "atom_nonpolar"):
+            whole = getattr(self.complex, part).copy()
+            whole[self.receptor_atoms] -= getattr(self.receptor, part)
+            whole[self.ligand_atoms] -= getattr(self.ligand, part)
+            out.append(whole)
+        return out[0], out[1]
+
+    def residue_terms(self, residues: Sequence[Any]) -> dict[Any, tuple[float, float]]:
+        """:meth:`atom_terms` summed per residue.
+
+        Parameters
+        ----------
+        residues : sequence, length N
+            A residue label for every complex atom (e.g. ``"B:LEU:26"``).
+
+        Returns
+        -------
+        dict
+            label → (polar, nonpolar) share of the binding terms in kcal/mol,
+            in the order the labels first appear.
+        """
+        polar, nonpolar = self.atom_terms()
+        labels = list(residues)
+        if len(labels) != polar.size:
+            raise ValueError(f"{len(labels)} residue labels for {polar.size} atoms")
+        out: dict[Any, list[float]] = {}
+        for label, p, n in zip(labels, polar.tolist(), nonpolar.tolist()):
+            acc = out.setdefault(label, [0.0, 0.0])
+            acc[0] += p
+            acc[1] += n
+        return {k: (v[0], v[1]) for k, v in out.items()}
 
     @property
     def delta_polar(self) -> float:
@@ -134,7 +206,8 @@ def pbsa_solvation_frames(
     no more than fit in the free GPU memory, see ``Solver.batch_workers``),
     so pass frames in chunks rather than one by one. The results do not
     depend on ``workers`` and equal those of :func:`pbsa_solvation_frame`
-    bit for bit.
+    bit for bit. Every term also comes per atom
+    (:meth:`PBSAFrame.atom_terms`, :meth:`PBSAFrame.residue_terms`).
     """
     q, r = _vec(charges), _vec(radii)
     coords = [_xyz(x) for x in frames]
@@ -157,8 +230,10 @@ def pbsa_solvation_frames(
         terms = []
         for j in range(3):
             x, _, rr = systems[3 * k + j]
-            terms.append(SolvationTerms(polar=polar[3 * k + j].energy, nonpolar=nonpolar_energy(x, rr, gamma, beta, probe)))
-        out.append(PBSAFrame(complex=terms[0], receptor=terms[1], ligand=terms[2]))
+            res = polar[3 * k + j]
+            nonpolar, atom_nonpolar = _nonpolar_terms(x, rr, gamma, beta, probe)
+            terms.append(SolvationTerms(res.energy, nonpolar, res.atom_energies, atom_nonpolar))
+        out.append(PBSAFrame(terms[0], terms[1], terms[2], rec, lig))
     return out
 
 

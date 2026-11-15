@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Per-atom and per-residue decomposition: `PolarResult.atom_energies` (every
+  atom's ½ q_i φ_rf(r_i), which sum to ΔG_polar), `SolvationTerms.atom_polar`
+  and `atom_nonpolar`, `PBSAFrame.atom_terms()` and `residue_terms(labels)`
+  for the binding terms, and `pbsolve mmpbsa --per-residue FILE`. The shares
+  superpose exactly (single and pair solves) and agree with APBS
+  `calcenergy comps` to 3e-8 with `bcfl zero` on 1YCR;
+  `pbsolve apbs compare --atom-energies` compares them.
+
 ## 0.0.2 — 2026-11-15
 
 ### Added

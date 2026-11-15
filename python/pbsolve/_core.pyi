@@ -134,6 +134,11 @@ class PolarResult:
     """The grid of the calculation."""
     platform: str
     """Platform the calculation ran on, "CPU" or "CUDA"."""
+    atom_energies: Optional[npt.NDArray[np.float64]]
+    """ΔG_polar of every atom in kcal/mol, shape (N,), each ½ q_i times
+    the reaction field at the atom (the energy's charge weights); they
+    sum to :attr:`energy`. ``None`` for ``equation="npbe"`` and
+    ``"smpbe"`` with ions, whose energy is not a sum over the charges."""
 
 class PolarForces:
     """Polar solvation free energy and the forces on the atoms (:meth:`Solver.polar_forces`).

@@ -87,6 +87,34 @@ for xyz in pbsolve.io.frames(mol, "md.nc", step=10, atoms=solute):
 # ... and the last, shorter chunk
 ```
 
+### Per-atom and per-residue shares
+
+Every term also comes per atom, so the binding terms can be split over the
+residues [Gohlke, Kiel & Case 2003]. The polar energy of a state is a sum
+over the charges, ½ Σ_i q_i φ_rf(r_i), with φ_rf the reaction field (the
+solvated minus the reference potential) taken with the energy's charge
+weights; atom i's share is its term. The shares sum to ΔG_polar exactly. An
+interaction between two charges, q_i R_ij q_j, is split equally between
+them. The non-polar share of an atom is γ·SASA_i; β belongs to no atom.
+{py:attr}`pbsolve.PolarResult.atom_energies` holds the polar shares of one
+calculation, {py:meth}`pbsolve.PBSAFrame.atom_terms` every complex atom's
+share of ΔG_polar and ΔG_nonpolar of binding (complex minus receptor or
+ligand), and {py:meth}`pbsolve.PBSAFrame.residue_terms` their sums per
+residue:
+
+```python
+polar, nonpolar = terms.atom_terms()  # kcal/mol per complex atom
+labels = [f"{c}:{n}:{i}" for c, n, i in zip(mol.chains, mol.resnames, mol.resids)]
+shares = terms.residue_terms(labels)  # label -> (polar, non-polar)
+for label, (p, n) in sorted(shares.items(), key=lambda kv: sum(kv[1]))[:5]:
+    print(f"{label:12s} {p:8.2f} {n:7.2f} kcal/mol")
+```
+
+These are solvation shares: add each residue's share of ΔE_MM from your
+force field for a full decomposition. With `equation="npbe"` or `"smpbe"` and
+ions the energy is a functional, not a sum over the charges, and there are
+no per-atom terms.
+
 ## From the command line
 
 `pbsolve mmpbsa` does all of this for a topology and a trajectory, and writes
@@ -94,8 +122,11 @@ the per-frame terms to a CSV file:
 
 ```bash
 pbsolve mmpbsa complex.prmtop md.nc --ligand "resname LIG" --step 10 \
-    --ionic-strength 0.15 --csv terms.csv
+    --ionic-strength 0.15 --csv terms.csv --per-residue residues.csv
 ```
+
+`--per-residue` writes every residue's share of the binding terms, averaged
+over the frames, with the standard error of its total.
 
 See [the command line](cli.md#pbsolve-mmpbsa) for every option.
 

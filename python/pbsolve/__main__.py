@@ -234,6 +234,10 @@ def _mmpbsa(args: argparse.Namespace) -> int:
     if args.workers is not None and args.workers < 1:
         raise ValueError("--workers must be at least 1")
     solver = _solver(args)
+    if args.per_residue and solver.params["equation"] != "lpbe" and solver.params["ionic_strength"] > 0:
+        raise ValueError("--per-residue needs equation 'lpbe' (or no ions): the nonlinear energy is not a sum over atoms")
+    labels = [f"{c}:{n}:{i}{ic}" for c, n, i, ic in zip(mol.chains, mol.resnames, mol.resids, mol.icodes)]
+    residues: dict[str, list[tuple[float, float]]] = {}
     rows = []
     # Frames are solved in chunks so that `workers` calculations overlap
     # while memory stays bounded; output order is the frame order.
@@ -246,6 +250,9 @@ def _mmpbsa(args: argparse.Namespace) -> int:
         for f in results:
             row = {"frame": args.start + len(rows) * args.step, **f.as_dict()}
             rows.append(row)
+            if args.per_residue:
+                for label, terms in f.residue_terms(labels).items():
+                    residues.setdefault(label, []).append(terms)
             print(
                 f"frame {row['frame']:>6}: ΔG_polar {row['delta_polar']:10.4f}  ΔG_nonpolar {row['delta_nonpolar']:8.4f}"
                 f"  ΔG_solv {row['delta_solvation']:10.4f} kcal/mol",
@@ -272,6 +279,16 @@ def _mmpbsa(args: argparse.Namespace) -> int:
             fh.write(",".join(["frame", *keys]) + "\n")
             for r in rows:
                 fh.write(",".join(str(r[k]) for k in ["frame", *keys]) + "\n")
+    if args.per_residue:
+        # β belongs to no residue: the residues' non-polar shares sum to delta_nonpolar + β.
+        with open(args.per_residue, "w") as fh:
+            fh.write("residue,delta_polar,delta_nonpolar,delta_solvation,sem_solvation\n")
+            for label, terms in residues.items():
+                t = np.array(terms)
+                total = t.sum(axis=1)
+                sem = float(np.std(total, ddof=1)) / math.sqrt(len(total)) if len(total) > 1 else 0.0
+                fh.write(f"{label},{t[:, 0].mean()},{t[:, 1].mean()},{total.mean()},{sem}\n")
+        print(f"per-residue shares of {len(residues)} residues written to {args.per_residue}")
     return 0
 
 
@@ -331,6 +348,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m.add_argument("--stop", type=int)
     m.add_argument("--step", type=int, default=1)
     m.add_argument("--csv", help="write per-frame terms to this CSV file")
+    m.add_argument(
+        "--per-residue",
+        metavar="CSV",
+        help="write every residue's share of the binding terms (mean over frames) to this CSV file",
+    )
     m.add_argument(
         "--workers",
         type=int,
