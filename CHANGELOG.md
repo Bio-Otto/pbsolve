@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.5 — 2026-11-15
+
 ### Added
 
 - Interior dielectric per atom: `dielectrics=` on `Solver.polar_solvation`,
