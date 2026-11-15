@@ -672,6 +672,21 @@ def sasa(
         Area of each atom in Å².
     """
 
+def _apolar_terms(
+    coords: npt.ArrayLike,
+    radii: npt.ArrayLike,
+    epsilons: npt.ArrayLike,
+    srad: float,
+    sdens: float,
+    dpos: float,
+    grid: Sequence[float],
+    bconc: float,
+    water_radius: float,
+    water_epsilon: float,
+    area: bool,
+    volume: bool,
+    dispersion: bool,
+) -> tuple[Optional[npt.NDArray[np.float64]], Optional[float], Optional[npt.NDArray[np.float64]]]: ...
 def kt_kj_per_mol(temperature: float = 298.15) -> float:
     """k_B·T in kJ/mol (the unit APBS reports energies in)."""
 

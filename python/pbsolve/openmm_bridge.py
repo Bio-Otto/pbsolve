@@ -40,6 +40,7 @@ __all__ = [
     "PARSE",
     "OpenMMPBSA",
     "charges_from_system",
+    "lennard_jones_from_system",
     "positions_angstrom",
     "radii_from_topology",
 ]
@@ -57,6 +58,34 @@ def charges_from_system(system: "openmm.System") -> npt.NDArray[np.float64]:
         [nb.getParticleParameters(i)[0].value_in_unit(unit.elementary_charge) for i in range(nb.getNumParticles())],
         dtype=np.float64,
     )
+
+
+def lennard_jones_from_system(system: "openmm.System") -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Lennard-Jones radii and well depths for :func:`pbsolve.apolar_energy`.
+
+    Parameters
+    ----------
+    system : openmm.System
+        A system with exactly one NonbondedForce.
+
+    Returns
+    -------
+    radii : numpy.ndarray, shape (N,)
+        R_min/2 = 2^(1/6) σ/2 in Å. Atoms with ε = 0 get radius 0: force fields
+        give them a placeholder σ, and APBS' AMBER parameters have radius 0
+        there too.
+    epsilons : numpy.ndarray, shape (N,)
+        Well depths in kcal/mol.
+    """
+    forces = [f for f in system.getForces() if isinstance(f, openmm.NonbondedForce)]
+    if len(forces) != 1:
+        raise ValueError(f"expected exactly one NonbondedForce, found {len(forces)}")
+    nb = forces[0]
+    params = [nb.getParticleParameters(i) for i in range(nb.getNumParticles())]
+    sigma = np.array([p[1].value_in_unit(unit.angstrom) for p in params])
+    eps = np.array([p[2].value_in_unit(unit.kilocalorie_per_mole) for p in params])
+    radii = np.where(eps > 0.0, 2.0 ** (1.0 / 6.0) * sigma / 2.0, 0.0)
+    return radii, eps
 
 
 def radii_from_topology(topology: "openmm.app.Topology", scheme: str = "mbondi2") -> npt.NDArray[np.float64]:

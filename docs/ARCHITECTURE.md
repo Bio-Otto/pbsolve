@@ -81,6 +81,12 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   following APBS `qfForceSpline1/2/4`, `Vpmg_dbForce`, `Vpmg_ibForce`; it
   needs a spline surface. Without forces `polar` reads only the charged
   nodes, as before.
+* **Non-polar terms** (`apolar.rs`, `pbsolve.apolar_energy`): APBS
+  `apolar`'s area (reference-sphere points on r + srad, the surface code's
+  `Accessibility` test), volume (trapezoidal rule over APBS' cell-list box)
+  and WCA dispersion (per atom, a 0.5 Å-default lattice within 14 Å), with
+  APBS' coordinate accumulation and order of sums; host only, parallel over
+  atoms or planes. Independent of the PB grid.
 * **Coulomb part** (`coulomb.rs`): with `coulomb="analytic"` the finest level
   solves A v = χ·A_p G − A(χG) for v = u − χG, where G is the Coulomb
   potential in `pdie` and χ the interior nodes within max(1 Å, 2h) of an

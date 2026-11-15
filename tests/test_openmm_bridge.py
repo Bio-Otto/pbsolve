@@ -4,7 +4,12 @@ import pytest
 openmm = pytest.importorskip("openmm")
 from openmm import app, unit  # noqa: E402
 
-from pbsolve.openmm_bridge import charges_from_system, positions_angstrom, radii_from_topology  # noqa: E402
+from pbsolve.openmm_bridge import (  # noqa: E402
+    charges_from_system,
+    lennard_jones_from_system,
+    positions_angstrom,
+    radii_from_topology,
+)
 
 
 def _toy():
@@ -39,3 +44,12 @@ def test_charges_and_positions():
     np.testing.assert_allclose(charges_from_system(system), [-0.4, 0.3, 0.2, -0.1])
     pos = unit.Quantity(np.array([[0.1, 0.2, 0.3]]), unit.nanometer)
     np.testing.assert_allclose(positions_angstrom(pos), [[1.0, 2.0, 3.0]])
+
+
+def test_lennard_jones_parameters():
+    _, system = _toy()
+    nb = next(f for f in system.getForces() if isinstance(f, openmm.NonbondedForce))
+    nb.setParticleParameters(3, -0.1, 1.0, 0.0)  # ε = 0 with a placeholder σ of 1 nm
+    radii, eps = lennard_jones_from_system(system)
+    np.testing.assert_allclose(radii, [2 ** (1 / 6) * 1.5] * 3 + [0.0], rtol=1e-14)
+    np.testing.assert_allclose(eps, [0.5 / 4.184] * 3 + [0.0], rtol=1e-14)

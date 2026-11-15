@@ -128,3 +128,23 @@ its free-energy functional, including the energy terms APBS adds for the
 coarser focusing levels. On 1YCR and on strongly charged test systems (up to
 a −30 e sphere) the solvated energies agree to ≤ 2.3e-9 in APBS units, and
 the nonlinear correction (npbe − lpbe) agrees to 1e-4 kcal/mol.
+
+**Non-polar terms.** {py:func}`pbsolve.apbs.apolar_energy` runs APBS
+`apolar` on the input of {py:func}`pbsolve.apolar_energy` and returns its
+terms in the same form. Every atom becomes a residue of its own, with a
+matching parameter file, because APBS takes the radii and well depths of an
+`apolar` calculation from a parameter file and replaces the PQR radii by
+them; {py:func}`pbsolve.apbs.read_parm` reads such files. Area, volume and
+dispersion agree with APBS to the digits it prints (≤ 1e-12), on APBS'
+alkane examples and on 1YCR.
+
+```python
+import pbsolve
+from pbsolve import apbs
+
+x = [[0.0, 0.0, 0.0], [1.53, 0.0, 0.0]]
+ours = pbsolve.apolar_energy(x, [1.908, 1.908], [0.1094, 0.1094])
+if apbs.find_apbs():
+    theirs = apbs.apolar_energy(x, [1.908, 1.908], [0.1094, 0.1094])
+    print(f"{ours.energy:.10f} {theirs.energy:.10f} kcal/mol")
+```

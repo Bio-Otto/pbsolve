@@ -313,6 +313,47 @@ print(f"SASA {area.sum():.0f} Å², non-polar term {nonpolar:.2f} kcal/mol")
 [Trajectories and MM-PBSA](many.md) combines both terms for complex, receptor and
 ligand.
 
+### Surface, volume and dispersion
+
+{py:func}`pbsolve.apolar_energy` computes the non-polar model of APBS `apolar`
+[Wagoner & Baker 2006]:
+
+$$
+G_\text{np} = \gamma A + p V + \bar\rho \sum_i \int u_i^\text{att}(y)\,\theta(y)\,\mathrm{d}y .
+$$
+
+A is the solvent-accessible surface area and V the solvent-accessible volume
+(spheres of the atoms' radii plus `srad`). The integral is the attractive
+part of each atom's Lennard-Jones interaction with water, ε_iw[(σ/r)¹² −
+2(σ/r)⁶] beyond σ = R_i + R_w and −ε_iw inside (ε_iw = √(ε_i ε_w), the
+Weeks–Chandler–Andersen split), over the solvent within 14 Å; ρ̄ is the
+number density of water. The volume term models the cost of the cavity, the
+dispersion term the solvent's attraction, which the area alone cannot
+reproduce [Wagoner & Baker 2006].
+
+The function needs Lennard-Jones radii R_min/2 and well depths per atom
+(they also define A and V, as in APBS).
+{py:func}`pbsolve.openmm_bridge.lennard_jones_from_system` takes them from an
+OpenMM system, which also covers Amber prmtop files;
+{py:func}`pbsolve.apbs.read_parm` reads APBS parameter files. The defaults are
+the alkane protocol of Wagoner & Baker that APBS ships as an example (γ =
+0.0085 kJ/(mol·Å²), p = 0.2394 kJ/(mol·Å³), ρ̄ = 0.033428 Å⁻³, `srad` 0.65 Å,
+TIP3P water), converted to kcal/mol, except the integration grid: 0.5 Å
+instead of 0.3 Å, which changes 1YCR's energy by 0.05 % and is four times
+faster. These parameters were fitted to alkanes, not to proteins.
+
+```python
+# Ethane as two united atoms 1.53 Å apart, with AMBER's CT radius and well depth
+g = pbsolve.apolar_energy([[0.0, 0.0, 0.0], [1.53, 0.0, 0.0]], [1.908, 1.908], [0.1094, 0.1094])
+print(f"{g.energy:.2f} kcal/mol = {g.surface:.2f} + {g.pressure_volume:.2f} {g.dispersion:+.2f}")
+```
+
+The three terms equal APBS' to the digits it prints, on APBS' own alkane
+examples and on a protein ([validation](../VALIDATION)), and
+{py:func}`pbsolve.apbs.apolar_energy` runs APBS on the same input. Each term
+is computed only when its coefficient is not zero; for 1YCR (1670 atoms) the
+calculation takes 0.75 s on 18 CPU threads (APBS: 13 s).
+
 ## Forces
 
 {py:meth}`~pbsolve.Solver.polar_forces` computes ΔG_polar and the force

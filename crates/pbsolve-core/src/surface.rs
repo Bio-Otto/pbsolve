@@ -452,36 +452,18 @@ impl MolecularSurface {
                 reference_points: 0,
             };
         }
-        let max_r = atoms.iter().map(|a| a.radius).fold(0.0, f64::max);
-        let maxrad = max_r + clist_radius;
-        let nsphere = (4.0 * PI * maxrad * maxrad * sdens).ceil() as usize;
-        let reference = apbs_reference_sphere(nsphere);
-
-        let pos: Vec<[f64; 3]> = atoms.iter().map(|a| a.position).collect();
-        let reach = max_r + srad;
-        let cells = CellList::new(&pos, reach.max(1.0));
+        let reference = apbs_reference_sphere(reference_sphere_points(atoms, clist_radius, sdens));
         let reference_ref = &reference;
-        let cells_ref = &cells;
+        let acc = Accessibility::new(atoms, srad);
+        let acc_ref = &acc;
         let probes: Vec<Sphere> = atoms
             .par_iter()
             .enumerate()
             .filter(|(_, a)| a.radius >= APBS_VSMALL)
             .flat_map_iter(|(i, a)| {
-                let rad = a.radius + srad;
                 reference_ref.iter().filter_map(move |u| {
-                    let p = [
-                        rad * u[0] + a.position[0],
-                        rad * u[1] + a.position[1],
-                        rad * u[2] + a.position[2],
-                    ];
-                    let buried = cells_ref.any_near(p, reach, |j| {
-                        if j == i {
-                            return false;
-                        }
-                        let rj = atoms[j].radius + srad;
-                        dist2(p, atoms[j].position) < rj * rj
-                    });
-                    (!buried).then_some(Sphere {
+                    let p = sas_point(a, srad, u);
+                    acc_ref.accessible(p, Some(i)).then_some(Sphere {
                         center: p,
                         radius: srad,
                     })
@@ -498,6 +480,59 @@ impl MolecularSurface {
     /// ε on the grid shifted by `shift` (Å): `pdie` in the solute, `sdie` elsewhere.
     pub fn dielectric_map(&self, grid: &Grid, shift: [f64; 3], pdie: f64, sdie: f64) -> Vec<f64> {
         mark_map(grid, shift, sdie, &[(&self.solute, pdie), (&self.probes, sdie)])
+    }
+}
+
+/// APBS' size of the reference sphere (`Vacc_storeParms`): `sdens` points per
+/// Å² of the largest atom radius plus the cell-list radius.
+pub(crate) fn reference_sphere_points(atoms: &[Atom], clist_radius: f64, sdens: f64) -> usize {
+    let maxrad = atoms.iter().map(|a| a.radius).fold(0.0, f64::max) + clist_radius;
+    (4.0 * PI * maxrad * maxrad * sdens).ceil() as usize
+}
+
+/// The reference-sphere point `u` on atom `a`'s sphere of radius r + srad
+/// (`Vacc_atomSurf`).
+#[inline]
+pub(crate) fn sas_point(a: &Atom, srad: f64, u: &[f64; 3]) -> [f64; 3] {
+    let rad = a.radius + srad;
+    [
+        rad * u[0] + a.position[0],
+        rad * u[1] + a.position[1],
+        rad * u[2] + a.position[2],
+    ]
+}
+
+/// APBS' probe accessibility (`ivdwAccExclus`): a point is accessible unless
+/// it lies strictly inside the r + srad sphere of an atom (radius-0 atoms
+/// included), optionally ignoring one atom.
+pub(crate) struct Accessibility<'a> {
+    atoms: &'a [Atom],
+    srad: f64,
+    reach: f64,
+    cells: CellList,
+}
+
+impl<'a> Accessibility<'a> {
+    pub(crate) fn new(atoms: &'a [Atom], srad: f64) -> Self {
+        let pos: Vec<[f64; 3]> = atoms.iter().map(|a| a.position).collect();
+        let reach = atoms.iter().map(|a| a.radius).fold(0.0, f64::max) + srad;
+        Self {
+            atoms,
+            srad,
+            reach,
+            cells: CellList::new(&pos, reach.max(1.0)),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn accessible(&self, p: [f64; 3], except: Option<usize>) -> bool {
+        !self.cells.any_near(p, self.reach, |j| {
+            if Some(j) == except {
+                return false;
+            }
+            let rj = self.atoms[j].radius + self.srad;
+            dist2(p, self.atoms[j].position) < rj * rj
+        })
     }
 }
 

@@ -1428,6 +1428,58 @@ fn sasa<'py>(
     Ok(PyArray1::from_vec(py, out))
 }
 
+/// The terms of APBS `apolar` (private; see `pbsolve.apolar_energy`):
+/// per-atom SASA (Å²), the SAV (Å³) and per-atom dispersion energies (unit
+/// of the ε), each only when asked for.
+#[pyfunction]
+#[pyo3(signature = (coords, radii, epsilons, srad, sdens, dpos, grid, bconc, water_radius, water_epsilon, area, volume, dispersion))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn _apolar_terms<'py>(
+    py: Python<'py>,
+    coords: PyReadonlyArray2<'py, f64>,
+    radii: PyReadonlyArray1<'py, f64>,
+    epsilons: PyReadonlyArray1<'py, f64>,
+    srad: f64,
+    sdens: f64,
+    dpos: f64,
+    grid: [f64; 3],
+    bconc: f64,
+    water_radius: f64,
+    water_epsilon: f64,
+    area: bool,
+    volume: bool,
+    dispersion: bool,
+) -> PyResult<(
+    Option<Bound<'py, PyArray1<f64>>>,
+    Option<f64>,
+    Option<Bound<'py, PyArray1<f64>>>,
+)> {
+    use pbsolve_core::apolar;
+    let xyz = coords_from(coords.as_array())?;
+    let r = radii.as_array().to_vec();
+    let eps = epsilons.as_array().to_vec();
+    let atoms = atoms_from_arrays(&xyz, &vec![0.0; r.len()], &r).map_err(to_py)?;
+    let (a, v, d) = py
+        .detach(|| -> pbsolve_core::error::Result<_> {
+            let a = area.then(|| apolar::apbs_sasa(&atoms, srad, sdens, dpos)).transpose()?;
+            let v = volume.then(|| apolar::apbs_sav(&atoms, srad, dpos, grid)).transpose()?;
+            let water = apolar::Water {
+                radius: water_radius,
+                epsilon: water_epsilon,
+            };
+            let d = dispersion
+                .then(|| apolar::wca_energies(&atoms, &eps, water, bconc, srad, grid))
+                .transpose()?;
+            Ok((a, v, d))
+        })
+        .map_err(to_py)?;
+    Ok((
+        a.map(|a| PyArray1::from_vec(py, a)),
+        v,
+        d.map(|d| PyArray1::from_vec(py, d)),
+    ))
+}
+
 /// k_B·T in kJ/mol (the unit APBS reports energies in).
 #[pyfunction]
 #[pyo3(signature = (temperature = 298.15))]
@@ -1686,6 +1738,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(available_platforms, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_info, m)?)?;
     m.add_function(wrap_pyfunction!(sasa, m)?)?;
+    m.add_function(wrap_pyfunction!(_apolar_terms, m)?)?;
     m.add_function(wrap_pyfunction!(read_pqr, m)?)?;
     m.add_function(wrap_pyfunction!(kt_kj_per_mol, m)?)?;
     m.add_function(wrap_pyfunction!(kt_kcal_per_mol, m)?)?;

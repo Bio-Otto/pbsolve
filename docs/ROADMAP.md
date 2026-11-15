@@ -450,6 +450,16 @@ cavity term plus an integral dispersion term, which models repulsive and
 attractive parts separately [Wagoner & Baker 2006; Tan, Tan & Luo 2007]. The
 coupling of polar and nonpolar terms [Dzubiella, Swanson & McCammon 2006]
 stays a research topic. Parameters fitted on openly licensed data only (e.g. FreeSolv [Mobley & Guthrie 2014]).
+*Status: the model of Wagoner & Baker done (unreleased) as
+`pbsolve.apolar_energy`, as APBS `apolar`; the rest remains.*
+* Surface area, volume and the WCA dispersion integral follow APBS 3.4.1
+  operation for operation: APBS' 11 alkane examples to every printed digit
+  (13), APBS on a protein (1YCR) to 1e-13; 17 times faster than APBS there.
+* Lennard-Jones parameters from OpenMM systems (and so Amber prmtop files)
+  and APBS parameter files.
+* Remaining: the dispersion model of Tan, Tan & Luo (2007), the non-polar
+  model in `pbsolve mmpbsa` and the trajectory functions, and parameters
+  fitted for proteins and ligands (FreeSolv).
 
 **4.15 Per-residue and pairwise decomposition** of polar and nonpolar terms
 (standard in MM-PBSA analysis tools [Miller et al. 2012; Valdés-Tresanco et al. 2021]).
@@ -657,7 +667,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Tatebe O. The multigrid preconditioned conjugate gradient method. Proc. 6th Copper Mountain Conference on Multigrid Methods, NASA CP-3224, 621 (1993).
 * Trefethen LN. Approximation Theory and Approximation Practice, extended edition. SIAM (2019).
 * Valdés-Tresanco MS, Valdés-Tresanco ME, Valiente PA, Moreno E. gmx_MMPBSA: a new tool to perform end-state free energy calculations with GROMACS. J. Chem. Theory Comput. 17, 6281 (2021).
-* Wagoner JA, Baker NA. Assessing implicit models for nonpolar mean solvation forces: the importance of dispersion and volume terms. Proc. Natl. Acad. Sci. USA 103, 8331 (2006).
+* Wagoner JA, Baker NA. Assessing implicit models for nonpolar mean solvation forces: the importance of dispersion and volume terms. Proc. Natl. Acad. Sci. USA 103, 8331 (2006); correction 104, 1732 (2007).
 * Wang E, Sun H, Wang J, Wang Z, Liu H, Zhang JZH, Hou T. End-point binding free energy calculation with MM/PBSA and MM/GBSA: strategies and applications in drug design. Chem. Rev. 119, 9478 (2019).
 * Wang J, Cai Q, Li ZL, Zhao HK, Luo R. Achieving energy conservation in Poisson–Boltzmann molecular dynamics: accuracy and precision with finite-difference algorithms. Chem. Phys. Lett. 468, 112 (2009).
 * Wang J, Cai Q, Xiang Y, Luo R. Reducing grid dependence in finite-difference Poisson–Boltzmann calculations. J. Chem. Theory Comput. 8, 2741 (2012).

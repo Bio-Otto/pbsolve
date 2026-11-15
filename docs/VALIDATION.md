@@ -51,6 +51,7 @@ should update the status table below.
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
 | Spline surfaces and forces (unreleased): `surface="spl2"`/`"spl4"`, `Solver.polar_forces` | APBS 3.4.1 spline maps equal to the 7 digits of its DX files, energies ≤ 1e-9 (solvated) and 3e-10 (ΔG, `bcfl zero`) in APBS units; forces (qf, db, ib; `lpbe`, `npbe`, `smpbe`) = the exact gradient of the discrete energy on one level with `bcfl zero` (2e-9 to 4e-9), APBS `calcforce comps` to ≤ 4e-7 of the largest force (≤ 6e-10 with `zero`); a charge in a dielectric sphere: Kirkwood's force at the surface's Born radius to 0.08 %, momentum balanced to 1 %; db scatters 5–10 % over grid placements; spline surfaces are a different model (Born −11…−16 %, 1YCR −2609 vs −1231 kcal/mol with `mol`); 14/14 mutations; default path bit-identical; `coulomb="analytic"` on spline surfaces fixed (now equal to `coulomb="grid"` within 1e-4 on an exact radial case); see *Spline surfaces and forces* |
 | Gaussian dielectric (unreleased): `surface="gauss"`, `gauss_sigma`, `gauss_contour` | maps = the formulas to 1e-9 (ε and the ions' Born accessibility); reference state with the Gaussian ε inside the ε ≤ 20 contour (Li et al. 2014): one Gaussian atom against its exact radial solution within 1.0–3.2 % at 0.5 Å and 0.45–1.4 % at 0.18 Å, salt effect to 0.07 %; with a homogeneous reference 17–63 % off (charges' grid self-energies); 1YCR ΔΔG_polar 385.9 / 383.3 / 383.5 kcal/mol at 0.49 / 0.35 / 0.25 Å (`mol` 434.9 / 429.0 / 427.6); `npbe` refused (Born penalty bounded, density diverges at charges); CPU = CUDA; 9/9 mutations; default path bit-identical; see *Gaussian dielectric* |
+| Non-polar terms (unreleased): `apolar_energy` (γ·SASA + p·SAV + WCA dispersion, as APBS `apolar`) | APBS' 11 alkane examples to every printed digit (totals ≤ 2.2e-13); APBS 3.4.1 live on neopentane, a synthetic molecule with radius-0 atoms and 1YCR (1670 atoms) ≤ 1.3e-12, volumes identical, per atom ≤ 5e-13; one sphere, two spheres and one atom's dispersion against closed forms (0.2–0.5 %); Lennard-Jones from OpenMM = APBS' AMBER parameters to 1e-9; 10/10 mutations; 1YCR 0.75 s on 18 threads (APBS 12.7 s); see *Non-polar terms* |
 | Size-modified PB (unreleased): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (unreleased): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (unreleased): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3020,6 +3021,96 @@ The Gaussian maps are built on the host for both states (the reference
 needs them for its contour). One `exp` per atom and point took 2.05 s (CPU)
 and 2.29 s (CUDA); the per-axis factors halved that, and restricting each row
 to the cutoff sphere saved nothing measurable.
+
+## Non-polar terms: surface, volume and dispersion (`apolar_energy`)
+
+**Change.**
+* `pbsolve.apolar_energy(coords, radii, epsilons)` computes the non-polar
+  model of APBS `apolar` [Wagoner & Baker 2006], G_np = γA + pV + ρ̄ Σ_i ∫
+  u_i^att θ dy, and returns `ApolarEnergy` with every part, also per atom.
+* `pbsolve.apbs.read_parm` reads APBS parameter files, and
+  `pbsolve.apbs.apolar_energy` runs APBS on the same input.
+  `pbsolve.openmm_bridge.lennard_jones_from_system` takes R_min/2 and ε from
+  an OpenMM system.
+* The defaults are Wagoner & Baker's alkane protocol (APBS'
+  `examples/alkanes`) in kcal/mol, with a 0.5 Å grid instead of 0.3 Å.
+* `nonpolar_energy` (γ·SASA + β) is unchanged; so is the default path (the
+  surface code now shares its accessibility test with the new module; the
+  fingerprints are bit-identical).
+
+**Method** (APBS 3.4.1 operation for operation):
+* **Area.** APBS' reference sphere of ⌈4π(r_max + srad + 2 dpos)² sdens⌉
+  points (the cell-list radius of an `apolar` calculation is srad + 2 dpos)
+  is scaled to every atom's r + srad. The points outside every other atom's
+  sphere count; atoms of radius 0 have no area but bury points within srad.
+  A_i = 4π(r_i + srad)² n_i / n_ref.
+* **Volume.** The trapezoidal rule over APBS' cell-list box (the atoms'
+  extent ± 1.42 (r_max + srad + 2 dpos)), with the coordinates accumulated
+  in steps of `grid` as APBS accumulates them.
+* **Dispersion.** Per atom, a lattice from (int)(x − 14) to (int)(x + 14)
+  (truncated towards zero, as C converts) in steps of `grid`. Each
+  accessible point within 14 Å adds ρ̄ ε_iw[(σ/r)¹² − 2(σ/r)⁶] for r ≥ σ and
+  −ρ̄ ε_iw inside, with σ = R_i + R_w and ε_iw = √(ε_i ε_w).
+* pbsolve tests the accessibility only within 14 Å; APBS tests every point
+  of the cube, but beyond 14 Å the term is 0 either way. The atoms run in
+  parallel, and every sum keeps APBS' order.
+
+**APBS' alkane examples** (grid 0.3 Å, srad 0.65 Å, sdens 100, γ 0.0085
+kJ/(mol·Å²), p 0.2394 kJ/(mol·Å³), ρ̄ 0.033428 Å⁻³, AMBER C and H, TIP3P
+oxygen; `tests/data/apbs_alkanes`). All 11 alkanes reproduce the SASA, SAV
+and WCA energy APBS prints (6 digits) and the total non-polar energy (13
+digits, ≤ 2.2e-13 relative).
+
+**APBS 3.4.1, live** (`pbsolve.apbs.apolar_energy`; largest relative
+difference of area, volume, dispersion and total):
+
+| case | atoms | time pbsolve / APBS | terms | per atom |
+|---|---|---|---|---|
+| neopentane, alkane protocol | 17 | 0.025 / 0.38 s | 1.1e-13 (volume identical) | 2.5e-13 |
+| synthetic molecule (2 atoms of radius 0), srad 1.4, sdens 10, grid 0.5 | 30 | 0.013 / 0.18 s | 4.4e-14 (volume identical) | 3.8e-13 |
+| the same with srad 0, dpos 0, sdens 20, grid 0.35 | 30 | 0.030 / 0.40 s | 1.3e-12 (total, after cancellation) | 3.9e-13 |
+| 1YCR, AMBER parameters, alkane protocol, grid 0.5 | 1670 | 0.75 / 12.7 s | 1.2e-13 (volume identical) | 5.0e-13 |
+
+For 1YCR the radii and well depths come from APBS' `vparam-amber-parm94.dat`
+by residue and atom name, with HIS, OXT and the N-terminal H2/H3 mapped to
+HIE/HID/HIP, O and H (pdb2pqr's AMBER names are not all in that file; APBS
+itself would reject this PQR with that file). pbsolve runs on 18 threads,
+APBS on one.
+
+**1YCR's terms** (kcal/mol, 0.5 Å grid): area 5957.7 Å², volume 17 507 Å³;
+γA = 12.1, pV = 1001.7, dispersion −432.0, total 581.8 (581.6 with grid 0.3).
+The volume and dispersion terms are large and cancel; what matters in
+practice are differences such as binding.
+
+**Closed forms** (`apolar.rs`):
+* one sphere: area 4π(r + srad)² to 1e-12; volume within 0.3 % at 0.1 Å;
+* two spheres of radius 2 Å at 3 Å: union volume within 0.2 % at 0.05 Å, each
+  area (sphere minus the 0.5 Å cap) within 0.5 % with 200 points per Å²;
+* one atom's dispersion equals the radial integral
+  ρ̄ ∫ u 4π t² dt from r + srad to 14 Å within 0.3 % at 0.1 Å.
+
+**Lennard-Jones from OpenMM.** For a peptide built by tleap with ff14SB and
+read through OpenMM, `lennard_jones_from_system` gives the R_min/2 and ε of
+APBS' AMBER parameter file to 1e-9 for all 60 atoms listed there. Atoms with
+ε = 0 (serine HG) get radius 0, as in that file; OpenMM may give them a
+placeholder σ.
+
+**Mutations.** 10/10 caught:
+* the box inflation (1.41) and the box padding;
+* edge weights of 1;
+* no water radius in σ;
+* ε_i ε_w without the square root;
+* an atom burying its own surface;
+* the reference sphere without 2 dpos;
+* floor instead of truncation;
+* no constant inside σ;
+* γ applied to the area as p.
+
+The 13-digit alkane comparison catches the five the closed forms miss.
+
+**Cost** (1YCR, 18 threads, shared machine): area 0.07 s (sdens 100), volume
+0.02 s, dispersion 0.72 s at 0.5 Å and 2.99 s at 0.3 Å (1.08 and 4.73 s
+before the accessibility tests were restricted to 14 Å).
 
 ## Size-modified PB (`equation="smpbe"`)
 

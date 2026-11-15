@@ -25,6 +25,7 @@
 //!   bit-for-bit reproducible on a given platform, independent of the
 //!   number of CPU threads.
 
+pub mod apolar;
 pub mod autogrid;
 pub mod backend;
 pub mod batch;

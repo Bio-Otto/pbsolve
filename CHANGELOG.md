@@ -170,6 +170,14 @@
   radial solution to 1–3 % at 0.5 Å; ΔΔG_polar of 1YCR changes by less than
   3 kcal/mol between 0.5 and 0.25 Å. Not with `npbe`, `coulomb="analytic"`
   or forces (`docs/VALIDATION.md`).
+- `pbsolve.apolar_energy(coords, radii, epsilons)` and `pbsolve.ApolarEnergy`:
+  the non-polar solvation energy of APBS `apolar` (Wagoner & Baker 2006),
+  γ·SASA + p·SAV + the WCA dispersion integral, with every part per atom.
+  It equals APBS' alkane examples to every printed digit and APBS 3.4.1 on a
+  1670-atom protein to 1e-13, 17 times faster. `pbsolve.apbs.read_parm`
+  reads APBS parameter files, `pbsolve.apbs.apolar_energy` runs APBS on the
+  same input, and `pbsolve.openmm_bridge.lennard_jones_from_system` takes the
+  Lennard-Jones radii and well depths from an OpenMM system.
 - `batch::calculation_device_bytes`: the device memory of a calculation
   with its settings (the nonlinear equation needs 4 more vectors); used to
   reserve memory and to size batch workers.

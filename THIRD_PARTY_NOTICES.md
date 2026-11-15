@@ -19,6 +19,10 @@ derived from the APBS 3.4.1 source code (https://github.com/Electrostatics/apbs)
 | `crates/pbsolve-core/src/nonlinear.rs` | `src/mg/vpmg.c` (`Vpmg_energy`, `Vpmg_extEnergy`, `Vpmg_setPart`), `src/pmgc/mypdec.c` (ion terms of `Vc_vecpmg`) |
 | `crates/pbsolve-core/src/spline.rs` | `src/mg/vpmg.c` (`fillcoCoefSpline`, `fillcoCoefSpline4`), `src/generic/vacc.c` (`Vacc_splineAccGradAtomNorm`, `Vacc_splineAccGradAtomNorm4`) |
 | `crates/pbsolve-core/src/forces.rs` | `src/mg/vpmg.c` (`qfForceSpline1`, `qfForceSpline2`, `qfForceSpline4`, `Vpmg_dbForce`, `Vpmg_ibForce`) |
+| `crates/pbsolve-core/src/apolar.rs` | `src/generic/vacc.c` (`Vacc_SASA`, `Vacc_atomSurf`, `Vacc_totalSAV`, `Vacc_wcaEnergyAtom`), `src/generic/vclist.c` (`Vclist_setupGrid`), `src/routines.c` (`initAPOL`) |
+
+`tests/data/apbs_alkanes/` holds the structures and the parameter file of APBS'
+`examples/alkanes` (Wagoner & Baker's alkane protocol), used as test data.
 
 APBS is not bundled with pbsolve; `pbsolve.apbs` only runs an APBS executable
 that the user installed, for validation. pbsolve is an independent project and

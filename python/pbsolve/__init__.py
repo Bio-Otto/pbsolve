@@ -105,6 +105,7 @@ from ._core import (  # noqa: E402
 _preload_nvrtc(_CUDA_MAJOR)
 
 from . import io, prep, radii  # noqa: E402
+from .apolar import ApolarEnergy, apolar_energy  # noqa: E402
 from .dx import read_dx, write_dx  # noqa: E402
 from .estimate import ErrorEstimate, estimate_error  # noqa: E402
 from .mmpbsa import (  # noqa: E402
@@ -118,6 +119,7 @@ from .mmpbsa import (  # noqa: E402
 )
 
 __all__ = [
+    "ApolarEnergy",
     "ConvergenceError",
     "ErrorEstimate",
     "GridSpec",
@@ -131,6 +133,7 @@ __all__ = [
     "TrajectoryReader",
     "__version__",
     "apbs_effective_dime",
+    "apolar_energy",
     "available_platforms",
     "bjerrum_length",
     "cuda_info",

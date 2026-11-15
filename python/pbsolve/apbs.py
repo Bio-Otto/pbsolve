@@ -49,6 +49,7 @@ from typing import Any, Optional, Sequence, Union
 import numpy as np
 import numpy.typing as npt
 
+from . import apolar as _apolar
 from ._core import GridSpec, Solver, bjerrum_length, kt_kcal_per_mol, kt_kj_per_mol, read_pqr
 from .dx import read_dx
 
@@ -65,6 +66,7 @@ __all__ = [
     "GridMismatchError",
     "RunReport",
     "apbs_unit_factor",
+    "apolar_energy",
     "compare",
     "compare_binding",
     "elec_from_solver",
@@ -72,6 +74,7 @@ __all__ = [
     "main",
     "parse_input",
     "parse_output",
+    "read_parm",
     "run_apbs",
     "run_input",
     "write_input",
@@ -1074,6 +1077,144 @@ def compare_binding(
 
 
 # ============================================================== APBS input -> pbsolve
+
+
+def read_parm(path: PathLike) -> dict[tuple[str, str], tuple[float, float, float]]:
+    """An APBS flat parameter file (``read parm flat``).
+
+    Parameters
+    ----------
+    path : str or os.PathLike
+        The file: lines ``<residue> <atom> <charge> <radius> <epsilon>``,
+        ``#`` comments.
+
+    Returns
+    -------
+    dict
+        ``(residue, atom)`` → ``(charge in e, radius in Å, epsilon in
+        kJ/mol)``, as APBS reads them; with a parameter file, APBS replaces
+        the radii of a PQR file by these.
+    """
+    out: dict[tuple[str, str], tuple[float, float, float]] = {}
+    for line in pathlib.Path(path).read_text().splitlines():
+        f = line.split("#", 1)[0].split()
+        if len(f) >= 5:
+            out[(f[0], f[1])] = (float(f[2]), float(f[3]), float(f[4]))
+    return out
+
+
+def apolar_energy(
+    coords: npt.ArrayLike,
+    radii: npt.ArrayLike,
+    epsilons: Optional[npt.ArrayLike] = None,
+    *,
+    gamma: float = _apolar.GAMMA,
+    press: float = _apolar.PRESS,
+    bconc: float = _apolar.BCONC,
+    srad: float = 0.65,
+    sdens: float = 100.0,
+    dpos: float = 0.2,
+    grid: float = 0.5,
+    water_radius: float = _apolar.WATER_RADIUS,
+    water_epsilon: float = _apolar.WATER_EPSILON,
+    workdir: Optional[PathLike] = None,
+    exe: Optional[str] = None,
+) -> _apolar.ApolarEnergy:
+    """APBS' ``apolar`` result for the input of :func:`pbsolve.apolar_energy`.
+
+    Every atom becomes a residue of its own in a PQR file with a matching
+    flat parameter file, so APBS sees the same radii and well depths. Each
+    term runs as its own ``APOLAR`` calculation with only its coefficient
+    set to 1 (area, volume) or ``bconc`` (dispersion), so APBS prints it with
+    13 digits.
+
+    Parameters
+    ----------
+    coords, radii, epsilons, gamma, press, bconc, srad, sdens, dpos, grid, water_radius, water_epsilon
+        As :func:`pbsolve.apolar_energy` (kcal/mol units).
+    workdir : str or os.PathLike, optional
+        Where to run APBS (default: a temporary directory, removed after).
+    exe : str, optional
+        The APBS executable (default: ``$APBS`` or ``apbs`` on the PATH).
+
+    Returns
+    -------
+    pbsolve.ApolarEnergy
+        APBS' terms, converted to kcal/mol.
+
+    Raises
+    ------
+    ApbsError
+        If APBS is missing, fails or prints no energy.
+    """
+    import tempfile
+
+    x = np.asarray(coords, dtype=np.float64).reshape(-1, 3)
+    r = np.asarray(radii, dtype=np.float64).ravel()
+    n = len(r)
+    e = np.zeros(n) if epsilons is None else np.asarray(epsilons, dtype=np.float64).ravel()
+    kj = _apolar.KJ_PER_KCAL
+    use = [abs(c) > 1e-9 for c in (gamma, press, bconc)]
+    if use[2] and epsilons is None:
+        raise ValueError("the dispersion term (bconc != 0) needs the atoms' Lennard-Jones epsilons")
+    xs, rs, es = x.tolist(), r.tolist(), (e * kj).tolist()  # Python floats: repr gives every digit
+    pqr = "".join(f"ATOM {i + 1} A R{i + 1} {i + 1} {p[0]!r} {p[1]!r} {p[2]!r} 0.0 {rs[i]!r}\n" for i, p in enumerate(xs))
+    parm = "".join(f"R{i + 1} A 0.0 {rs[i]!r} {es[i]!r}\n" for i in range(n))
+    parm += f"WAT OW 0.0 {float(water_radius)!r} {float(water_epsilon) * kj!r}\n"
+    total = re.compile(rf"Total non-polar energy = ({_NUM}) kJ/mol")
+
+    def run(work: pathlib.Path, name: str, g: float, p: float, b: float, per_atom: str) -> tuple[float, npt.NDArray[np.float64]]:
+        text = f"""read
+    mol pqr mol.pqr
+    parm flat parm.dat
+end
+apolar name {name}
+    grid {float(grid)!r} {float(grid)!r} {float(grid)!r}
+    mol 1
+    srfm sacc
+    swin 0.3
+    srad {float(srad)!r}
+    press {float(p)!r}
+    gamma {float(g)!r}
+    bconc {float(b)!r}
+    sdens {float(sdens)!r}
+    dpos {float(dpos)!r}
+    temp 298.15
+    calcenergy total
+    calcforce no
+end
+quit
+"""
+        out = run_apbs(text, work, exe, name=name).text
+        m = total.search(out)
+        if m is None:
+            raise ApbsError(f"APBS printed no non-polar energy; see {work / (name + '.out')}")
+        atoms = np.zeros(n)
+        for mm in re.finditer(rf"{per_atom} for atom (\d+): ({_NUM})", out):
+            atoms[int(mm.group(1))] = float(mm.group(2))
+        return float(m.group(1)), atoms
+
+    nan = float("nan")
+    with tempfile.TemporaryDirectory() as tmp:
+        work = pathlib.Path(workdir if workdir is not None else tmp)
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "mol.pqr").write_text(pqr)
+        (work / "parm.dat").write_text(parm)
+        area, atom_area = run(work, "area", 1.0, 0.0, 0.0, "SASA") if use[0] else (nan, np.full(n, nan))
+        volume = run(work, "volume", 0.0, 1.0, 0.0, "SASA")[0] if use[1] else nan
+        disp, atom_disp = run(work, "dispersion", 0.0, 0.0, bconc, "WCA energy") if use[2] else (0.0, np.zeros(n))
+    surface = gamma * area if use[0] else 0.0
+    pv = press * volume if use[1] else 0.0
+    return _apolar.ApolarEnergy(
+        energy=surface + pv + disp / kj,
+        surface=surface,
+        pressure_volume=pv,
+        dispersion=disp / kj,
+        area=area,
+        volume=volume,
+        atom_area=atom_area,
+        atom_dispersion=atom_disp / kj,
+    )
 
 
 @dataclass
