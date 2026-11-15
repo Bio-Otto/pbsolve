@@ -34,6 +34,7 @@ pub mod coulomb;
 pub mod cpu;
 pub mod error;
 pub mod forces;
+pub mod gaussian;
 pub mod grid;
 pub mod molecule;
 pub mod multigrid;

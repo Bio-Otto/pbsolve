@@ -523,7 +523,7 @@ impl PyPolarForces {
 ///     that concentration). Ignored when ``ions`` is given.
 /// ion_radius : float
 ///     Radius of both salt ions in Å; it defines the ion-accessibility
-///     surface.
+///     surface (with "gauss", the ions' Born radius).
 /// ions : sequence of tuple, optional
 ///     Mobile ion species as in APBS ``ion``, each a tuple ``(charge,
 ///     concentration, radius)``: valence in e, concentration in mol/L,
@@ -539,10 +539,20 @@ impl PyPolarForces {
 ///     "harmonic" (molecular surface on the nodes with harmonic-mean face
 ///     values; not APBS ``smol``), "spl2" or "spl4" (atomic spheres smoothed
 ///     over ±``swin`` by a cubic or septic switch, as APBS ``srfm spl2`` and
-///     ``spl4``; smooth in the atom positions, as forces need).
+///     ``spl4``; smooth in the atom positions, as forces need) or "gauss"
+///     (no surface: ε from atomic Gaussian densities of width
+///     ``gauss_sigma`` times the radius, ions kept out by their Born
+///     energy; the reference state keeps this ε inside the
+///     ``gauss_contour``; not an APBS option).
 /// swin : float
 ///     Half-width in Å of the switching window of the "spl2" and "spl4"
 ///     surfaces (APBS ``swin``).
+/// gauss_sigma : float
+///     Width of an atom's Gaussian density relative to its radius
+///     ("gauss" only; Li et al. 2013 use 0.93 with ``pdie=4``).
+/// gauss_contour : float
+///     "gauss" only: the reference state keeps the Gaussian ε where it
+///     is at most this value and puts ``pdie`` beyond (Li et al. 2014).
 /// bcfl : str
 ///     Boundary condition of the coarsest grid (APBS ``bcfl``): "mdh" (one
 ///     Debye–Hückel sphere per atom), "mdh-fast" (the same sum interpolated
@@ -759,7 +769,8 @@ impl PySolver {
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
         preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid",
-        equation = "lpbe", ion_size = 0.0, swin = 0.3
+        equation = "lpbe", ion_size = 0.0, swin = 0.3, gauss_sigma = 0.93,
+        gauss_contour = 20.0
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -788,6 +799,8 @@ impl PySolver {
         equation: &str,
         ion_size: f64,
         swin: f64,
+        gauss_sigma: f64,
+        gauss_contour: f64,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -797,6 +810,8 @@ impl PySolver {
             sdens,
             surface: SurfaceMethod::parse(surface).map_err(to_py)?,
             swin,
+            gauss_sigma,
+            gauss_contour,
             bcfl: BoundaryCondition::parse(bcfl).map_err(to_py)?,
             chgm: ChargeMethod::parse(chgm).map_err(to_py)?,
             interface: InterfaceMethod::parse(interface).map_err(to_py)?,
@@ -853,6 +868,8 @@ impl PySolver {
         d.set_item("sdens", p.sdens)?;
         d.set_item("surface", p.surface.as_str())?;
         d.set_item("swin", p.swin)?;
+        d.set_item("gauss_sigma", p.gauss_sigma)?;
+        d.set_item("gauss_contour", p.gauss_contour)?;
         d.set_item("bcfl", p.bcfl.as_str())?;
         d.set_item("chgm", p.chgm.as_str())?;
         d.set_item("interface", p.interface.as_str())?;

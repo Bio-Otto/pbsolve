@@ -192,8 +192,8 @@ def elec_from_solver(
     no ions), the second calculation of a ΔG_polar run.
     """
     p = solver.params
-    if p["surface"] == "harmonic":
-        raise ValueError("surface='harmonic' has no APBS equivalent; compare 'mol' (srfm mol) or 'vdw' (srad 0)")
+    if p["surface"] in ("harmonic", "gauss"):
+        raise ValueError(f"surface={p['surface']!r} has no APBS equivalent; compare 'mol' (srfm mol) or 'vdw' (srad 0)")
     if p["interface"] != "sharp":
         raise ValueError(f"interface={p['interface']!r} has no APBS equivalent; compare interface='sharp'")
     if p["coulomb"] != "grid":

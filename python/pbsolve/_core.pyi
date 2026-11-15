@@ -186,7 +186,7 @@ class Solver:
         that concentration). Ignored when ``ions`` is given.
     ion_radius : float
         Radius of both salt ions in Å; it defines the ion-accessibility
-        surface.
+        surface (with "gauss", the ions' Born radius).
     ions : sequence of tuple, optional
         Mobile ion species as in APBS ``ion``, each a tuple ``(charge,
         concentration, radius)``: valence in e, concentration in mol/L,
@@ -202,10 +202,20 @@ class Solver:
         "harmonic" (molecular surface on the nodes with harmonic-mean face
         values; not APBS ``smol``), "spl2" or "spl4" (atomic spheres smoothed
         over ±``swin`` by a cubic or septic switch, as APBS ``srfm spl2`` and
-        ``spl4``; smooth in the atom positions, as forces need).
+        ``spl4``; smooth in the atom positions, as forces need) or "gauss"
+        (no surface: ε from atomic Gaussian densities of width
+        ``gauss_sigma`` times the radius, ions kept out by their Born
+        energy; the reference state keeps this ε inside the
+        ``gauss_contour``; not an APBS option).
     swin : float
         Half-width in Å of the switching window of the "spl2" and "spl4"
         surfaces (APBS ``swin``).
+    gauss_sigma : float
+        Width of an atom's Gaussian density relative to its radius
+        ("gauss" only; Li et al. 2013 use 0.93 with ``pdie=4``).
+    gauss_contour : float
+        "gauss" only: the reference state keeps the Gaussian ε where it
+        is at most this value and puts ``pdie`` beyond (Li et al. 2014).
     bcfl : str
         Boundary condition of the coarsest grid (APBS ``bcfl``): "mdh" (one
         Debye–Hückel sphere per atom), "mdh-fast" (the same sum interpolated
@@ -303,6 +313,8 @@ class Solver:
         equation: str = "lpbe",
         ion_size: float = 0.0,
         swin: float = 0.3,
+        gauss_sigma: float = 0.93,
+        gauss_contour: float = 20.0,
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:

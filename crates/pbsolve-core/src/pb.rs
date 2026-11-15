@@ -10,10 +10,11 @@ use crate::charge::{spread_charges_sparse_with, spread_charges_with};
 use crate::coulomb::{coulomb_energy_kt, Split};
 use crate::error::{invalid, PbError, Result};
 use crate::forces::{state_forces, ForceTerms};
+use crate::gaussian::gaussian_eps_at;
 use crate::grid::Grid;
 use crate::molecule::Atom;
 use crate::nonlinear::{self, IonTerms, NonlinearLevel};
-use crate::params::{ChargeMethod, CoulombMethod, PbParams};
+use crate::params::{ChargeMethod, CoulombMethod, PbParams, SurfaceMethod};
 use crate::solver::{pcg_on, pcg_setup, SolveStats, SolverOptions};
 use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
@@ -123,7 +124,7 @@ pub fn coefficient_maps(grid: &Grid, atoms: &[Atom], params: &PbParams, medium: 
 fn maps_with(grid: &Grid, atoms: &[Atom], params: &PbParams, surf: Option<&MolecularSurface>) -> CoefficientMaps {
     match surf {
         Some(s) => CoefficientMaps::solvated_with(grid, atoms, params, s),
-        None => CoefficientMaps::homogeneous(grid, params.pdie),
+        None => CoefficientMaps::reference(grid, atoms, params),
     }
 }
 
@@ -417,7 +418,7 @@ fn solve_level<B: Backend>(
     let t = Instant::now();
     let lb0 = bjerrum_length_vacuum(params.temperature);
     let (split, (nodes, charges)) = if decompose {
-        let split = Split::new(&grid, atoms);
+        let split = Split::new(&grid, atoms, params.pdie_inset());
         let source = split.source(be, &grid, &maps, atoms, params.pdie, lb0)?;
         (Some(split), source)
     } else {
@@ -796,8 +797,13 @@ pub fn polar_forces<B: Backend>(be: &B, atoms: &[Atom], params: &PbParams, spec:
     }
     if !params.surface.is_spline() {
         return invalid(format!(
-            "forces need surface 'spl2' or 'spl4' (smooth in the atom positions, as APBS requires), not '{}'",
-            params.surface.as_str()
+            "forces need surface 'spl2' or 'spl4' (smooth in the atom positions, as APBS requires), not '{}'{}",
+            params.surface.as_str(),
+            if params.surface == SurfaceMethod::Gaussian {
+                " (its reference state has a sharp contour)"
+            } else {
+                ""
+            }
         ));
     }
     let (solvation, forces) = polar(be, atoms, params, spec, true)?;
@@ -826,6 +832,25 @@ fn polar<B: Backend>(
     spec: &GridSpec,
     forces: bool,
 ) -> Result<(PolarSolvation, Option<[ForceTerms; 2]>)> {
+    if params.surface == SurfaceMethod::Gaussian {
+        // A charge outside the contour sees the Gaussian ε in one state and pdie in the other.
+        for (n, a) in atoms
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.charge != 0.0 && a.radius <= 0.0)
+        {
+            let eps = gaussian_eps_at(a.position, atoms, params);
+            if eps > params.gauss_contour {
+                return invalid(format!(
+                    "surface 'gauss': atom {n} (charge {}, radius 0) lies where ε = {eps:.1} exceeds \
+                     gauss_contour = {}, so the reference state puts pdie around it and its grid \
+                     self-energy does not cancel (ΔG_polar would grow without bound as the grid is \
+                     refined); give it a radius (e.g. Molecule.with_radii('mbondi2')) or raise gauss_contour",
+                    a.charge, params.gauss_contour
+                ));
+            }
+        }
+    }
     let lb0 = bjerrum_length_vacuum(params.temperature);
     // The finest level's energy and, with `forces`, the forces from its full
     // potential (whose values at the charged nodes are those `energy_at_charges` reads).

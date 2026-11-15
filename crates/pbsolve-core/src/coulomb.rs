@@ -124,7 +124,9 @@ pub(crate) struct Split {
 }
 
 impl Split {
-    pub fn new(grid: &Grid, atoms: &[Atom]) -> Self {
+    /// `inset`: how far inside an atom's radius the solvated maps may still
+    /// differ from `pdie` without ions ([`crate::params::PbParams::pdie_inset`]).
+    pub fn new(grid: &Grid, atoms: &[Atom], inset: f64) -> Self {
         let n = grid.len();
         let spheres = |d: f64| -> Vec<Sphere> {
             atoms
@@ -148,10 +150,11 @@ impl Split {
                 .collect()
         };
         let chi = mark(margin(grid));
-        // `deep`: interior nodes whose six edges lie inside one atomic sphere.
-        // Their faces are `pdie` on every surface and interface (the probes of
-        // `mol` never enter an atomic sphere) and ions are excluded there.
-        let reach = grid.spacing.iter().copied().fold(0.0, f64::max) * (1.0 + 1e-6) + 1e-9;
+        // `deep`: interior nodes whose six edges lie inside one atomic sphere
+        // shrunk by `inset`. Their faces are `pdie` on every surface and
+        // interface (the probes of `mol` never enter an atomic sphere) and
+        // ions are excluded there.
+        let reach = grid.spacing.iter().copied().fold(0.0, f64::max) * (1.0 + 1e-6) + 1e-9 + inset;
         let not_deep: Vec<bool> = mark(-reach).into_par_iter().map(|d| !d).collect();
         // r_c = 0 unless c lies next to χ and c or a neighbour is not deep.
         let near_chi = dilate(grid.dims, &chi);
@@ -386,6 +389,9 @@ mod tests {
             radius: 4.0,
         });
         let across = Grid::centered([0.0; 3], [18.5, 10.0, 10.0], [38, 21, 21]).unwrap();
+        // h = 0.2 Å < swin: the spline window reaches faces between nodes
+        // deeper than h inside a sphere.
+        let fine = Grid::centered([0.0; 3], [18.4, 10.0, 10.0], [93, 51, 51]).unwrap();
         for (atoms, grid, surface, interface, salt) in [
             (molecule(), &some, SurfaceMethod::Mol, InterfaceMethod::Sharp, 0.15),
             (molecule(), &some, SurfaceMethod::Mol, InterfaceMethod::Fractional, 0.15),
@@ -398,6 +404,9 @@ mod tests {
                 0.15,
             ),
             (gap.to_vec(), &across, SurfaceMethod::Vdw, InterfaceMethod::Sharp, 0.0),
+            (molecule(), &some, SurfaceMethod::Spline2, InterfaceMethod::Sharp, 0.15),
+            (molecule(), &some, SurfaceMethod::Spline4, InterfaceMethod::Sharp, 0.0),
+            (gap.to_vec(), &fine, SurfaceMethod::Spline2, InterfaceMethod::Sharp, 0.0),
         ] {
             let (atoms, grid) = (&atoms[..], grid);
             let n = grid.len();
@@ -411,7 +420,7 @@ mod tests {
             let maps = CoefficientMaps::solvated(grid, atoms, &params);
             let be = CpuBackend::new();
             let on_be = [&maps.eps_x, &maps.eps_y, &maps.eps_z, &maps.kappa_sq].map(|m| be.upload(m).unwrap());
-            let split = Split::new(grid, atoms);
+            let split = Split::new(grid, atoms, params.pdie_inset());
             let (nodes, q) = split.source(&be, grid, &on_be, atoms, params.pdie, lb0).unwrap();
 
             let points: Vec<[f64; 3]> = (0..n)
@@ -454,7 +463,7 @@ mod tests {
     fn reaction_energy_subtracts_g_outside_chi() {
         let atoms = molecule();
         let grid = Grid::centered([0.05, 0.4, 0.1], [12.0, 10.5, 9.0], [25, 23, 21]).unwrap();
-        let split = Split::new(&grid, &atoms);
+        let split = Split::new(&grid, &atoms, 0.0);
         let inside = (0..grid.len()).find(|&c| split.chi[c]).unwrap();
         let outside = [0, grid.len() / 2 + 3].map(|c| (c..grid.len()).find(|&c| !split.chi[c]).unwrap());
         let nodes = [inside, outside[0], outside[1]];

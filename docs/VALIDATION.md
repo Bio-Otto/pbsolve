@@ -49,7 +49,8 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
-| Spline surfaces and forces (unreleased): `surface="spl2"`/`"spl4"`, `Solver.polar_forces` | APBS 3.4.1 spline maps equal to the 7 digits of its DX files, energies ≤ 1e-9 (solvated) and 3e-10 (ΔG, `bcfl zero`) in APBS units; forces (qf, db, ib; `lpbe`, `npbe`, `smpbe`) = the exact gradient of the discrete energy on one level with `bcfl zero` (2e-9 to 4e-9), APBS `calcforce comps` to ≤ 4e-7 of the largest force (≤ 6e-10 with `zero`); a charge in a dielectric sphere: Kirkwood's force at the surface's Born radius to 0.08 %, momentum balanced to 1 %; db scatters 5–10 % over grid placements; spline surfaces are a different model (Born −11…−16 %, 1YCR −2609 vs −1231 kcal/mol with `mol`); 14/14 mutations; default path bit-identical; see *Spline surfaces and forces* |
+| Spline surfaces and forces (unreleased): `surface="spl2"`/`"spl4"`, `Solver.polar_forces` | APBS 3.4.1 spline maps equal to the 7 digits of its DX files, energies ≤ 1e-9 (solvated) and 3e-10 (ΔG, `bcfl zero`) in APBS units; forces (qf, db, ib; `lpbe`, `npbe`, `smpbe`) = the exact gradient of the discrete energy on one level with `bcfl zero` (2e-9 to 4e-9), APBS `calcforce comps` to ≤ 4e-7 of the largest force (≤ 6e-10 with `zero`); a charge in a dielectric sphere: Kirkwood's force at the surface's Born radius to 0.08 %, momentum balanced to 1 %; db scatters 5–10 % over grid placements; spline surfaces are a different model (Born −11…−16 %, 1YCR −2609 vs −1231 kcal/mol with `mol`); 14/14 mutations; default path bit-identical; `coulomb="analytic"` on spline surfaces fixed (now equal to `coulomb="grid"` within 1e-4 on an exact radial case); see *Spline surfaces and forces* |
+| Gaussian dielectric (unreleased): `surface="gauss"`, `gauss_sigma`, `gauss_contour` | maps = the formulas to 1e-9 (ε and the ions' Born accessibility); reference state with the Gaussian ε inside the ε ≤ 20 contour (Li et al. 2014): one Gaussian atom against its exact radial solution within 1.0–3.2 % at 0.5 Å and 0.45–1.4 % at 0.18 Å, salt effect to 0.07 %; with a homogeneous reference 17–63 % off (charges' grid self-energies); 1YCR ΔΔG_polar 385.9 / 383.3 / 383.5 kcal/mol at 0.49 / 0.35 / 0.25 Å (`mol` 434.9 / 429.0 / 427.6); `npbe` refused (Born penalty bounded, density diverges at charges); CPU = CUDA; 9/9 mutations; default path bit-identical; see *Gaussian dielectric* |
 | Size-modified PB (unreleased): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (unreleased): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (unreleased): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -2719,6 +2720,26 @@ radius 5.77 Å (`spl2`) and 5.82 Å (`spl4`) at 0.35 Å.
   −412 to −485 kcal/mol as h → 0. 1YCR's 18 radius-0 hydrogens are buried (H
   = 0).
 
+**`coulomb="analytic"` (fixed).** The decomposition takes ε = `pdie` on the
+faces between nodes that lie one spacing inside an atom ("deep" nodes) and
+computes its source only off them. The spline window reaches such faces
+when `swin` exceeds about the spacing; the region is now shrunk by `swin`.
+A unit charge at the centre of a 3 Å `spl2` sphere (pdie 1) has an exact
+radial solution, ΔG = ½ q² l_B ∫ (1/ε(r) − 1/pdie) dr/r² (kcal/mol):
+
+| `swin`, h | exact | `coulomb="grid"` | `"analytic"` before | `"analytic"` now |
+|---|---|---|---|---|
+| 0.3, 0.2 Å | −59.465 | −59.520 | −59.487 | −59.520 |
+| 0.6, 0.2 Å | −65.293 | −65.280 | −53.245 | −65.280 |
+| 1.0, 0.25 Å | −75.265 | −75.307 | −50.265 | −75.305 |
+| 1.0, 0.2 Å | −75.265 | −75.263 | −44.982 | −75.262 |
+
+The analytic and grid results now agree within 1e-4 at every spacing and
+window. The sparse source equals the dense formula on a 0.2 Å grid with the
+default and with a 0.6 Å window (`coulomb.rs`), and
+`tests/test_forces.py` checks the 1.0 Å case against the integral; without
+the fix it gives −50.26.
+
 ### Forces
 
 **Method.** pbsolve's free energy is the functional of the discrete
@@ -2870,6 +2891,135 @@ Reproduce:
 * `cargo test -p pbsolve-core forces spline`;
 * `pytest tests/test_forces.py tests/test_apbs_parity.py -k "forces or spl"`;
 * `pbsolve apbs compare molecule.pqr --surface spl2 --chgm spl2 --forces`.
+
+## Gaussian dielectric (`surface="gauss"`)
+
+**Change.** `surface="gauss"` with `gauss_sigma` (default 0.93) and
+`gauss_contour` (default 20); CLI `--surface gauss --gauss-sigma
+--gauss-contour`. Not an APBS option, so `pbsolve apbs compare` refuses it.
+The default path is bit-identical (CPU and CUDA fingerprints).
+
+**Method.** An atom of radius R > 0 contributes the density
+g = exp(−d²/σ²R²) at distance d; the molecular density is ρ = 1 − Π(1 − g)
+and the face dielectric ε = ρ·pdie + (1 − ρ)·sdie [Grant, Pickup & Nicholls
+2001; Li et al. 2013]. This is the form of the spline surfaces,
+ε = pdie + (sdie − pdie)·Π S, with S = 1 − g. The mobile ions pay the Born
+energy of leaving the bulk solvent [Jia et al. 2017], so the node
+accessibility is K = exp(−z² l_B/(2 r_ion)·(1/ε − 1/sdie)) and κ̄² =
+κ̄²_bulk·K. Jia et al. (2017, eqs. 1–2) and Chakravorty et al. (2018, eqs.
+4–5) print this term with the opposite overall sign, which would draw ions
+into the low dielectric; their text says it keeps them out, and the Born
+transfer energy (≥ 0) does that. g is the product of three axis factors
+precomputed per atom, cut off where g ≤ 1e-12 (5.26 σR); the maps are built
+on the host.
+
+**Semi-analytic reference.** A unit charge at the centre of one Gaussian
+atom: ε(r) and K(r) are radial, so (ε r² u′)′ = κ̄² K r² u. pbsolve's test
+solves it by shooting (DOP853, rtol 1e-12) in the variables
+w = u − l_B q/(pdie r) and ε r² u′, which removes the singularity at the
+charge. Without ions it reduces to ΔG = ½ q² l_B ∫ (1/ε − 1/pdie) dr/r²; the
+shooting reproduces that quadrature to 2e-7 and 3e-8 kcal/mol (relative 2e-10) for pdie 1 and 4, and
+does not depend on its outer radius (25–50 Å) in any printed digit.
+
+**Which reference state.** ΔG_polar subtracts a reference state on the same
+grid, so that each charge's grid self-energy cancels. That needs the same ε
+around every charge in both states. With a homogeneous `pdie` reference this
+fails: next to a nucleus ε − pdie ≈ (sdie − pdie)·P·d²/σ²R² (P: the other
+atoms' solvent fraction there), and the trilinear charge, spread over one
+spacing, sees a different dielectric in the two states. The error is first
+order in h with a large coefficient. It falls only once h resolves r* =
+σR·√(pdie/(sdie − pdie)), 0.21 Å for R = 2 Å and pdie 1. Mean over four grid
+placements, relative to the exact solution:
+
+| homogeneous reference | exact (kcal/mol) | 0.5 Å | 0.33–0.35 Å | 0.25 Å | 0.18 Å |
+|---|---|---|---|---|---|
+| R 2 Å, pdie 1 | −1230.34 | +63.4 % | +51.0 % | +41.9 % | +31.8 % |
+| R 2 Å, pdie 4 | −148.97 | +41.7 % | +30.1 % | +23.3 % | +16.8 % |
+| R 4 Å, pdie 4 | −74.48 | +23.3 % | +16.7 % | +12.0 % | +8.4 % |
+
+The placement spread reaches 43 kcal/mol (R 2 Å, pdie 1). As Li et al.
+(2014), the reference state therefore keeps the Gaussian ε wherever it is at
+most `gauss_contour` and puts `pdie` beyond (they put vacuum there; the same
+with pdie 1), without ions. Every charge of an atom with R > 0 sits where
+ε = pdie, inside the contour, and its self-energy cancels:
+
+| contour reference (ε ≤ 20) | exact (kcal/mol) | 0.5 Å | 0.33–0.35 Å | 0.24–0.25 Å | 0.18 Å |
+|---|---|---|---|---|---|
+| R 2 Å, pdie 1 | −164.45 | +3.18 % | +2.43 % | +1.99 % | +1.37 % |
+| R 2 Å, pdie 1, 0.15 M | −164.67 | +3.18 % | +2.43 % | +1.98 % | +1.37 % |
+| R 2 Å, pdie 4 | −41.03 | +1.78 % | +0.95 % | +1.31 % | +1.00 % |
+| R 1.5 Å, pdie 4, 0.15 M | −54.94 | +1.00 % | +2.05 % | +1.19 % | +1.34 % |
+| R 4 Å, pdie 4, 0.15 M | −20.70 | +1.30 % | +0.94 % | +0.68 % | +0.45 % |
+
+* First order (0.9–1.2) when the contour lies well away from the charge
+  (R 4 Å: 1.83 Å); erratic within about 1 % when it comes within 0.7–0.9 Å
+  (R 1.5–2 Å), as a sharp boundary near a charge does.
+* **Salt.** The salt effect (0.15 M) matches the exact one to 0.07 %:
+  −0.18304 to −0.18309 against −0.18297 kcal/mol (R 4 Å), −0.21494 against
+  −0.21495 (R 2 Å, 0.5 Å). Without the Born penalty it would be −3.92 and
+  −14.65 kcal/mol.
+
+**1YCR** (complex and chain B on the complex's grid, 0.15 M, CUDA, mean
+(sd) over two grid placements; mbondi2 radii, so no charge has radius 0):
+
+| ΔG_polar / ΔΔG_polar (kcal/mol) | 0.49 Å | 0.35 Å | 0.25 Å |
+|---|---|---|---|
+| `mol`, pdie 1 | −1286.0 (2.4) / 434.9 (1.7) | −1256.4 (1.2) / 429.0 (0.3) | −1240.6 (0.5) / 427.6 (0.3) |
+| `gauss`, pdie 1, homogeneous reference | −38 992 (558) / 438.8 (2.3) | −51 011 (1.3) / 477.8 (10.8) | −61 427 (310) / 529.6 (4.7) |
+| `gauss`, pdie 1 | −1239.9 (4.9) / 385.9 (2.2) | −1213.7 (0.9) / 383.3 (0.8) | −1200.0 (0.7) / 383.5 (0.2) |
+| `mol`, pdie 4 | −300.3 (0.5) / 105.2 (0.3) | −294.5 (0.3) / 104.0 (0.1) | −291.3 (0.1) / 103.7 (0.1) |
+| `gauss`, pdie 4, homogeneous reference | −5075 (56) / 111.5 (0.6) | −6101 (1.0) / 116.7 (1.4) | −6879 (24) / 122.1 (0.5) |
+| `gauss`, pdie 4 | −550.7 (2.4) / 103.4 (0.2) | −544.1 (0.0) / 103.8 (0.4) | −542.2 (0.6) / 103.5 (0.3) |
+
+* With the contour, ΔG_polar converges as with `mol`, and ΔΔG_polar changes
+  by less than 3 kcal/mol between 0.49 and 0.25 Å (`mol`: 7). The model
+  differs: dielectric up to 20 inside the molecule counts as solute. Li et
+  al. (2014) report scale errors below 0.8 % at 0.5 Å relative to 0.167 Å
+  for 91 proteins (DelPhi, pdie 4, vacuum beyond the contour); here pdie 4
+  changes by 1.6 % between 0.49 and 0.25 Å, with other radii and charge
+  assignment.
+* **pdb2pqr's AMBER radii.** The 18 charged hydrogens of radius 0 carry no
+  density; they sit where the Gaussian ε is 9–15 (pdie 1) or 12–17 (pdie 4),
+  inside the contour, and are accepted. ΔG_polar −990.1 / −971.0 / −966.4,
+  ΔΔG_polar 404.1 / 403.8 / 402.0 (pdie 1); with pdie 4 ΔΔG_polar 117.5 /
+  118.4 / 119.6, with a placement spread up to 3.6 kcal/mol from the
+  hydrogens near the contour. With σ = 0.85 one of them lies at ε = 20.5,
+  outside, and pbsolve refuses the input: its self-energy would diverge as
+  h → 0.
+
+**`npbe` refused.** The Born penalty is bounded, z² l_B/(2 r_ion)·(1/pdie −
+1/sdie) = 138 kT for pdie 1 and 33 kT for pdie 4 (r_ion 2 Å), but the
+potential next to a point charge is not, so the Boltzmann density K e^{|u|}
+diverges at the charges inside the molecule. With radius-0 atoms given 1 Å,
+the synthetic molecule's ΔG_polar is −226.2 instead of −170.3 kcal/mol
+(`lpbe`, pdie 1) and −154.4 instead of −71.8 (pdie 4); 1YCR does not
+converge (pdie 1) or gives −7171.8 instead of −551.9 (pdie 4). `smpbe` bounds
+the density: −170.4, −71.9, −1241.0 and −552.3, close to `lpbe`.
+
+**Checks.**
+* Maps against the formulas with every atom and no cutoff, on a non-cubic
+  grid with an atom of radius 0 and one outside the grid: ε and K within
+  1e-9; the reference keeps exactly the faces with ε ≤ `gauss_contour`.
+* With the contour above `sdie`, no ions and `bcfl zero` the two states are
+  one system and ΔG_polar is exactly 0.
+* CPU = CUDA (`smpbe`, synthetic molecule) within 1e-9.
+* 9/9 mutations caught (contour comparison, Born radius, face position,
+  cutoff, homogeneous reference, the radius-0 check, the penalty, σ, the
+  valence check).
+
+**Cost** (1YCR, 0.25 Å, 0.15 M; shared CPU, load ~10, and GPU):
+
+| | maps (s) | total (s) |
+|---|---|---|
+| CPU `mol` | 0.36 | 14.9 |
+| CPU `gauss` | 0.96 | 14.4 |
+| CUDA `mol` | 0.16 | 1.92 |
+| CUDA `gauss` | 1.22 | 2.93 |
+
+The Gaussian maps are built on the host for both states (the reference
+needs them for its contour). One `exp` per atom and point took 2.05 s (CPU)
+and 2.29 s (CUDA); the per-axis factors halved that, and restricting each row
+to the cutoff sphere saved nothing measurable.
 
 ## Size-modified PB (`equation="smpbe"`)
 

@@ -32,11 +32,12 @@
 use crate::backend::Backend;
 use crate::cpu::CpuBackend;
 use crate::error::{PbError, Result};
+use crate::gaussian::{contour_faces, gaussian_maps};
 use crate::grid::Grid;
 use crate::molecule::{dist2, Atom};
 use crate::params::{InterfaceMethod, PbParams, SurfaceMethod};
 use crate::spatial::CellList;
-use crate::spline::{spline_maps, SplineMaps};
+use crate::spline::{spline_maps, SmoothMaps};
 use crate::units::kappa_bar_squared;
 use rayon::prelude::*;
 use std::f64::consts::PI;
@@ -73,6 +74,19 @@ impl CoefficientMaps {
         }
     }
 
+    /// The reference state's maps: ε = `pdie` (with `gauss`, the Gaussian ε
+    /// inside its contour) and no ions.
+    pub fn reference(grid: &Grid, atoms: &[Atom], params: &PbParams) -> Self {
+        let [eps_x, eps_y, eps_z, kappa_sq] =
+            maps_on(&CpuBackend::new(), grid, atoms, params, None).expect("the f64 CPU backend builds maps");
+        Self {
+            eps_x,
+            eps_y,
+            eps_z,
+            kappa_sq,
+        }
+    }
+
     /// Dielectric and ion maps for the solvated state.
     pub fn solvated(grid: &Grid, atoms: &[Atom], params: &PbParams) -> Self {
         Self::solvated_with(grid, atoms, params, &MolecularSurface::for_params(atoms, params))
@@ -94,9 +108,9 @@ impl CoefficientMaps {
 
 /// The maps `[eps_x, eps_y, eps_z, kappa_sq]` of one grid level built on a
 /// backend: the solvated state's for a surface `surf` (prebuilt, shared by
-/// focusing levels), else the reference state's (ε = pdie, no ions). The
-/// values are those of [`CoefficientMaps::solvated_with`] and
-/// [`CoefficientMaps::homogeneous`], bit for bit, on every backend.
+/// focusing levels), else the reference state's (ε = pdie, no ions; with
+/// `gauss` the Gaussian ε inside its contour). The values do not depend on
+/// the backend, bit for bit.
 pub fn maps_on<B: Backend>(
     be: &B,
     grid: &Grid,
@@ -105,16 +119,29 @@ pub fn maps_on<B: Backend>(
     surf: Option<&MolecularSurface>,
 ) -> Result<[B::Vector; 4]> {
     let Some(surf) = surf else {
+        if params.surface == SurfaceMethod::Gaussian {
+            let [x, y, z] = contour_faces(grid, atoms, params);
+            return Ok([
+                be.upload_owned(x)?,
+                be.upload_owned(y)?,
+                be.upload_owned(z)?,
+                be.zeros(grid.len())?,
+            ]);
+        }
         let [x, y, z] = exactly(be.mark_maps(grid, &[[0.0; 3]; 3], params.pdie, &[])?)?;
         return Ok([x, y, z, be.zeros(grid.len())?]);
     };
     let kbar2 = kappa_bar_squared(&params.ions, params.temperature);
-    if params.surface.is_spline() {
-        // Built on the host (APBS `fillcoCoefSpline*`).
-        let SplineMaps {
+    if params.surface.is_smooth() {
+        // Built on the host (spline surfaces: APBS `fillcoCoefSpline*`).
+        let SmoothMaps {
             eps: [x, y, z],
             mut accessibility,
-        } = spline_maps(grid, atoms, params);
+        } = if params.surface == SurfaceMethod::Gaussian {
+            gaussian_maps(grid, atoms, params)
+        } else {
+            spline_maps(grid, atoms, params)
+        };
         accessibility.par_iter_mut().for_each(|k| *k *= kbar2);
         return Ok([
             be.upload_owned(x)?,
@@ -143,7 +170,7 @@ pub fn maps_on<B: Backend>(
             let (x, y, z) = harmonic_faces(grid, &node);
             [be.upload_owned(x)?, be.upload_owned(y)?, be.upload_owned(z)?]
         }
-        SurfaceMethod::Spline2 | SurfaceMethod::Spline4 => unreachable!("built above"),
+        SurfaceMethod::Spline2 | SurfaceMethod::Spline4 | SurfaceMethod::Gaussian => unreachable!("built above"),
     };
 
     let kappa_sq = if kbar2 > 0.0 {
@@ -400,8 +427,8 @@ impl MolecularSurface {
     /// The surface `params.surface` asks for (`vdw`: no probe).
     pub fn for_params(atoms: &[Atom], params: &PbParams) -> Self {
         let srad = match params.surface {
-            // The spline maps do not use the surface beyond marking the state as solvated.
-            SurfaceMethod::Vdw | SurfaceMethod::Spline2 | SurfaceMethod::Spline4 => 0.0,
+            // The smooth maps do not use the surface beyond marking the state as solvated.
+            SurfaceMethod::Vdw | SurfaceMethod::Spline2 | SurfaceMethod::Spline4 | SurfaceMethod::Gaussian => 0.0,
             SurfaceMethod::Mol | SurfaceMethod::HarmonicMol => params.srad,
         };
         Self::new(atoms, srad, params.sdens, apbs_clist_radius(params))

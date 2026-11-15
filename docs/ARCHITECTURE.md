@@ -50,6 +50,12 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   on the faces and the accessibility K = Π S_a(r + r_ion) on the nodes, with
   each atom's cubic or septic switch over [r − swin, r + swin], in APBS'
   order of atoms, products and guards.
+  `gauss` (`gaussian.rs`, host; not an APBS option) has the same form with
+  S_a = 1 − exp(−d²/σ²R²), evaluated as the product of per-atom axis factors
+  and cut off below 1e-12, and the ions' Born accessibility
+  K = exp(−z² l_B/(2 r_ion)·(1/ε − 1/sdie)) on the nodes. Its reference
+  state is not homogeneous: `maps_on` without a surface gives the Gaussian ε
+  where it is at most `gauss_contour`, `pdie` beyond (`contour_faces`).
 * **Ions:** κ̄² is zero inside `r_i + r_ion` (largest listed ion radius) of
   every atom with `r_i > 0`, marked the same way.
 * **Nonlinear PB** (`nonlinear.rs`): with `equation="npbe"` the solvated

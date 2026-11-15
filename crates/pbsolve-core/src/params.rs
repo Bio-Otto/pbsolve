@@ -64,6 +64,10 @@ pub enum SurfaceMethod {
     Spline2,
     /// APBS `srfm spl4`: the same with a septic switch.
     Spline4,
+    /// Gaussian dielectric (not an APBS option): ε from the atoms' Gaussian
+    /// densities of width `gauss_sigma`·R, with no surface; the reference
+    /// state keeps it inside the `gauss_contour` ([`crate::gaussian`]).
+    Gaussian,
 }
 
 impl SurfaceMethod {
@@ -74,8 +78,9 @@ impl SurfaceMethod {
             "harmonic" | "harmonic-mol" | "hmol" => Ok(Self::HarmonicMol),
             "spl2" => Ok(Self::Spline2),
             "spl4" => Ok(Self::Spline4),
+            "gauss" => Ok(Self::Gaussian),
             other => invalid(format!(
-                "unknown surface method '{other}' (expected 'mol', 'vdw', 'harmonic', 'spl2' or 'spl4')"
+                "unknown surface method '{other}' (expected 'mol', 'vdw', 'harmonic', 'spl2', 'spl4' or 'gauss')"
             )),
         }
     }
@@ -87,12 +92,19 @@ impl SurfaceMethod {
             Self::HarmonicMol => "harmonic",
             Self::Spline2 => "spl2",
             Self::Spline4 => "spl4",
+            Self::Gaussian => "gauss",
         }
     }
 
     /// `spl2` or `spl4`: smooth in the atom positions.
     pub fn is_spline(&self) -> bool {
         matches!(self, Self::Spline2 | Self::Spline4)
+    }
+
+    /// The spline surfaces or `gauss`: solvated maps that vary smoothly
+    /// with position, built on the host.
+    pub fn is_smooth(&self) -> bool {
+        self.is_spline() || *self == Self::Gaussian
     }
 }
 
@@ -311,6 +323,12 @@ pub struct PbParams {
     /// Half-width (Å) of the switching window of the spline surfaces
     /// (APBS `swin`).
     pub swin: f64,
+    /// Width of an atom's Gaussian density relative to its radius
+    /// (`gauss` only; σ of Li et al. 2013).
+    pub gauss_sigma: f64,
+    /// Dielectric value of the contour inside which the reference state of
+    /// `gauss` keeps the Gaussian ε (Li et al. 2014).
+    pub gauss_contour: f64,
     /// Dielectric of the faces the surface cuts (`mol` and `vdw` only).
     pub interface: InterfaceMethod,
     /// How ΔG_polar removes the Coulomb potential (reference solve or
@@ -343,6 +361,8 @@ impl Default for PbParams {
             sdens: 10.0,
             surface: SurfaceMethod::Mol,
             swin: 0.3,
+            gauss_sigma: 0.93,
+            gauss_contour: 20.0,
             interface: InterfaceMethod::Sharp,
             coulomb: CoulombMethod::Grid,
             equation: Equation::Linear,
@@ -388,6 +408,17 @@ impl PbParams {
         self.ions.iter().map(|i| i.radius).fold(0.0, f64::max)
     }
 
+    /// How far inside an atom's radius the solvated maps may still differ
+    /// from the reference state (ε = `pdie`, no ions): the switching window
+    /// of the spline surfaces, 0 for the sharp ones.
+    pub fn pdie_inset(&self) -> f64 {
+        if self.surface.is_spline() {
+            self.swin
+        } else {
+            0.0
+        }
+    }
+
     /// Bulk volume fraction of the ions in lattice cells of edge `ion_size`:
     /// Σ_j c_j N_A a³ (0 for point ions).
     pub fn ion_volume_fraction(&self) -> f64 {
@@ -412,6 +443,24 @@ impl PbParams {
         }
         if self.swin.is_nan() || self.swin <= 0.0 {
             return invalid("swin must be positive");
+        }
+        if !self.gauss_sigma.is_finite() || self.gauss_sigma <= 0.0 {
+            return invalid("gauss_sigma must be positive");
+        }
+        if self.surface == SurfaceMethod::Gaussian {
+            if self.gauss_contour.is_nan() || self.gauss_contour <= self.pdie {
+                return invalid("gauss_contour must exceed pdie");
+            }
+            if self.coulomb == CoulombMethod::Analytic {
+                return invalid("surface 'gauss' needs coulomb 'grid': its reference state is not a homogeneous pdie");
+            }
+            if self.equation == Equation::Nonlinear {
+                return invalid(
+                    "surface 'gauss' with equation 'npbe': the ions' Born penalty is bounded but the potential \
+                     next to a point charge is not, so their Boltzmann density diverges at the charges inside \
+                     the molecule; use 'lpbe' or 'smpbe' (bounded ion density)",
+                );
+            }
         }
         if self.equation != Equation::Linear && self.coulomb == CoulombMethod::Analytic {
             return invalid(format!("equation '{}' needs coulomb 'grid'", self.equation.as_str()));
@@ -441,6 +490,18 @@ impl PbParams {
         let net: f64 = self.ions.iter().map(|i| i.concentration * i.charge).sum();
         if net.abs() > 1.0e-6 {
             return invalid(format!("mobile ions are not electroneutral (Σ c·z = {net:.3e})"));
+        }
+        if self.surface == SurfaceMethod::Gaussian {
+            // One accessibility map for all species: their Born penalties z²/r must agree.
+            let mut present = self.ions.iter().filter(|i| i.concentration > 0.0);
+            if let Some(first) = present.next() {
+                if first.radius <= 0.0 {
+                    return invalid("surface 'gauss' needs ions of positive radius (their Born penalty)");
+                }
+                if present.any(|i| i.charge.abs() != first.charge.abs() || i.radius != first.radius) {
+                    return invalid("surface 'gauss' needs ions of one valence and one radius");
+                }
+            }
         }
         Ok(())
     }

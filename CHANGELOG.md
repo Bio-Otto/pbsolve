@@ -160,6 +160,16 @@
   agree with APBS 3.4.1 to ≤ 4e-7 of the largest force and with Kirkwood's
   force on a charge in a sphere to 0.08 %. `pbsolve apbs compare --forces`
   compares them with APBS (`docs/VALIDATION.md`).
+- `Solver(surface="gauss", gauss_sigma=0.93, gauss_contour=20.0)`,
+  `--surface gauss --gauss-sigma --gauss-contour`: the Gaussian dielectric
+  (Li et al. 2013; not an APBS option). ε is graded from `pdie` to `sdie` by
+  a molecular density of atomic Gaussians, and the ions pay a Born penalty
+  (Jia et al. 2017). The reference state keeps the Gaussian ε up to the
+  contour (Li et al. 2014); a homogeneous reference would leave the charges'
+  grid self-energies uncancelled. One Gaussian atom agrees with its exact
+  radial solution to 1–3 % at 0.5 Å; ΔΔG_polar of 1YCR changes by less than
+  3 kcal/mol between 0.5 and 0.25 Å. Not with `npbe`, `coulomb="analytic"`
+  or forces (`docs/VALIDATION.md`).
 - `batch::calculation_device_bytes`: the device memory of a calculation
   with its settings (the nonlinear equation needs 4 more vectors); used to
   reserve memory and to size batch workers.
@@ -282,6 +292,13 @@
 
 ### Fixed
 
+- `coulomb="analytic"` with a spline surface assumed ε = `pdie` on every face
+  between nodes more than one spacing inside an atom, which the switching
+  window reaches when `swin` exceeds about the spacing (from h ≈ 0.2 Å with
+  the default 0.3 Å). A charge at the centre of a 3 Å sphere with `swin=1`
+  gave −50.3 instead of −75.3 kcal/mol at h = 0.25 Å. The region where the
+  decomposition takes ε = `pdie` now shrinks by the window; the result
+  agrees with `coulomb="grid"` and with the exact radial integral.
 - Batches on CUDA (`polar_solvation_many`, `polar_solvation_batch`,
   `pbsa_solvation_frames`, `pbsolve mmpbsa`) ran three calculations at once
   whatever their size, and large grids ran out of GPU memory (three 5DK3

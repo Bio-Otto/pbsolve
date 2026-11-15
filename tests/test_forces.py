@@ -97,6 +97,27 @@ def test_charge_in_a_dielectric_sphere(surface):
     assert np.abs(f[:, :, 1:]).max() < 0.03 * charge  # no force across the axis
 
 
+@pytest.mark.parametrize("coulomb", ["grid", "analytic"])
+def test_spline_sphere_against_the_radial_integral(coulomb):
+    # A charge at the centre of one spline sphere: ε depends on r alone and D = q/r²
+    # (Gauss), so ΔG = ½ q² l_B ∫ (1/ε(r) − 1/pdie) dr/r². A window wider than h puts
+    # dielectric faces between nodes deep inside the sphere, which coulomb "analytic"
+    # once missed (−50.3 instead of −75.3 kcal/mol).
+    from scipy.integrate import quad
+
+    a, w, pdie, sdie, t = 3.0, 1.0, 1.0, 78.54, 298.15
+
+    def eps(r):
+        s = min(max(r - a + w, 0.0), 2 * w)
+        return pdie + (sdie - pdie) * (0.75 * s * s / w**2 - 0.25 * s**3 / w**3)
+
+    f = lambda r: (1 / eps(r) - 1 / pdie) / r**2
+    exact = 0.5 * pbsolve.bjerrum_length(t) * pbsolve.kt_kcal_per_mol(t) * (quad(f, a - w, a + w)[0] + quad(f, a + w, np.inf)[0])
+    s = pbsolve.Solver(platform="CPU", grid_spacing=0.25, pdie=pdie, sdie=sdie, surface="spl2", swin=w, coulomb=coulomb)
+    energy = s.polar_solvation(np.array([[0.113, -0.071, 0.052]]), np.array([1.0]), np.array([a])).energy
+    assert energy == pytest.approx(exact, rel=2e-3)  # -75.27 kcal/mol
+
+
 def test_spline_surfaces():
     x, q, r = synthetic_molecule()
     s = pbsolve.Solver(platform="CPU", grid_spacing=0.6, fadd=10.0, ionic_strength=0.1, surface="spl4", swin=0.4)

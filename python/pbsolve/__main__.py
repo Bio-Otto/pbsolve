@@ -46,8 +46,10 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
     p.add_argument("--ionic-strength", type=float, default=0.0)
     p.add_argument("--ion-radius", type=float, default=2.0)
     p.add_argument("--srad", type=float, default=1.4)
-    p.add_argument("--surface", default="mol", choices=["mol", "vdw", "harmonic", "spl2", "spl4"])
+    p.add_argument("--surface", default="mol", choices=["mol", "vdw", "harmonic", "spl2", "spl4", "gauss"])
     p.add_argument("--swin", type=float, default=0.3, help="spl2/spl4 surfaces: half-width of the switching window (Å)")
+    p.add_argument("--gauss-sigma", type=float, default=0.93, help="gauss: width of the atomic Gaussians relative to the radii")
+    p.add_argument("--gauss-contour", type=float, default=20.0, help="gauss: the reference state keeps ε up to this value")
     p.add_argument(
         "--interface",
         default="sharp",
@@ -120,6 +122,8 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         equation=args.equation,
         ion_size=args.ion_size,
         swin=args.swin,
+        gauss_sigma=args.gauss_sigma,
+        gauss_contour=args.gauss_contour,
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,

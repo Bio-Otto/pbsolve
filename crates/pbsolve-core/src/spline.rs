@@ -115,9 +115,9 @@ fn septic(r: f64, w: f64) -> [f64; 8] {
     ]
 }
 
-/// The maps of a spline surface on one grid.
+/// The maps of a smooth dielectric (spline surface or `gauss`) on one grid.
 #[derive(Clone, Debug)]
-pub struct SplineMaps {
+pub struct SmoothMaps {
     /// ε on the x, y and z faces (as [`crate::surface::CoefficientMaps`]).
     pub eps: [Vec<f64>; 3],
     /// The ion accessibility K ∈ [0, 1] on the nodes (APBS' `kappa` map
@@ -143,7 +143,7 @@ struct Placed {
 
 /// The dielectric and ion-accessibility maps of `params.surface` (`spl2` or
 /// `spl4`) on `grid` (APBS `fillcoCoefSpline`, `fillcoCoefSpline4`).
-pub fn spline_maps(grid: &Grid, atoms: &[Atom], params: &PbParams) -> SplineMaps {
+pub fn spline_maps(grid: &Grid, atoms: &[Atom], params: &PbParams) -> SmoothMaps {
     let [nx, ny, _] = grid.dims;
     let h = grid.spacing;
     let (lo, up) = (grid.origin, grid.upper());
@@ -239,7 +239,7 @@ pub fn spline_maps(grid: &Grid, atoms: &[Atom], params: &PbParams) -> SplineMaps
     fill(&mut ex);
     fill(&mut ey);
     fill(&mut ez);
-    SplineMaps {
+    SmoothMaps {
         eps: [ex, ey, ez],
         accessibility: kappa,
     }

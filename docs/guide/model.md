@@ -87,6 +87,7 @@ per axis). `surface` defines it:
 | `"vdw"` | union of the atomic spheres (`"mol"` with a zero probe) | `srfm mol` with `srad 0` |
 | `"harmonic"` | molecular surface evaluated on the nodes; the face values are harmonic means of the neighbouring nodes (smoother) | none; this is **not** APBS `srfm smol` |
 | `"spl2"`, `"spl4"` | atomic spheres smoothed over ±`swin` (Å, default 0.3) by a cubic or septic switch: ε rises continuously from `pdie` to `sdie`, and the ion accessibility from 0 to 1 | `srfm spl2`, `spl4`; the maps are identical to the 7 digits APBS writes |
+| `"gauss"` | no surface: ε from a molecular density built of atomic Gaussians, graded from `pdie` in densely packed regions to `sdie` in the solvent ([below](#gaussian-dielectric)) | none |
 
 The defaults `srad=1.4` and `sdens=10.0` are APBS' usual values.
 
@@ -97,6 +98,67 @@ crevices, and the smoothing moves the effective boundary about 0.2 Å inwards.
 −2609 with `"spl2"`. Use radii fitted for a smooth boundary with them. Every
 charged atom should lie inside the solute: a charge with radius 0 near the
 surface feels a grid-dependent self-energy.
+
+### Gaussian dielectric
+
+`surface="gauss"` replaces the surface by a molecular density [Grant, Pickup
+& Nicholls 2001; Li et al. 2013]. An atom of radius R contributes
+g = exp(−d²/σ²R²) at distance d (σ = `gauss_sigma`, default 0.93), the
+molecule has the density ρ = 1 − Π(1 − g), and
+
+$$
+\varepsilon = \rho\,\varepsilon_\text{pdie} + (1 - \rho)\,\varepsilon_\text{sdie}.
+$$
+
+Densely packed regions get nearly `pdie`, loose packing and grooves
+intermediate values, the solvent `sdie`. Li et al. (2013) fitted σ = 0.93
+with `pdie=4` to pKa values. The mobile ions pay the Born energy of leaving
+the bulk solvent for the local dielectric [Jia et al. 2017], which scales κ̄²
+by
+
+$$
+K = \exp\left[-\frac{z^2 l_B}{2\,r_\text{ion}}\left(\frac{1}{\varepsilon} - \frac{1}{\varepsilon_\text{sdie}}\right)\right]
+$$
+
+with r_ion = `ion_radius` (l_B: Bjerrum length in vacuum). Jia et al. print
+this penalty with the opposite overall sign; the sign here keeps the ions
+out of the molecule, as their text describes.
+
+The **reference state** of ΔG_polar keeps the Gaussian ε wherever it is at
+most `gauss_contour` (default 20) and puts `pdie` beyond, without ions, as Li
+et al. (2014): ΔG_polar is the transfer of the molecule with its internal
+dielectric into the solvent. (Li et al. put vacuum beyond the contour; with
+`pdie=1` this is the same.) A homogeneous `pdie` reference does not work for
+this model: ε rises from `pdie` within a few tenths of an Å of every nucleus,
+so the grid self-energies of the charges would not cancel, and ΔG_polar of
+1YCR would be −39 000 kcal/mol at 0.5 Å and −61 000 at 0.25 Å
+([validation](../VALIDATION)). With the contour, a single Gaussian atom is
+within 1–3 % of the exact solution at 0.5 Å, and ΔΔG_polar of binding for
+1YCR changes by less than 3 kcal/mol between 0.5 and 0.25 Å. This has
+consequences:
+
+* A charged atom of radius 0 must lie inside the contour; otherwise its
+  charge sees different dielectrics in the two states and pbsolve refuses
+  it. Give it a radius (for example `Molecule.with_radii("mbondi2")`) or
+  raise `gauss_contour`. Charges just inside the contour make results
+  noisier.
+* `coulomb="analytic"` and [forces](#forces) are not available: the
+  reference state is neither homogeneous nor smooth.
+* `equation="npbe"` is refused. The Born penalty is bounded (138 kT with
+  `pdie=1`), the potential next to a point charge is not, so the Boltzmann
+  ion density diverges at the charges inside the molecule. `"smpbe"` bounds
+  the density and works.
+* All ion species need one valence and one radius (one penalty).
+
+A calculation takes about 1.5 times as long as with `"mol"` on a GPU (the
+maps are built on the host) and as long on the CPU.
+
+```python
+gauss = pbsolve.Solver(ionic_strength=0.15, surface="gauss", pdie=4.0)
+print(f"{gauss.polar_solvation(coords, charges, radii).energy:.2f} kcal/mol")
+```
+
+### Cut faces
 
 With `"mol"` and `"vdw"`, `interface` sets the dielectric of the faces the
 surface cuts:

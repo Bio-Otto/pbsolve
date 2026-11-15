@@ -386,6 +386,19 @@ which give a few-unit protein interior and a graded interface without an
 explicit surface [Grant, Pickup & Nicholls 2001; Li et al. 2013]. They are
 differentiable everywhere (good for forces and gradients) and are the basis
 of Gaussian-dielectric pKa methods (4.21).
+*Status: done (unreleased) as `surface="gauss"` with `gauss_sigma` and
+`gauss_contour`; forces remain.*
+* The dielectric of Li et al. (2013) and the ions' Born penalty of Jia et al.
+  (2017); maps equal the formulas to 1e-9.
+* The reference state keeps the Gaussian ε inside a contour (ε ≤ 20) [Li, Li
+  & Alexov 2014]. A homogeneous `pdie` reference leaves the charges' grid
+  self-energies uncancelled (1YCR: −39 000 kcal/mol at 0.5 Å, −61 000 at
+  0.25 Å); with the contour, one Gaussian atom is within 1–3 % of its exact
+  radial solution at 0.5 Å and ΔΔG_polar of 1YCR within 3 kcal/mol between
+  0.5 and 0.25 Å.
+* Remaining: forces (the sharp contour of the reference state makes them
+  undefined; a smoothed contour would be a new model), and `npbe`, whose
+  Boltzmann density diverges at the charges under the bounded Born penalty.
 
 ### v0.4 — End-point free energies (MM-PBSA and related)
 
@@ -572,9 +585,11 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Huang et al. Neural network Poisson–Boltzmann electrostatics for biomolecular interactions. J. Comput. Phys. (2025); preprint HKU IMR2025-01.
 * Im W, Beglov D, Roux B. Continuum solvation model: computation of electrostatic forces from numerical solutions to the Poisson–Boltzmann equation. Comput. Phys. Commun. 111, 59 (1998).
 * Jha A, Nottoli M, Mikhalev A, Quan C, Stamm B. Linear scaling computation of forces for the domain-decomposition linear Poisson–Boltzmann method. J. Chem. Phys. 158, 104105 (2023).
+* Jia Z, Li L, Chakravorty A, Alexov E. Treating ion distribution with Gaussian-based smooth dielectric function in DelPhi. J. Comput. Chem. 38, 1974 (2017).
 * Katzberger P, Riniker S. Implicit solvent approach based on generalized Born and transferable graph neural networks for molecular dynamics simulations. J. Chem. Phys. 158, 204101 (2023); A general graph neural network based implicit solvation model for organic molecules in water. Chem. Sci. (2024).
 * Kilic MS, Bazant MZ, Ajdari A. Steric effects in the dynamics of electrolytes at large applied voltages. I. Double-layer charging. Phys. Rev. E 75, 021502 (2007).
 * Kirkwood JG. Theory of solutions of molecules containing widely separated charges with special application to zwitterions. J. Chem. Phys. 2, 351 (1934).
+* Li L, Li C, Alexov E. On the modeling of polar component of solvation energy using smooth Gaussian-based dielectric function. J. Theor. Comput. Chem. 13, 1440002 (2014).
 * Li L, Li C, Zhang Z, Alexov E. On the dielectric "constant" of proteins: smooth dielectric function for macromolecular modeling and its implementation in DelPhi. J. Chem. Theory Comput. 9, 2126 (2013).
 * Luty BA, Davis ME, McCammon JA. Electrostatic energy calculations by a finite-difference method: rapid calculation of charge–solvent interaction energies. J. Comput. Chem. 13, 768 (1992).
 * McCormick SF, Benzaken J, Tamstorf R. Algebraic error analysis for mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S392 (2021a).

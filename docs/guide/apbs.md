@@ -82,7 +82,7 @@ message naming the keyword.
   a few 0.01 kcal/mol in ΔΔG_polar. With `bcfl zero` the energies agree to
   ~1e-10.
 * **Options without an APBS equivalent.** `bcfl="mdh-fast"` is written as
-  `mdh` (energies agree to ~1e-13); `surface="harmonic"`,
+  `mdh` (energies agree to ~1e-13); `surface="harmonic"` and `"gauss"`,
   `interface="fractional"`, `coulomb="analytic"` and `equation="smpbe"`
   (which APBS 3.4.1 disables) cannot be compared.
 
