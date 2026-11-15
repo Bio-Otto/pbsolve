@@ -26,7 +26,7 @@ use crate::backend::Backend;
 use crate::error::Result;
 use crate::molecule::Atom;
 use crate::nonlinear::IonTerms;
-use crate::params::{Equation, PbParams, Preconditioner};
+use crate::params::{PbParams, Preconditioner};
 use crate::pb::{polar_solvation, PolarSolvation};
 use crate::solver::solve_device_bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,10 +55,11 @@ pub fn worker_device_bytes(dims: impl IntoIterator<Item = [usize; 3]>, precondit
 /// buffers: u, the charges, κ̄² and N'(u) ([`crate::nonlinear`]).
 pub const NONLINEAR_VECTORS: u64 = 4;
 
-/// [`worker_device_bytes`] for the calculations of `params`: with
-/// `equation = npbe` and ions, [`NONLINEAR_VECTORS`] more f64 vectors.
+/// [`worker_device_bytes`] for the calculations of `params`: with a
+/// nonlinear equation (`npbe`, `smpbe`) and ions, [`NONLINEAR_VECTORS`] more
+/// f64 vectors.
 pub fn calculation_device_bytes(dims: impl IntoIterator<Item = [usize; 3]>, params: &PbParams) -> u64 {
-    let nonlinear = params.equation == Equation::Nonlinear && IonTerms::new(params).is_some();
+    let nonlinear = IonTerms::new(params).is_some();
     padded(
         dims.into_iter()
             .map(|d| {

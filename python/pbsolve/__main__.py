@@ -57,9 +57,15 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--equation",
         default="lpbe",
-        choices=["lpbe", "npbe"],
-        help="Poisson-Boltzmann equation of the solvated state: lpbe (linearized, default) or npbe (nonlinear, "
-        "Boltzmann-distributed ions; as APBS npbe)",
+        choices=["lpbe", "npbe", "smpbe"],
+        help="Poisson-Boltzmann equation of the solvated state: lpbe (linearized, default), npbe (nonlinear, "
+        "Boltzmann-distributed ions; as APBS npbe) or smpbe (nonlinear with ions of finite size, see --ion-size)",
+    )
+    p.add_argument(
+        "--ion-size",
+        type=float,
+        default=0.0,
+        help="with --equation smpbe: edge of the lattice cell one ion fills, in Å (APBS smpbe vol)",
     )
     p.add_argument(
         "--coulomb",
@@ -111,6 +117,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         interface=args.interface,
         coulomb=args.coulomb,
         equation=args.equation,
+        ion_size=args.ion_size,
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,

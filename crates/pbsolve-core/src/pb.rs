@@ -12,7 +12,7 @@ use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::molecule::Atom;
 use crate::nonlinear::{self, IonTerms, NonlinearLevel};
-use crate::params::{ChargeMethod, CoulombMethod, Equation, PbParams};
+use crate::params::{ChargeMethod, CoulombMethod, PbParams};
 use crate::solver::{pcg_on, pcg_setup, SolveStats, SolverOptions};
 use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
 use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
@@ -392,9 +392,7 @@ fn solve_level<B: Backend>(
     decompose: bool,
     timings: &mut Timings,
 ) -> Result<(LevelSolution<B>, SolveStats, NodeCharges, LevelExtra)> {
-    let ions = (params.equation == Equation::Nonlinear)
-        .then(|| IonTerms::new(params))
-        .flatten();
+    let ions = IonTerms::new(params);
     if let (Some(surf), Some(ions)) = (surf, ions) {
         return solve_nonlinear_level(be, grid, g, atoms, params, surf, &ions, timings);
     }

@@ -194,6 +194,8 @@ def elec_from_solver(
         raise ValueError(f"interface={p['interface']!r} has no APBS equivalent; compare interface='sharp'")
     if p["coulomb"] != "grid":
         raise ValueError(f"coulomb={p['coulomb']!r} has no APBS equivalent; compare coulomb='grid'")
+    if p["equation"] == "smpbe":
+        raise ValueError("equation='smpbe' cannot be compared: APBS 3.4.1 disables smpbe")
     srad = 0.0 if p["surface"] == "vdw" else p["srad"]
     grid.to_apbs()  # raises ValueError if APBS would change the grid
     return ElecCalc(

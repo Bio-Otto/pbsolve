@@ -1210,7 +1210,7 @@ impl<T: CudaReal> Backend for Dev<T> {
 
     fn boltzmann_slope(
         &self,
-        ions: &[[f64; 2]],
+        ions: &[[f64; 3]],
         u: &Self::Vector,
         kappa_sq: &Self::Vector,
         slope: &mut Self::Vector,
@@ -1229,7 +1229,7 @@ impl<T: CudaReal> Backend for Dev<T> {
 
     fn boltzmann_residual(
         &self,
-        ions: &[[f64; 2]],
+        ions: &[[f64; 3]],
         vol: f64,
         dims: [usize; 3],
         u: &Self::Vector,

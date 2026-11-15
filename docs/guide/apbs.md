@@ -80,7 +80,8 @@ message naming the keyword.
   ~1e-10.
 * **Options without an APBS equivalent.** `bcfl="mdh-fast"` is written as
   `mdh` (energies agree to ~1e-13); `surface="harmonic"`,
-  `interface="fractional"` and `coulomb="analytic"` cannot be compared.
+  `interface="fractional"`, `coulomb="analytic"` and `equation="smpbe"`
+  (which APBS 3.4.1 disables) cannot be compared.
 
 ## Results
 

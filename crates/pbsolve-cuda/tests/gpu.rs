@@ -1201,9 +1201,9 @@ fn analytic_coulomb_matches_the_cpu() {
     }
 }
 
-/// The nonlinear equation (`equation = "npbe"`) gives the CPU's energies and
-/// potentials on the GPU: one to three focusing levels, a 1:1 and a 2:1
-/// salt. The Newton steps run on the host; the linear steps on the device.
+/// The nonlinear equation (`equation = "npbe"`, and `smpbe`) gives the CPU's
+/// energies and potentials on the GPU: one to three focusing levels, a 1:1
+/// and a 2:1 salt, finite-size ions. The Boltzmann terms run in CUDA kernels.
 #[test]
 fn nonlinear_pb_matches_the_cpu() {
     use pbsolve_core::pb::{polar_solvation, solve_focused, Medium};
@@ -1235,10 +1235,21 @@ fn nonlinear_pb_matches_the_cpu() {
             radius: 2.0,
         },
     ];
-    for (scale, ions) in [(1.0, None), (2.0, Some(two_one)), (9.0, None)] {
+    // The last case: size-modified ions (`smpbe`, 6 Å lattice cells).
+    for (scale, ions, size) in [
+        (1.0, None, 0.0),
+        (2.0, Some(two_one), 0.0),
+        (9.0, None, 0.0),
+        (2.0, None, 6.0),
+    ] {
         let mut params = PbParams {
             pdie: 2.0,
-            equation: Equation::Nonlinear,
+            equation: if size > 0.0 {
+                Equation::SizeModified
+            } else {
+                Equation::Nonlinear
+            },
+            ion_size: size,
             tol: 1e-10,
             ..PbParams::default()
         }

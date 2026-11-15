@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Size-modified PB (unreleased): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (unreleased): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (unreleased): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
 | Fractional dielectric interface (unreleased): `interface="fractional"` | faces split exactly against an independent computation (≤ 1e-12); default `sharp` bit-identical (CPU, CUDA); device maps = host maps; 10/11 mutations caught; analytic references with `vdw`: observed orders 1.6–2.5 (sharp 1.0–1.2), errors at 0.5 Å −0.14 … −0.71 % (sharp −2.3 … −4.7 %); with `mol` a +0.13–0.18 % plateau from APBS' sampled probe positions (gone with `sdens=100`); 1YCR placement sd 5–10× smaller, same extrapolated limit as sharp, ΔΔG_bind bias at 0.5 Å +2.7 instead of +13 kcal/mol; calculation 1.5× slower on CUDA, same on CPU; see *Fractional dielectric interface* |
@@ -2638,6 +2639,126 @@ calculation, or a batch worker, sets aside. The first version needed 10:
 Reproduce: `pbsolve apbs compare complex.pqr --ionic-strength 0.15
 --equation npbe --spacing 0.5`; `pytest tests/test_apbs_parity.py -k
 nonlinear`.
+
+## Size-modified PB (`equation="smpbe"`)
+
+**Change.** `Solver(equation="smpbe", ion_size=a)` and `--equation smpbe
+--ion-size a`: the nonlinear equation for ions of finite size.
+* **Model.** Every ion fills one cube of edge a (lattice gas [Borukhov et al.
+  1997, 2000]), all species the same size. In APBS
+  terms this is `smpbe vol a size 1`. APBS 3.4.1 refuses `smpbe` ("Sorry,
+  due to numerical stability issues SMPBE is currently disabled"), so there
+  is no APBS reference; `pbsolve.apbs` refuses it too.
+* **Defaults unchanged.** `lpbe` and `npbe` are unchanged: the default path
+  is bit-identical, and `npbe` is bit-identical to the previous commit on
+  the CPU (energies and iterations).
+* **Validation.** `ion_size` must be > 0 for `smpbe` and is refused
+  otherwise. The ions must leave room in the bulk, Σ c_j N_A a³ < 1.
+
+**Method.** With φ_j = c_j N_A a³ the bulk volume fraction of species j and
+e_j = e^{−q_j u}, the local concentrations are c_j e_j / D with the lattice
+denominator
+
+D(u) = 1 − Σ φ_j + Σ φ_j e_j,
+
+so no species exceeds one ion per cell. The ion term, its slope and the
+energy density follow from the lattice-gas free energy:
+* N(u) = −κ̄² Σ_j a_j q_j e_j / D (a_j = c_j/2I);
+* N'(u) = κ̄² (S2/D − S1 P1/D²), with S1 = Σ a q e, S2 = Σ a q² e,
+  P1 = Σ φ q e;
+* energy density ln D / (N_A a³) in place of Σ_j c_j (e_j − 1) (kT per
+  volume).
+
+These are the k = 1 branch of APBS' `Vc_vecsmpbe` and
+`Vpmg_qmEnergySMPBE` [Chu et al. 2007], for any number of species. For
+a = 0, D = 1 exactly, and the code is the `npbe` path operation for
+operation, so `npbe` keeps its results bit for bit. The Newton iteration,
+its device kernels, the outer terms of the coarser levels and the memory
+are those of `npbe`.
+
+**Planar double layer** (exact reference). For a 1:1 salt the planar
+equation has the first integral u'² = (2κ²/φ0) ln(1 − φ0 + φ0 cosh u)
+[Borukhov et al. 1997; Kilic et al. 2007]. For φ0 → 0 this is
+Gouy–Chapman, 4κ² sinh²(u/2). Integrated by quadrature, it gives the exact
+profile from u(0) = 6 kT/e at 0.15 M. pbsolve solves a slab whose boundary
+carries that profile, with `solve_maps`:
+
+| h (Å) | npbe (point ions) | smpbe, a = 3 Å | smpbe, a = 7 Å |
+|---|---|---|---|
+| 0.5 | 1.1e-2 | 3.4e-3 | 5.5e-5 |
+| 0.25 | 1.8e-3 | 3.7e-4 | 5.0e-6 |
+| 0.125 | 2.0e-4 | 3.0e-5 | 3.6e-7 |
+| observed order | 2.6, 3.1 | 3.2, 3.6 | 3.4, 3.8 |
+
+(maximum error of u in kT/e). These are the first analytic checks of the
+nonlinear operator itself, for `npbe` too, independent of APBS. With 7 Å
+ions D reaches 13 at the surface: the counterions are crowded, and the
+profile is smoother than Gouy–Chapman's.
+
+**A charged cavity** [Silalahi et al. 2010]: a sphere of radius 20 Å, pdie
+4, sdie 78.5, central charge −50 e, 0.1 M 1:1 salt, no Stern layer
+(`ion_radius=0`, `surface="vdw"`), 0.5 Å, CUDA. ΔG_polar: lpbe −5115.564,
+npbe −5131.975 kcal/mol.
+
+| a (Å) | smpbe − npbe (kcal/mol) | log slope against a | largest counterion concentration (M) | 1/(N_A a³) (M) |
+|---|---|---|---|---|
+| 0 (npbe) | — | — | 5.26 | — |
+| 0.5 | +0.0013 | — | 5.26 | 13 284 |
+| 1 | +0.0101 | 3.00 | 5.26 | 1 661 |
+| 2 | +0.0811 | 3.00 | 5.19 | 208 |
+| 4 | +0.6485 | 3.00 | 4.70 | 25.9 |
+| 8 | +5.0908 | 2.97 | 2.48 | 3.24 |
+
+* **Entropic cost.** Finite size always costs free energy (placing ions
+  costs entropy). While the ions are dilute (ξ ≪ 1), the cost grows exactly
+  as a³: this is Silalahi et al.'s eq. 11, log(F_SMPBE − F_NLPBE) =
+  3 log a + const.
+* **Saturation.** At 8 Å the counterions approach one per cell. At a
+  smaller sphere (radius 10 Å, −50 e, 0.6 Å) point ions reach 84 M at the
+  surface, an impossible concentration. With 8 Å ions the counterions stop
+  at 3.2432 M = 1/(N_A a³): the saturation layer of Borukhov et al.
+
+**Checks:**
+* Rust (`nonlinear.rs`, 7 tests, 2 new or extended):
+  * the functional is stationary at the solution for `smpbe` too (ratio
+    4.00 ± 0.05);
+  * no species exceeds one ion per cell for u from −40 to 40;
+  * a = 0.01 Å gives the `npbe` energy to 1e-9;
+  * the cost of finite size is positive and grows 8.0-fold from 1 to 2 Å.
+* GPU: `nonlinear_pb_matches_the_cpu` adds an `smpbe` case (≤ 1e-10).
+* `tests/test_size_modified.py` (7 tests, 2 s):
+  * the planar double layer for `npbe` and `smpbe` with 3 and 7 Å ions
+    (second order or better);
+  * the a³ cost on a −20 e cavity;
+  * saturation at a −50 e cavity;
+  * parameter checks and the APBS refusal;
+  * the command line.
+* Mutations caught: 9/9:
+  * D's Boltzmann factor and its 1 − Σφ;
+  * the slope without dD/du, the residual without D;
+  * the energy density's factor;
+  * a² instead of a³, half the volume fraction;
+  * two of them in the CUDA kernels.
+* Default path: the fingerprint set is bit-identical on CPU and CUDA.
+
+**Cost:** the same as `npbe` (1YCR 0.5 Å on CUDA: 0.33 s for smpbe with 6 Å
+ions, 0.34 s for npbe, 0.19 s for lpbe). For 5DK3 `smpbe` is cheaper
+(6.35 s, against 7.25 s for npbe): the crowded ions soften the
+nonlinearity, and Newton needs fewer steps. On 1YCR 6 Å ions raise
+ΔG_polar by 0.007 kcal/mol; on 5DK3 by 2.6 kcal/mol.
+
+**Notes.**
+* **Size of an ion.** There is no single right value. Chu et al. (2007)
+  fitted sizes to ion-counting data on DNA; Silalahi et al. used a = 2–16 Å.
+* **Stern layer.** pbsolve keeps its Stern layer (`ion_radius`) with
+  `smpbe`. Silalahi et al. argue that combining both counts the excluded
+  volume twice; set `ion_radius=0` to follow them.
+* **Not done.** Species of different sizes (APBS' `size` ≠ 1 and the
+  non-uniform model of Boschitsch & Danilov 2012) and ion correlations.
+
+Reproduce: `pytest tests/test_size_modified.py`; the cavity table with
+`Solver(equation="smpbe", ion_size=a, pdie=4.0, sdie=78.5,
+ionic_strength=0.1, ion_radius=0.0, surface="vdw")`.
 
 ## Sensitivity of the sharp dielectric boundary
 

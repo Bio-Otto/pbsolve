@@ -46,7 +46,8 @@ Commands that solve take these options; they are the
 | `--srad` | 1.4 | solvent probe radius (Å) |
 | `--surface` | `mol` | `mol`, `vdw` or `harmonic` |
 | `--interface` | `sharp` | dielectric of the faces the surface cuts: `sharp` (as APBS) or `fractional` (edge-weighted harmonic average, see [the model](model.md#dielectric-boundary)) |
-| `--equation` | `lpbe` | Poisson–Boltzmann equation of the solvated state: `lpbe` (linearized) or `npbe` (nonlinear, as APBS, see [the model](model.md#nonlinear-equation)) |
+| `--equation` | `lpbe` | Poisson–Boltzmann equation of the solvated state: `lpbe` (linearized), `npbe` (nonlinear, as APBS) or `smpbe` (nonlinear with ions of finite size), see [the model](model.md#nonlinear-equation) |
+| `--ion-size` | 0 | with `--equation smpbe`: edge of the lattice cell one ion fills (Å) |
 | `--coulomb` | `grid` | how ΔG_polar removes the Coulomb potential: `grid` (reference state on the same grid, as APBS) or `analytic` (reaction-field decomposition, one solve instead of two, see [the model](model.md#solvation-energy)) |
 | `--bcfl` | `mdh` | `mdh`, `mdh-fast`, `sdh` or `zero` |
 | `--dime-policy` | `pbsolve` | grid node counts: `pbsolve` (8k+1) or `apbs` (values APBS keeps) |

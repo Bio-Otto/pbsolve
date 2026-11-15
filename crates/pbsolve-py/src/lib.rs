@@ -138,7 +138,7 @@ impl Engine {
             Equation::Linear => {
                 dispatch!(self, be => solve_with_maps(be, grid, maps, charge, g_ext, params.temperature, opts))
             }
-            Equation::Nonlinear => {
+            Equation::Nonlinear | Equation::SizeModified => {
                 dispatch!(self, be => solve_with_maps_nonlinear(be, grid, maps, charge, g_ext, params, opts))
             }
         }
@@ -552,7 +552,12 @@ impl PyPolarResult {
 ///     The Poisson–Boltzmann equation of the solvated state (APBS keyword):
 ///     "lpbe" (linearized) or "npbe" (nonlinear: Boltzmann-distributed ions,
 ///     solved by Newton's method; its energy is APBS' free-energy
-///     functional). Without ions both are the same.
+///     functional) or "smpbe" (nonlinear with ions of finite size: lattice-gas
+///     ions that each fill a cube of edge ``ion_size``; not available in APBS
+///     3.4.1). Without ions all three are the same.
+/// ion_size : float
+///     With ``equation="smpbe"``: edge of the lattice cell one ion fills, in
+///     Å (APBS ``smpbe vol``); all ions have this size.
 ///
 /// Raises
 /// ------
@@ -715,7 +720,7 @@ impl PySolver {
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
         preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid",
-        equation = "lpbe"
+        equation = "lpbe", ion_size = 0.0
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -742,6 +747,7 @@ impl PySolver {
         interface: &str,
         coulomb: &str,
         equation: &str,
+        ion_size: f64,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -755,6 +761,7 @@ impl PySolver {
             interface: InterfaceMethod::parse(interface).map_err(to_py)?,
             coulomb: CoulombMethod::parse(coulomb).map_err(to_py)?,
             equation: Equation::parse(equation).map_err(to_py)?,
+            ion_size,
             tol,
             max_iter,
             preconditioner: Preconditioner::parse(preconditioner).map_err(to_py)?,
@@ -809,6 +816,7 @@ impl PySolver {
         d.set_item("interface", p.interface.as_str())?;
         d.set_item("coulomb", p.coulomb.as_str())?;
         d.set_item("equation", p.equation.as_str())?;
+        d.set_item("ion_size", p.ion_size)?;
         d.set_item("tol", p.tol)?;
         d.set_item("max_iter", p.max_iter)?;
         d.set_item("preconditioner", p.preconditioner.as_str())?;

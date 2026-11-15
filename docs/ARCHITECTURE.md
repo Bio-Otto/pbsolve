@@ -55,7 +55,10 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   ‖F‖ decreases. The backend operations `boltzmann_slope` and
   `boltzmann_residual` (CPU loops, CUDA kernels) evaluate N'(u) and
   complete J u into the residual, so the iteration stays on the device; it
-  keeps 4 vectors beside the linear solve (`calculation_device_bytes`). The energy is APBS' functional
+  keeps 4 vectors beside the linear solve (`calculation_device_bytes`).
+  `equation="smpbe"` divides the ion terms by the lattice denominator
+  D = 1 − Σφ + Σφ e^{−qu} of finite-size ions and uses ln D for their energy;
+  with φ = 0 (point ions) D is exactly 1 and the code is that of `npbe`. The energy is APBS' functional
   Σqu − E_ε − E_ion plus the coarser levels' outer terms
   (`NonlinearLevel::external_terms`, APBS `Vpmg_extEnergy`).
 * **Coulomb part** (`coulomb.rs`): with `coulomb="analytic"` the finest level

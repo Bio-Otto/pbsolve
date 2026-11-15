@@ -341,6 +341,19 @@ low potential.
 **4.11 Size-modified PB.** Finite ion size via the lattice-gas (Bikerman /
 Borukhov) free energy [Borukhov, Andelman & Orland 1997], uniform ion size
 first. Relevant for highly charged systems (nucleic acids, membranes).
+*Status: done (unreleased) as `equation="smpbe"` with `ion_size`, uniform
+size.*
+* The lattice denominator D = 1 − Σφ + Σφ e^{−qu} enters the ion term, its
+  slope and the energy (ln D / N_A a³), on the `npbe` Newton path and its
+  device kernels. For a = 0 the code is `npbe` bit for bit.
+* APBS 3.4.1 disables `smpbe` ("numerical stability issues"), so the
+  references are analytic and from the literature:
+  * the planar double layer's exact profile (Gouy–Chapman for point ions,
+    the lattice-gas first integral [Kilic et al. 2007]): orders 2.6–3.8;
+  * Silalahi et al. (2010)'s a³ law for the entropic cost: slope 3.00;
+  * saturation at one ion per cell where point ions reach 84 M.
+* Different sizes per species [Chu et al. 2007; Boschitsch & Danilov 2012]
+  remain.
 
 **4.12 Forces.** Reaction-field, dielectric-boundary and ionic boundary
 forces on atoms [Im, Beglov & Roux 1998], using the accurate
@@ -511,6 +524,8 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Alcouffe RE, Brandt A, Dendy JE, Painter JW. The multi-grid method for the diffusion equation with strongly discontinuous coefficients. SIAM J. Sci. Stat. Comput. 2, 430 (1981).
 * Bashford D, Karplus M. pKa's of ionizable groups in proteins: atomic detail from a continuum electrostatic model. Biochemistry 29, 10219 (1990).
 * Borukhov I, Andelman D, Orland H. Steric effects in electrolytes: a modified Poisson–Boltzmann equation. Phys. Rev. Lett. 79, 435 (1997).
+* Borukhov I, Andelman D, Orland H. Adsorption of large ions from an electrolyte solution: a modified Poisson–Boltzmann equation. Electrochim. Acta 46, 221 (2000).
+* Boschitsch AH, Danilov PV. Formulation of a new and simple nonuniform size-modified Poisson–Boltzmann description. J. Comput. Chem. 33, 1152 (2012).
 * Bosy M, Scroggs MW, Betcke T, Burman E, Cooper CD. Coupling finite and boundary element methods to solve the Poisson–Boltzmann equation for electrostatics in molecular solvation. J. Comput. Chem. (2024).
 * Cai Q, Wang J, Zhao HK, Luo R. On removal of charge singularity in Poisson–Boltzmann equation. J. Chem. Phys. 130, 145101 (2009).
 * Cai Q, Ye X, Wang J, Luo R. Dielectric boundary forces in numerical Poisson–Boltzmann methods: theory and numerical strategies. Chem. Phys. Lett. 514, 368 (2011).
@@ -518,6 +533,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Chen et al. Poisson–Boltzmann-based machine learning model for electrostatic analysis. Biophys. J. (2024).
 * Chen L, Holst MJ, Xu J. The finite element approximation of the nonlinear Poisson–Boltzmann equation. SIAM J. Numer. Anal. 45, 2298 (2007).
 * Chern IL, Liu JG, Wang WC. Accurate evaluation of electrostatics for macromolecules in solution. Methods Appl. Anal. 10, 309 (2003).
+* Chu VB, Bai Y, Lipfert J, Herschlag D, Doniach S. Evaluation of ion binding to DNA duplexes using a size-modified Poisson–Boltzmann theory. Biophys. J. 93, 3202 (2007).
 * Davis ME, McCammon JA. Dielectric boundary smoothing in finite difference solutions of the Poisson equation: an approach to improve accuracy and convergence. J. Comput. Chem. 12, 909 (1991).
 * Decherchi S, Rocchia W. A general and robust ray-casting-based algorithm for triangulating surfaces at the nanoscale. PLoS One 8, e59744 (2013).
 * Dembo RS, Eisenstat SC, Steihaug T. Inexact Newton methods. SIAM J. Numer. Anal. 19, 400 (1982).
@@ -538,6 +554,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Im W, Beglov D, Roux B. Continuum solvation model: computation of electrostatic forces from numerical solutions to the Poisson–Boltzmann equation. Comput. Phys. Commun. 111, 59 (1998).
 * Jha A, Nottoli M, Mikhalev A, Quan C, Stamm B. Linear scaling computation of forces for the domain-decomposition linear Poisson–Boltzmann method. J. Chem. Phys. 158, 104105 (2023).
 * Katzberger P, Riniker S. Implicit solvent approach based on generalized Born and transferable graph neural networks for molecular dynamics simulations. J. Chem. Phys. 158, 204101 (2023); A general graph neural network based implicit solvation model for organic molecules in water. Chem. Sci. (2024).
+* Kilic MS, Bazant MZ, Ajdari A. Steric effects in the dynamics of electrolytes at large applied voltages. I. Double-layer charging. Phys. Rev. E 75, 021502 (2007).
 * Kirkwood JG. Theory of solutions of molecules containing widely separated charges with special application to zwitterions. J. Chem. Phys. 2, 351 (1934).
 * Li L, Li C, Zhang Z, Alexov E. On the dielectric "constant" of proteins: smooth dielectric function for macromolecular modeling and its implementation in DelPhi. J. Chem. Theory Comput. 9, 2126 (2013).
 * Luty BA, Davis ME, McCammon JA. Electrostatic energy calculations by a finite-difference method: rapid calculation of charge–solvent interaction energies. J. Comput. Chem. 13, 768 (1992).
@@ -550,6 +567,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
 * Reis PBPS, Vila-Viçosa D, Rocchia W, Machuqueiro M. PypKa: a flexible Python module for Poisson–Boltzmann-based pKa calculations. J. Chem. Inf. Model. 60, 4442 (2020).
 * Sharp KA, Honig B. Calculating total electrostatic energies with the nonlinear Poisson–Boltzmann equation. J. Phys. Chem. 94, 7684 (1990).
+* Silalahi ARJ, Boschitsch AH, Harris RC, Fenley MO. Comparing the predictions of the nonlinear Poisson–Boltzmann equation and the ion size-modified Poisson–Boltzmann equation for a low-dielectric charged spherical cavity in an aqueous salt solution. J. Chem. Theory Comput. 6, 3631 (2010).
 * Tamstorf R, Benzaken J, McCormick SF. Discretization-error-accurate mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S420 (2021b).
 * Tan C, Tan YH, Luo R. Implicit nonpolar solvent models. J. Phys. Chem. B 111, 12263 (2007).
 * Tatebe O. The multigrid preconditioned conjugate gradient method. Proc. 6th Copper Mountain Conference on Multigrid Methods, NASA CP-3224, 621 (1993).

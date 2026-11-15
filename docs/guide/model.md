@@ -182,6 +182,31 @@ beyond the outermost box. For strongly charged molecules, enlarge `cfac` and
 nonlinear calculation costs about 1.3–1.4 times a linear one on the CPU and
 1.7–1.9 times on a GPU. Without ions both equations are the same.
 
+Point ions can crowd without limit: near a −50 e cavity the nonlinear equation
+puts 84 M of counterions at the surface. `equation="smpbe"` gives every ion a
+cube of edge `ion_size` (Å) on a lattice [Borukhov et al. 1997]. The local
+concentrations become $c_j e^{-z_j u} / D$ with
+$D = 1 - \sum_k \phi_k + \sum_k \phi_k e^{-z_k u}$, where
+$\phi_k = c_k N_A a^3$, so no species exceeds one ion per cell. The ion
+energy becomes $\ln D / (N_A a^3)$ per volume.
+
+```python
+crowded = pbsolve.Solver(ionic_strength=0.15, equation="smpbe", ion_size=6.0)
+print(f"{crowded.polar_solvation(coords, charges, radii).energy:.2f} kcal/mol")
+```
+
+* **Cost.** Finite size costs free energy, about a³ while the ions are
+  dilute: 0.007 kcal/mol for 1YCR with 6 Å ions, 2.6 kcal/mol for the
+  antibody 5DK3.
+* **Choice of size.** All ions have the same size, and there is no single
+  right value: fits to ion-counting data on DNA [Chu et al. 2007] and
+  model studies [Silalahi et al. 2010] use 2–16 Å. The Stern layer
+  (`ion_radius`) still applies; set it to 0 to let the lattice alone keep
+  the ions away.
+* **APBS.** APBS 3.4.1 disables its `smpbe`, so this cannot be compared
+  with APBS; the [validation record](../VALIDATION) checks it against exact
+  planar solutions and published scaling laws.
+
 ## Boundary condition
 
 The potential on the faces of the outermost (coarsest) grid comes from an

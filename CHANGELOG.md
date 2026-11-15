@@ -141,6 +141,13 @@
   `boltzmann_slope` and `boltzmann_residual`), from a start damped where
   |u| > 1. The default `"lpbe"` is bit-identical to before
   (`docs/VALIDATION.md`).
+- `Solver(equation="smpbe", ion_size=a)`, `--equation smpbe --ion-size`:
+  the size-modified (lattice-gas) PB equation, with ions that each fill a
+  cube of edge a, all of one size. APBS 3.4.1 disables its `smpbe`. It
+  matches the exact planar double layer (orders 2.6–3.8), the a³ law of the
+  entropic cost [Silalahi et al. 2010], and saturates counterions at one per
+  cell where point ions would reach 84 M. It costs about as much as `npbe`,
+  which stays bit-identical (`docs/VALIDATION.md`).
 - `batch::calculation_device_bytes`: the device memory of a calculation
   with its settings (the nonlinear equation needs 4 more vectors); used to
   reserve memory and to size batch workers.

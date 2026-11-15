@@ -239,12 +239,12 @@ pub trait Backend {
     /// multigrid is a single factorised level).
     fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
     /// The slope N'(u) of the nonlinear equation's ion term at every node
-    /// ([`crate::nonlinear`]): κ̄² Σ_j a_j q_j² e^{−q_j u} with `ions` =
-    /// [(q_j, a_j)], exponents clamped to ±85. The default computes it on the
-    /// host.
+    /// ([`crate::nonlinear`]): κ̄² (S2/D − S1 P1/D²) for `ions` = [(q_j,
+    /// a_j, φ_j)] (for point ions κ̄² Σ_j a_j q_j² e^{−q_j u}), exponents
+    /// clamped to ±85. The default computes it on the host.
     fn boltzmann_slope(
         &self,
-        ions: &[[f64; 2]],
+        ions: &[[f64; 3]],
         u: &Self::Vector,
         kappa_sq: &Self::Vector,
         slope: &mut Self::Vector,
@@ -264,7 +264,7 @@ pub trait Backend {
     #[allow(clippy::too_many_arguments)]
     fn boltzmann_residual(
         &self,
-        ions: &[[f64; 2]],
+        ions: &[[f64; 3]],
         vol: f64,
         dims: [usize; 3],
         u: &Self::Vector,
@@ -510,8 +510,8 @@ impl<B: Backend> Backend for Stepwise<B> {
         fn assemble_operator(&self, grid: &Grid, maps: [Self::Vector; 4]) -> Result<(Self::Operator, Self::Vector)>;
         fn source_rhs(&self, src: f64, q: &Self::Vector, d: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
         fn operator_to_host(&self, op: &Self::Operator) -> Result<StencilOperator>;
-        fn boltzmann_slope(&self, ions: &[[f64; 2]], u: &Self::Vector, kappa_sq: &Self::Vector, slope: &mut Self::Vector) -> Result<()>;
-        fn boltzmann_residual(&self, ions: &[[f64; 2]], vol: f64, dims: [usize; 3], u: &Self::Vector, kappa_sq: &Self::Vector, slope: &Self::Vector, f: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
+        fn boltzmann_slope(&self, ions: &[[f64; 3]], u: &Self::Vector, kappa_sq: &Self::Vector, slope: &mut Self::Vector) -> Result<()>;
+        fn boltzmann_residual(&self, ions: &[[f64; 3]], vol: f64, dims: [usize; 3], u: &Self::Vector, kappa_sq: &Self::Vector, slope: &Self::Vector, f: &Self::Vector, y: &mut Self::Vector) -> Result<()>;
         fn gather(&self, v: &Self::Vector, idx: &[usize]) -> Result<Vec<f64>>;
         fn synchronize(&self) -> Result<()>;
         fn runs_on_device(&self) -> bool;

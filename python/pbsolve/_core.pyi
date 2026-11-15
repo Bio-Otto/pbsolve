@@ -226,7 +226,12 @@ class Solver:
         The Poisson–Boltzmann equation of the solvated state (APBS keyword):
         "lpbe" (linearized) or "npbe" (nonlinear: Boltzmann-distributed ions,
         solved by Newton's method; its energy is APBS' free-energy
-        functional). Without ions both are the same.
+        functional) or "smpbe" (nonlinear with ions of finite size: lattice-gas
+        ions that each fill a cube of edge ``ion_size``; not available in APBS
+        3.4.1). Without ions all three are the same.
+    ion_size : float
+        With ``equation="smpbe"``: edge of the lattice cell one ion fills, in
+        Å (APBS ``smpbe vol``); all ions have this size.
 
     Raises
     ------
@@ -268,6 +273,7 @@ class Solver:
         interface: str = "sharp",
         coulomb: str = "grid",
         equation: str = "lpbe",
+        ion_size: float = 0.0,
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:

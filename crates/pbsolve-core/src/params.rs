@@ -208,6 +208,10 @@ pub enum Equation {
     /// Nonlinear: Boltzmann-distributed ions, κ̄² Σ_j (c_j q_j / 2I)
     /// sinh-like terms (APBS `npbe`), solved by Newton's method.
     Nonlinear,
+    /// Nonlinear with ions of finite size: lattice-gas ions that each fill a
+    /// cube of edge `ion_size` [Borukhov et al. 1997], all of one size (APBS
+    /// `smpbe` with `size 1`, which APBS 3.4.1 disables).
+    SizeModified,
 }
 
 impl Equation {
@@ -215,7 +219,10 @@ impl Equation {
         match s.to_ascii_lowercase().as_str() {
             "lpbe" => Ok(Self::Linear),
             "npbe" => Ok(Self::Nonlinear),
-            other => invalid(format!("unknown equation '{other}' (expected 'lpbe' or 'npbe')")),
+            "smpbe" => Ok(Self::SizeModified),
+            other => invalid(format!(
+                "unknown equation '{other}' (expected 'lpbe', 'npbe' or 'smpbe')"
+            )),
         }
     }
 
@@ -223,6 +230,7 @@ impl Equation {
         match self {
             Self::Linear => "lpbe",
             Self::Nonlinear => "npbe",
+            Self::SizeModified => "smpbe",
         }
     }
 }
@@ -291,8 +299,11 @@ pub struct PbParams {
     /// How ΔG_polar removes the Coulomb potential (reference solve or
     /// reaction-field decomposition).
     pub coulomb: CoulombMethod,
-    /// Linearized or nonlinear Poisson–Boltzmann equation.
+    /// Linearized, nonlinear or size-modified Poisson–Boltzmann equation.
     pub equation: Equation,
+    /// Edge (Å) of the lattice cell an ion fills ([`Equation::SizeModified`]
+    /// only; 0 otherwise).
+    pub ion_size: f64,
     pub bcfl: BoundaryCondition,
     /// Charge assignment to the grid.
     pub chgm: ChargeMethod,
@@ -317,6 +328,7 @@ impl Default for PbParams {
             interface: InterfaceMethod::Sharp,
             coulomb: CoulombMethod::Grid,
             equation: Equation::Linear,
+            ion_size: 0.0,
             bcfl: BoundaryCondition::Mdh,
             chgm: ChargeMethod::Trilinear,
             tol: 1.0e-8,
@@ -358,6 +370,13 @@ impl PbParams {
         self.ions.iter().map(|i| i.radius).fold(0.0, f64::max)
     }
 
+    /// Bulk volume fraction of the ions in lattice cells of edge `ion_size`:
+    /// Σ_j c_j N_A a³ (0 for point ions).
+    pub fn ion_volume_fraction(&self) -> f64 {
+        let per_molar = crate::units::AVOGADRO * 1.0e-27 * self.ion_size.powi(3);
+        self.ions.iter().map(|i| i.concentration * per_molar).sum()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.pdie.is_nan() || self.sdie.is_nan() || self.pdie <= 0.0 || self.sdie <= 0.0 {
             return invalid("pdie and sdie must be positive");
@@ -371,8 +390,22 @@ impl PbParams {
         if self.interface == InterfaceMethod::Fractional && self.surface == SurfaceMethod::HarmonicMol {
             return invalid("interface 'fractional' needs surface 'mol' or 'vdw'");
         }
-        if self.equation == Equation::Nonlinear && self.coulomb == CoulombMethod::Analytic {
-            return invalid("equation 'npbe' needs coulomb 'grid'");
+        if self.equation != Equation::Linear && self.coulomb == CoulombMethod::Analytic {
+            return invalid(format!("equation '{}' needs coulomb 'grid'", self.equation.as_str()));
+        }
+        if self.equation == Equation::SizeModified {
+            if self.ion_size.is_nan() || self.ion_size <= 0.0 {
+                return invalid("equation 'smpbe' needs ion_size > 0");
+            }
+            let fraction = self.ion_volume_fraction();
+            if fraction >= 1.0 {
+                return invalid(format!(
+                    "ions of size {} Å at these concentrations fill the solvent (volume fraction {fraction:.2})",
+                    self.ion_size
+                ));
+            }
+        } else if self.ion_size != 0.0 {
+            return invalid("ion_size applies to equation 'smpbe'");
         }
         if self.tol.is_nan() || self.tol <= 0.0 || self.tol >= 1.0 || self.max_iter == 0 {
             return invalid("tol must be in (0, 1) and max_iter > 0");

@@ -36,7 +36,7 @@ use crate::backend::Backend;
 use crate::error::{PbError, Result};
 use crate::grid::Grid;
 use crate::operator::StencilOperator;
-use crate::params::PbParams;
+use crate::params::{Equation, PbParams};
 use crate::pb::{solve_assembled, LevelSolution, Pending};
 use crate::solver::{pcg_on, SolveStats, SolverOptions};
 use crate::surface::CoefficientMaps;
@@ -67,30 +67,45 @@ pub(crate) fn is_interior([nx, ny, nz]: [usize; 3], c: usize) -> bool {
     i > 0 && j > 0 && k > 0 && i + 1 < nx && j + 1 < ny && k + 1 < nz
 }
 
-/// N'(u) at one node: κ̄² Σ_j a_j q_j² e^{−q_j u} for `ions` = [(q_j, a_j =
-/// c_j / 2I)] ([`crate::backend::Backend::boltzmann_slope`]; the CUDA
-/// kernel `pb_boltzmann_slope` evaluates the same expressions).
+/// The sums of the ion terms at one node for `ions` = [(q_j, a_j = c_j/2I,
+/// φ_j)]: S1 = Σ a q e, S2 = Σ a q² e, P1 = Σ φ q e and the lattice
+/// denominator D = 1 − Σ φ + Σ φ e, with e = e^{−q u}. For point ions
+/// (φ = 0) D is exactly 1.
 #[inline]
-pub(crate) fn slope_at(ions: &[[f64; 2]], u: f64, kappa_sq: f64) -> f64 {
+fn ion_sums(ions: &[[f64; 3]], u: f64) -> [f64; 4] {
+    let (mut s1, mut s2, mut p1, mut phi0, mut occupied) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    for &[q, a, phi] in ions {
+        let e = boltzmann(-q * u);
+        s1 += a * q * e;
+        s2 += a * q * q * e;
+        p1 += phi * q * e;
+        phi0 += phi;
+        occupied += phi * e;
+    }
+    [s1, s2, p1, 1.0 - phi0 + occupied]
+}
+
+/// N'(u) at one node: κ̄² (S2/D − S1 P1/D²) ([`ion_sums`]), for point ions
+/// κ̄² Σ_j a_j q_j² e^{−q_j u} ([`crate::backend::Backend::boltzmann_slope`];
+/// the CUDA kernel `pb_boltzmann_slope` evaluates the same expressions).
+#[inline]
+pub(crate) fn slope_at(ions: &[[f64; 3]], u: f64, kappa_sq: f64) -> f64 {
     if kappa_sq > 0.0 {
-        let mut s = 0.0;
-        for &[q, a] in ions {
-            s += a * q * q * boltzmann(-q * u);
-        }
-        kappa_sq * s
+        let [s1, s2, p1, d] = ion_sums(ions, u);
+        kappa_sq * (s2 / d - s1 * p1 / (d * d))
     } else {
         0.0
     }
 }
 
 /// The residual at one node from y = (J u) there, J assembled with κ̄² =
-/// `slope`: 0 on the boundary, else y + V (N(u) − slope·u) − f
-/// ([`crate::backend::Backend::boltzmann_residual`]; CUDA
+/// `slope`: 0 on the boundary, else y + V (N(u) − slope·u) − f with N(u) =
+/// −κ̄² S1/D ([`crate::backend::Backend::boltzmann_residual`]; CUDA
 /// `pb_boltzmann_residual`).
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub(crate) fn residual_at(
-    ions: &[[f64; 2]],
+    ions: &[[f64; 3]],
     vol: f64,
     u: f64,
     kappa_sq: f64,
@@ -104,43 +119,63 @@ pub(crate) fn residual_at(
     }
     let mut n = 0.0;
     if kappa_sq > 0.0 {
-        for &[q, a] in ions {
-            n -= a * q * boltzmann(-q * u);
-        }
-        n *= kappa_sq;
+        let [s1, _, _, d] = ion_sums(ions, u);
+        n = -s1 * kappa_sq / d;
     }
     y + vol * (n - slope * u) - f
 }
 
-/// The mobile ions as the nonlinear term needs them: (q_j, c_j / 2I).
+/// The mobile ions as the nonlinear term needs them: (q_j, c_j / 2I, φ_j),
+/// with φ_j = c_j N_A a³ the bulk volume fraction of species j in lattice
+/// cells of edge a = `ion_size` (0 for point ions).
 #[derive(Clone, Debug)]
 pub struct IonTerms {
-    species: Vec<[f64; 2]>,
+    species: Vec<[f64; 3]>,
+    /// 2I N_A a³: the ion energy density of finite-size ions is
+    /// ln D / (2I N_A a³) per κ̄²; 0 for point ions.
+    lattice: f64,
 }
 
 impl IonTerms {
-    /// The species as (q_j, c_j / 2I).
-    pub fn species(&self) -> &[[f64; 2]] {
+    /// The species as (q_j, c_j / 2I, φ_j).
+    pub fn species(&self) -> &[[f64; 3]] {
         &self.species
     }
 
-    /// None without ions (zero ionic strength): the equation is then linear.
+    /// None for the linearized equation or without ions (zero ionic
+    /// strength).
     pub fn new(params: &PbParams) -> Option<Self> {
         let two_i = 2.0 * params.ionic_strength();
-        (two_i > 0.0).then(|| Self {
+        if params.equation == Equation::Linear || two_i <= 0.0 {
+            return None;
+        }
+        let per_molar = match params.equation {
+            Equation::SizeModified => crate::units::AVOGADRO * 1.0e-27 * params.ion_size.powi(3),
+            _ => 0.0,
+        };
+        Some(Self {
             species: params
                 .ions
                 .iter()
                 .filter(|i| i.concentration > 0.0)
-                .map(|i| [i.charge, i.concentration / two_i])
+                .map(|i| [i.charge, i.concentration / two_i, i.concentration * per_molar])
                 .collect(),
+            lattice: two_i * per_molar,
         })
     }
 
-    /// Σ_j (c_j / 2I)(e^{−q_j u} − 1), the ion energy density / κ̄².
+    /// The ion energy density / κ̄²: Σ_j (c_j / 2I)(e^{−q_j u} − 1) for point
+    /// ions, ln D / (2I N_A a³) for finite-size ions [Borukhov et al. 1997].
     #[inline]
     fn density(&self, u: f64) -> f64 {
-        self.species.iter().map(|&[q, a]| a * (boltzmann(-q * u) - 1.0)).sum()
+        if self.lattice > 0.0 {
+            ion_sums(&self.species, u)[3].ln() / self.lattice
+        } else {
+            self.species
+                .iter()
+                .map(|&[q, a, _]| a * (boltzmann(-q * u) - 1.0))
+                .sum()
+        }
     }
 }
 
@@ -459,7 +494,11 @@ mod tests {
 
     #[test]
     fn a_1_1_salt_gives_sinh_and_cosh() {
-        let params = PbParams::default().with_salt(0.15, 2.0);
+        let params = PbParams {
+            equation: Equation::Nonlinear,
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
         let ions = IonTerms::new(&params).unwrap();
         // N(u) with κ̄² = 1: the residual of y = 0, slope 0, f = 0, V = 1.
         let term = |ions: &IonTerms, u: f64| {
@@ -478,6 +517,7 @@ mod tests {
         assert_eq!(residual_at(ions.species(), 1.0, 2.0, 1.0, 3.0, 4.0, false, 5.0), 0.0);
         // Any electroneutral salt: N(0) = 0 and N'(0) = 1 (the linearized κ̄²).
         let asym = PbParams {
+            equation: Equation::Nonlinear,
             ions: vec![
                 IonSpecies {
                     charge: 2.0,
@@ -494,7 +534,13 @@ mod tests {
         };
         let (n, dn) = term(&IonTerms::new(&asym).unwrap(), 0.0);
         assert!(n.abs() < 1e-15 && (dn - 1.0).abs() < 1e-15, "{n} {dn}");
-        assert!(IonTerms::new(&PbParams::default()).is_none());
+        // None without ions, and for the linearized equation.
+        let no_ions = PbParams {
+            equation: Equation::Nonlinear,
+            ..PbParams::default()
+        };
+        assert!(IonTerms::new(&no_ions).is_none());
+        assert!(IonTerms::new(&PbParams::default().with_salt(0.15, 2.0)).is_none());
     }
 
     #[test]
@@ -538,7 +584,11 @@ mod tests {
             maps: maps.clone(),
             u: u.clone(),
         };
-        let ions = IonTerms::new(&PbParams::default().with_salt(0.15, 2.0)).unwrap();
+        let npbe = PbParams {
+            equation: Equation::Nonlinear,
+            ..PbParams::default()
+        };
+        let ions = IonTerms::new(&npbe.with_salt(0.15, 2.0)).unwrap();
         let lb0 = 7.0;
         let (diel, ion) = level.external_terms(&fine, &ions, lb0);
 
@@ -612,8 +662,13 @@ mod tests {
     /// is −F/(4π l_B0), so a perturbation δ changes it by O(δ²).
     #[test]
     fn the_energy_functional_is_stationary_at_the_solution() {
+        for p in [params(Equation::Nonlinear), finite_size(6.0)] {
+            stationary(p);
+        }
+    }
+
+    fn stationary(p: PbParams) {
         let atoms = atoms(1.0);
-        let p = params(Equation::Nonlinear);
         let grid = Grid::centered([0.3, 0.2, -0.1], [16.0, 15.0, 14.0], [33, 31, 29]).unwrap();
         let surf = crate::surface::MolecularSurface::for_params(&atoms, &p);
         let maps = CoefficientMaps::solvated_with(&grid, &atoms, &p, &surf);
@@ -650,8 +705,49 @@ mod tests {
         };
         let (big, small) = (change(1e-2), change(5e-3));
         // Second order: halving δ quarters the change, and it is a maximum.
-        assert!(big < 0.0 && small < 0.0, "{big} {small}");
-        assert!((big / small - 4.0).abs() < 0.05, "ratio {}", big / small);
+        assert!(big < 0.0 && small < 0.0, "{:?}: {big} {small}", p.equation);
+        assert!(
+            (big / small - 4.0).abs() < 0.05,
+            "{:?}: ratio {}",
+            p.equation,
+            big / small
+        );
+    }
+
+    /// `smpbe` with lattice cells of edge `a` (Å).
+    fn finite_size(a: f64) -> PbParams {
+        PbParams {
+            ion_size: a,
+            ..params(Equation::SizeModified)
+        }
+    }
+
+    /// Lattice-gas ions [Borukhov et al. 1997]: no species exceeds one ion
+    /// per cell, the size-modified energy approaches the point-ion one as
+    /// a → 0, and the entropic cost of finite size (positive) grows as a³
+    /// for small a [Silalahi et al. 2010, eq. 11].
+    #[test]
+    fn finite_size_ions() {
+        let p = finite_size(6.0).with_salt(0.5, 2.0);
+        let ions = IonTerms::new(&p).unwrap();
+        let cell = 1.0 / (crate::units::AVOGADRO * 1.0e-27 * 216.0); // mol/L per cell
+        for u in [-40.0, -8.0, -1.0, 0.0, 1.0, 8.0, 40.0] {
+            let [_, _, _, d] = ion_sums(ions.species(), u);
+            for i in &p.ions {
+                let c = i.concentration * boltzmann(-i.charge * u) / d;
+                assert!(c <= cell * (1.0 + 1e-12), "u = {u}: {c} M > {cell} M");
+            }
+        }
+        let solve = |p: &PbParams| {
+            let atoms = atoms(3.0);
+            let spec = GridSpec::auto(&atoms, 0.45, 1.7, 12.0).unwrap();
+            polar_solvation(&CpuBackend::new(), &atoms, p, &spec).unwrap().energy_kt
+        };
+        let point = solve(&params(Equation::Nonlinear));
+        let tiny = solve(&finite_size(0.01));
+        assert!((tiny - point).abs() < 1e-9 * point.abs(), "{tiny} vs {point}");
+        let (one, two) = (solve(&finite_size(1.0)) - point, solve(&finite_size(2.0)) - point);
+        assert!(one > 0.0 && (two / one - 8.0).abs() < 0.1, "{one} {two}");
     }
 
     fn solve(scale: f64, equation: Equation) -> crate::pb::PolarSolvation {

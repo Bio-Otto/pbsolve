@@ -808,12 +808,33 @@ extern "C" __global__ void pb_source_rhs(const long long n, const double src, co
     GRID_STRIDE_LOOP(c, n) { y[c] = d[c] == 0.0 ? 0.0 : src * q[c] - y[c]; }
 }
 
-// Ion terms of the nonlinear PBE (pbsolve-core nonlinear.rs, slope_at and
-// residual_at, same expressions): ions = m pairs (q_j, a_j = c_j / 2I),
+// Ion terms of the nonlinear PBE (pbsolve-core nonlinear.rs, ion_sums,
+// slope_at and residual_at, same expressions): ions = m triples (q_j,
+// a_j = c_j / 2I, phi_j = lattice volume fraction, 0 for point ions),
 // Boltzmann factors exp(-q u) with the exponent clamped to +-85 as in APBS.
 __device__ __forceinline__ double pb_boltzmann(const double x) { return exp(fmin(fmax(x, -85.0), 85.0)); }
 
-// slope = kbar2 * sum_j a_j q_j^2 exp(-q_j u)   (0 where kbar2 = 0)
+// s1 = sum a q e, s2 = sum a q^2 e, p1 = sum phi q e, d = 1 - sum phi + sum phi e
+__device__ __forceinline__ void pb_ion_sums(const int m, const double* __restrict__ ions, const double u, double* s1,
+                                            double* s2, double* p1, double* d)
+{
+    double a1 = 0.0, a2 = 0.0, b1 = 0.0, phi0 = 0.0, occupied = 0.0;
+    for (int j = 0; j < m; ++j) {
+        const double q = ions[3 * j], a = ions[3 * j + 1], phi = ions[3 * j + 2];
+        const double e = pb_boltzmann(-q * u);
+        a1 += a * q * e;
+        a2 += a * q * q * e;
+        b1 += phi * q * e;
+        phi0 += phi;
+        occupied += phi * e;
+    }
+    *s1 = a1;
+    *s2 = a2;
+    *p1 = b1;
+    *d = 1.0 - phi0 + occupied;
+}
+
+// slope = kbar2 * (s2 / d - s1 * p1 / d^2)   (0 where kbar2 = 0)
 extern "C" __global__ void pb_boltzmann_slope(const long long n, const int m, const double* __restrict__ ions,
                                               const double* __restrict__ u, const double* __restrict__ k2,
                                               double* __restrict__ slope)
@@ -823,17 +844,15 @@ extern "C" __global__ void pb_boltzmann_slope(const long long n, const int m, co
         const double k = k2[c];
         double s = 0.0;
         if (k > 0.0) {
-            for (int j = 0; j < m; ++j) {
-                const double q = ions[2 * j], a = ions[2 * j + 1];
-                s += a * q * q * pb_boltzmann(-q * u[c]);
-            }
-            s = k * s;
+            double s1, s2, p1, d;
+            pb_ion_sums(m, ions, u[c], &s1, &s2, &p1, &d);
+            s = k * (s2 / d - s1 * p1 / (d * d));
         }
         slope[c] = s;
     }
 }
 
-// y = 0 on the boundary, else y + vol * (N(u) - slope * u) - f, N(u) = kbar2 * sum_j -a_j q_j exp(-q_j u)
+// y = 0 on the boundary, else y + vol * (N(u) - slope * u) - f, N(u) = -kbar2 * s1 / d
 // (y = J u on entry, J assembled with kappa^2 = slope: the nonlinear residual)
 extern "C" __global__ void pb_boltzmann_residual(const long long n, const int m, const double* __restrict__ ions,
                                                  const double vol, const int nx, const int ny, const int nz,
@@ -851,11 +870,9 @@ extern "C" __global__ void pb_boltzmann_residual(const long long n, const int m,
         const double k = k2[c];
         double nn = 0.0;
         if (k > 0.0) {
-            for (int j = 0; j < m; ++j) {
-                const double q = ions[2 * j], a = ions[2 * j + 1];
-                nn -= a * q * pb_boltzmann(-q * u[c]);
-            }
-            nn *= k;
+            double s1, s2, p1, d;
+            pb_ion_sums(m, ions, u[c], &s1, &s2, &p1, &d);
+            nn = -s1 * k / d;
         }
         y[c] = y[c] + vol * (nn - slope[c] * u[c]) - f[c];
     }
