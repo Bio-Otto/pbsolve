@@ -264,7 +264,14 @@ fn every_calculation_of_a_batch_holds_memory_on_its_worker() {
         spec([33, 29, 37]),
         spec([29, 33, 33]),
     ];
-    let jobs: Vec<Job> = specs.iter().map(|spec| Job { atoms: &atoms, spec }).collect();
+    let jobs: Vec<Job> = specs
+        .iter()
+        .map(|spec| Job {
+            atoms: &atoms,
+            spec,
+            atom_pdie: None,
+        })
+        .collect();
     let results = polar_solvation_batch(&refs, &params(pc), &jobs);
     let mut holds: Vec<u64> = Vec::new();
     for w in &workers {

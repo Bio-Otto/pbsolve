@@ -54,6 +54,7 @@ should update the status table below.
 | Non-polar terms (0.0.2): `apolar_energy` (γ·SASA + p·SAV + WCA dispersion, as APBS `apolar`) | APBS' 11 alkane examples to every printed digit (totals ≤ 2.2e-13); APBS 3.4.1 live on neopentane, a synthetic molecule with radius-0 atoms and 1YCR (1670 atoms) ≤ 1.3e-12, volumes identical, per atom ≤ 5e-13; one sphere, two spheres and one atom's dispersion against closed forms (0.2–0.5 %); Lennard-Jones from OpenMM = APBS' AMBER parameters to 1e-9; 10/10 mutations; 1YCR 0.75 s on 18 threads (APBS 12.7 s); see *Non-polar terms* |
 | Per-atom and per-residue decomposition (0.0.3): `PolarResult.atom_energies`, `PBSAFrame.atom_terms`/`residue_terms`, `pbsolve mmpbsa --per-residue` | shares sum to ΔG_polar (1e-12; `spl0`, `spl2`, `spl4`, `coulomb="analytic"`, forces path identical); linear response: E_i of all charges = E_i alone + pair terms from single and pair solves (1e-8, focusing and `mdh`), pair terms symmetric with one level and `zero` (1e-8); APBS 3.4.1 `calcenergy comps` per atom ≤ 2.8e-6 of the largest share with `mdh`, 1e-9 (synthetic) and 3.2e-8 (1YCR) with `zero`; 9/9 mutations; energies bit-identical (CPU, CUDA), the shares add ≤ 50 ms to 5DK3; see *Per-atom and per-residue decomposition* |
 | Interaction entropy (0.0.4): `interaction_entropy`, `interaction_energy` | IE and C2 of two-level energy distributions = closed form (1e-12); normal energies: C2 = σ²/2kT, IE → C2, and the low bias of IE at large σ reproduces Ekberg & Ryde 2021 (σ = 3 kcal/mol: IE 7.0 ± 0.4 vs exact 7.60 with 10⁵ frames, C2 7.59 ± 0.03); no overflow at σ = 200 kcal/mol; E_int = OpenMM 8.6 (Reference platform, ff14SB peptides from tleap, bonds and 1-4 exceptions inside the molecules) to 1.7e-12, and = an explicit pair sum to 1e-12; 16/16 mutations; see *Interaction entropy* |
+| Atom dielectrics (0.0.5): `dielectrics=`, `residue_dielectrics`, `--residue-dielectric`, `PBSAFrame.delta_reference` | equal values reproduce `pdie` bit for bit (maps of `mol` and `vdw`, both states, `lpbe` and `npbe`, every Python method; fingerprint of the default path unchanged); every interior face owned by the atom of smallest power distance (brute force); a central charge sees only the outer boundary for any interior ε (0.25 Å: −1.50/−0.14/+0.64 % for ε 1/4/20); one sphere against Kirkwood with its own interior ≤ 0.92 % at 0.25 Å; two spheres with interiors 4 and 10 against the exact solution (`two_sphere_energy(sphere_pdie=)`) −0.32 % and −0.74 % at 0.25 Å (one `pdie`: −1.68 and −1.58 %); `delta_reference` = Coulomb/`pdie` exactly with `coulomb="analytic"`, to 0.03 % for 1YCR at 0.35 Å on the grid; CPU = CUDA ≤ 8e-14; 30/30 mutations; CPU +6 %, CUDA 2.2× (host maps); see *Atom dielectrics* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3247,6 +3248,110 @@ one 256-atom chunk, 7000 pairs) agrees to 1e-12.
 ddof of σ and of the block errors, the 2 in C2 and in the LJ term, the σ
 limit and its comparison, the block-size check, combining rules, the chunk
 stride, the dielectric, the default receptor).
+
+## Atom dielectrics
+
+**Change.**
+* `dielectrics=` (one value per atom) on `Solver.polar_solvation`, the batch
+  methods, `potential`, `maps`, `pbsa_solvation_frame(s)`, `OpenMMPBSA` and
+  `estimate_error`; core `PbParams::atom_pdie`, `surface::atom_dielectric_faces`.
+  The multiple dielectrics of DelPhi [Rocchia, Alexov & Honig 2001] with
+  amino-acid specific values [Wang, Zhang, Rocchia & Alexov 2013]: a face
+  inside the sharp `mol`/`vdw` surface takes the dielectric of the atom with
+  the smallest power distance |x − c|² − R² to its midpoint (ties: lower
+  index); faces outside get `sdie`. The reference state keeps the interior
+  and has `pdie` outside, without ions, so the faces around every charge are
+  the same in both states. Not an APBS option.
+* `pbsolve.residue_dielectrics(charges, residues, charged=, neutral=)`: one
+  value for residues of net charge ≥ 0.5 e, one for the rest (MM/GBSA fit
+  2.7/1.1 [Liu, Peng & Zhang 2019]; no defaults, nothing is fitted for PB);
+  `pbsolve solvation`/`mmpbsa --residue-dielectric CHARGED NEUTRAL`.
+* `SolvationTerms.reference`, `PBSAFrame.delta_reference`: the reference
+  state's energy and the receptor–ligand interaction in it (complex −
+  receptor − ligand on the complex's grid).
+* `two_sphere_energy(sphere_pdie=(ε_0, ε_1))`: the reference solution with
+  a dielectric per sphere; with equal values it matches the old code path to
+  4e-16, and two neutral spheres far apart approach two Kirkwood spheres as
+  1/d³ (8e-5 at 50 Å, 4e-7 at 300 Å).
+
+**Default path.** Equal values reproduce `pdie` bit for bit. This holds for the
+solvated and reference maps of `mol` and `vdw` and for `lpbe` and `npbe` energies
+(Rust), and for `polar_solvation`, `potential`, `maps`, the batches,
+`pbsa_solvation_frame` and `estimate_error` (Python). The default path does not
+touch the new code, and the fingerprint of the default path did not change.
+
+**Ownership.** Every interior face of a six-atom cluster with a radius-0 atom
+(both states, all three axes) equals the brute-force argmin of the power
+distance; on the test molecule of the Python suite, every 11th interior face
+of both states.
+
+**One sphere** (radius-0 charges inside a neutral atom of radius a with
+interior ε_1). A central charge sees only the outer boundary:
+ΔG = −(q²/2a)(1/`pdie` − 1/`sdie`) for every ε_1. At 0.25 Å (`vdw`, a = 2 Å,
+exact −81.96 kcal/mol) the errors are:
+
+| ε_1 | 1 (= plain, bit for bit) | 4 | 20 |
+|---|---|---|---|
+| error | −1.50 % | −0.14 % | +0.64 % |
+
+Off-centre charges (the Kirkwood sphere of *Analytic references*, a = 5 Å)
+against K(ε_1 | `sdie`, ions) − K(ε_1 | `pdie`):
+
+| ε_1, `pdie`, salt | 0.5 Å | 0.25 Å |
+|---|---|---|
+| 4, 1, none | −1.54 % | −0.92 % |
+| 4, 2, 0.15 M | −1.93 % | −0.87 % |
+| 20, 1, none | −0.15 % | −0.22 % |
+
+**Two spheres** with interiors 4 and 10 (radii 5 and 4 Å, centres 15.8 Å
+apart, five charges) against `two_sphere_energy(sphere_pdie=(4, 10))`:
+
+| `pdie`, salt | exact (kcal/mol) | 0.5 Å | 0.25 Å | one `pdie` for both: 0.5 / 0.25 Å |
+|---|---|---|---|---|
+| 1, none | −25.706 | −0.83 % | −0.32 % | −3.69 / −1.68 % |
+| 2, 0.15 M | −17.366 | −1.56 % | −0.74 % | −3.44 / −1.58 % |
+
+**1YCR** (MDM2–p53, AMBER charges and radii, 0.15 M, chain B as ligand;
+`residue_dielectrics` puts 468 atoms of 25 charged residues at the charged
+value). On CUDA, kcal/mol:
+
+| interior | spacing | ΔG_polar complex | ΔE_ref (`delta_reference`) | ΔΔG_polar | sum |
+|---|---|---|---|---|---|
+| `pdie` 1 | 0.5 / 0.35 / 0.25 | −1231.3 / −1205.9 / −1190.7 | −361.4 / −361.0 / −361.0 | 423.7 / 421.8 / 419.2 | 62.3 / 60.8 / 58.2 |
+| `pdie` 4 | 0.5 / 0.35 / 0.25 | −286.8 / −282.0 / −279.0 | −90.4 / −90.3 / −90.3 | 102.4 / 102.0 / 101.5 | 12.1 / 11.8 / 11.3 |
+| charged 4, other 1 | 0.5 / 0.35 / 0.25 | −937.6 / −923.1 / −916.2 | −386.0 / −382.9 / −383.0 | 421.5 / 420.7 / 418.5 | 35.5 / 37.7 / 35.5 |
+| charged 2.7, other 1.1 | 0.5 / 0.35 / 0.25 | −996.1 / −981.1 / −973.2 | −378.6 / −376.4 / −376.4 | 417.7 / 416.6 / 414.5 | 39.1 / 40.2 / 38.1 |
+
+With one `pdie`, ΔE_ref equals the analytic Coulomb interaction over `pdie`
+(−360.92 kcal/mol in vacuum) to −0.14 % at 0.5 Å and −0.03 % at 0.35 and
+0.25 Å. The grid self-energies cancel on the shared grid. With
+`coulomb="analytic"` the match is exact (1e-12, test). The residue dielectrics
+hardly change ΔΔG_polar, because the reference medium outside the protein is
+still vacuum. They change the interaction in the reference state (charged
+residues of ε 4 surrounded by vacuum) and the sum. The sum equals the
+solvated states' difference (test, 1e-12) and does not depend on the
+reference. With atom dielectrics, `delta_reference` therefore takes the place
+of the force field's Coulomb term. CPU and CUDA agree to every digit for the
+complex and to 8e-14 for the binding terms.
+
+**Mutations.** 30/30 seeded faults caught:
+* Rust (13): the power distance without R² or with +R², the comparison, the
+  midpoint shift, the search radius, the outside value of either state, the
+  probes, the length check, validation of values and of surface, interface
+  and `coulomb`, and the batch job's dielectrics.
+* Python (12): the per-species subsets, the residue threshold and net charge,
+  the kT of the reference energy, `delta_reference`, the forwarding in
+  `pbsa_solvation_frames`, `estimate_error` and the CLI, the CHARGED/NEUTRAL
+  order, and the reference and per-sphere values of `two_sphere_energy`.
+* Bindings (5): `polar_solvation`, `polar_solvation_many`, `maps`,
+  `potential` and `polar_solvation_batch` dropping the values.
+
+**Cost** (1YCR, 0.5 Å, 0.15 M; shared machine, GPU at 83 % with GROMACS,
+medians of 5 alternating runs). CPU (18 threads): 1.79 → 1.89 s per
+calculation. CUDA: 0.24 → 0.53 s. The maps are built on the host (map stage
+0.03 → 0.30 s), and the reference state rebuilds the molecular surface on
+every level (about 0.06 s each; a shortcut that sharing it with the solvated
+state would remove). The ownership search takes about 0.01 s per map.
 
 ## Size-modified PB (`equation="smpbe"`)
 

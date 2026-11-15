@@ -482,16 +482,26 @@ trajectory [Duan, Liu & Zhang 2016], which large benchmarks (summarised in
 MM/PB(GB)SA, and
 optional formula-based entropy estimates [ChemRxiv 2024 preprint]. Variable
 or residue-dependent interior dielectric as an option, not a default.
-*Status: interaction entropy done (0.0.4); the interior dielectric and the
-formula-based estimates remain.*
+*Status: interaction entropy done (0.0.4), atom and residue dielectrics done
+(0.0.5); the formula-based estimates remain.*
 * `pbsolve.interaction_entropy` gives IE and its second-order cumulant C2,
   σ, standard errors over blocks of frames and `reliable` (σ ≤ 15 kJ/mol), as
   [Ekberg & Ryde 2021] recommend; `pbsolve.interaction_energy` the Coulomb +
   Lorentz–Berthelot Lennard-Jones energy between receptor and ligand (equal to
   OpenMM to 1.7e-12 on ff14SB peptides); `examples/mmpbsa_openmm.py` reports
   both. Closed forms and the normal-energy limits in docs/VALIDATION.md.
-* Remaining: variable or residue-dependent interior dielectric; the
-  formula-based estimates.
+* `dielectrics=` gives every atom its own interior dielectric (DelPhi's
+  multiple dielectrics [Rocchia, Alexov & Honig 2001]; amino-acid specific
+  values [Wang, Zhang, Rocchia & Alexov 2013]): interior faces take the
+  value of the atom whose power cell holds them, the reference state keeps
+  the interior and has `pdie` outside. `pbsolve.residue_dielectrics` sets
+  values for charged and other residues (fitted for MM/GBSA: 2.7 and 1.1
+  [Liu, Peng & Zhang 2019]), `pbsolve mmpbsa --residue-dielectric`, and
+  `PBSAFrame.delta_reference` gives the matching receptor–ligand
+  interaction. Uniform values are bit-identical to `pdie`; one and two
+  spheres with their own interiors agree with the exact solutions (two
+  spheres 0.3–0.7 % at 0.25 Å).
+* Remaining: the formula-based estimates; values fitted for PB.
 
 **4.17 Membranes.** Implicit membrane slab with a depth-dependent dielectric,
 which correlates better with experiment than a uniform slab [Greene et al.
@@ -673,6 +683,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Kirkwood JG. Theory of solutions of molecules containing widely separated charges with special application to zwitterions. J. Chem. Phys. 2, 351 (1934).
 * Li L, Li C, Alexov E. On the modeling of polar component of solvation energy using smooth Gaussian-based dielectric function. J. Theor. Comput. Chem. 13, 1440002 (2014).
 * Li L, Li C, Zhang Z, Alexov E. On the dielectric "constant" of proteins: smooth dielectric function for macromolecular modeling and its implementation in DelPhi. J. Chem. Theory Comput. 9, 2126 (2013).
+* Liu X, Peng L, Zhang JZH. Accurate and efficient calculation of protein–protein binding free energy—interaction entropy with residue type-specific dielectric constants. J. Chem. Inf. Model. 59, 272 (2019).
 * Luty BA, Davis ME, McCammon JA. Electrostatic energy calculations by a finite-difference method: rapid calculation of charge–solvent interaction energies. J. Comput. Chem. 13, 768 (1992).
 * McCormick SF, Benzaken J, Tamstorf R. Algebraic error analysis for mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S392 (2021a).
 * Miller BR, McGee TD, Swails JM, Homeyer N, Gohlke H, Roitberg AE. MMPBSA.py: an efficient program for end-state free energy calculations. J. Chem. Theory Comput. 8, 3314 (2012).
@@ -683,6 +694,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Qi R, Luo R. Robustness and efficiency of Poisson–Boltzmann modeling on graphics processing units. J. Chem. Inf. Model. 59, 409 (2019).
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
 * Reis PBPS, Vila-Viçosa D, Rocchia W, Machuqueiro M. PypKa: a flexible Python module for Poisson–Boltzmann-based pKa calculations. J. Chem. Inf. Model. 60, 4442 (2020).
+* Rocchia W, Alexov E, Honig B. Extending the applicability of the nonlinear Poisson–Boltzmann equation: multiple dielectric constants and multivalent ions. J. Phys. Chem. B 105, 6507 (2001).
 * Schnieders MJ, Baker NA, Ren P, Ponder JW. Polarizable atomic multipole solutes in a Poisson–Boltzmann continuum. J. Chem. Phys. 126, 124114 (2007).
 * Sharp KA, Honig B. Calculating total electrostatic energies with the nonlinear Poisson–Boltzmann equation. J. Phys. Chem. 94, 7684 (1990).
 * Silalahi ARJ, Boschitsch AH, Harris RC, Fenley MO. Comparing the predictions of the nonlinear Poisson–Boltzmann equation and the ion size-modified Poisson–Boltzmann equation for a low-dielectric charged spherical cavity in an aqueous salt solution. J. Chem. Theory Comput. 6, 3631 (2010).
@@ -696,6 +708,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Wang J, Cai Q, Li ZL, Zhao HK, Luo R. Achieving energy conservation in Poisson–Boltzmann molecular dynamics: accuracy and precision with finite-difference algorithms. Chem. Phys. Lett. 468, 112 (2009).
 * Wang J, Cai Q, Xiang Y, Luo R. Reducing grid dependence in finite-difference Poisson–Boltzmann calculations. J. Chem. Theory Comput. 8, 2741 (2012).
 * Wang L, Li L, Alexov E. pKa predictions for proteins, RNAs, and DNAs with the Gaussian dielectric function using DelPhi pKa. Proteins 83, 2186 (2015).
+* Wang L, Zhang Z, Rocchia W, Alexov E. Using DelPhi capabilities to mimic protein's conformational reorganization with amino acid specific dielectric constants. Commun. Comput. Phys. 13, 13 (2013).
 * Wang L, Krasny R, Tlupova S. A kernel-independent treecode based on barycentric Lagrange interpolation. Commun. Comput. Phys. 28, 1415 (2020).
 * Wang T, Cooper CD, Betcke T, Barba LA. High-productivity, high-performance workflow for virus-scale electrostatic simulations with Bempp-Exafmm. arXiv:2103.01048 (2021).
 * Wang et al. MM/PB(GB)SA benchmarks on soluble proteins and membrane proteins. Front. Pharmacol. 13, 1018351 (2022).

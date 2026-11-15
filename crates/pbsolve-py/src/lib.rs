@@ -19,6 +19,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::borrow::Cow;
 
 create_exception!(
     pbsolve,
@@ -659,12 +660,32 @@ fn job_error(e: PbError, index: usize) -> PbError {
 }
 
 impl PySolver {
+    /// The solver's parameters with the atoms' interior dielectrics, if given.
+    fn params_with(&self, dielectrics: Option<Vec<f64>>, atoms: usize) -> PyResult<Cow<'_, PbParams>> {
+        let Some(eps) = dielectrics else {
+            return Ok(Cow::Borrowed(&self.params));
+        };
+        if eps.len() != atoms {
+            return Err(PyValueError::new_err(format!(
+                "dielectrics has {} values for {atoms} atoms",
+                eps.len()
+            )));
+        }
+        let params = PbParams {
+            atom_pdie: Some(eps.into()),
+            ..self.params.clone()
+        };
+        params.validate().map_err(to_py)?;
+        Ok(Cow::Owned(params))
+    }
+
     /// Runs the calculations on up to `workers` concurrent backends; results
     /// in input order. Fails with the first failing system's error.
     fn run_batch(
         &self,
         systems: &[Vec<Atom>],
         specs: &[GridSpec],
+        dielectrics: &[Option<Vec<f64>>],
         workers: usize,
     ) -> Result<Vec<PolarSolvation>, PbError> {
         let workers = self.fitting_workers(specs, workers)?.min(systems.len().max(1));
@@ -677,7 +698,12 @@ impl PySolver {
         let jobs: Vec<Job> = systems
             .iter()
             .zip(specs)
-            .map(|(atoms, spec)| Job { atoms, spec })
+            .enumerate()
+            .map(|(i, (atoms, spec))| Job {
+                atoms,
+                spec,
+                atom_pdie: dielectrics.get(i).and_then(|d| d.as_deref()),
+            })
             .collect();
         let engines: Vec<&Engine> = std::iter::once(&self.engine).chain(pool.iter()).take(workers).collect();
         let results = match &self.engine {
@@ -959,6 +985,14 @@ impl PySolver {
     ///     Atomic radii in Å.
     /// grid : GridSpec, optional
     ///     Grid of the calculation; by default :meth:`make_grid` of the atoms.
+    /// dielectrics : array_like, shape (N,), optional
+    ///     Interior dielectric of every atom in place of ``pdie`` (multiple
+    ///     dielectrics as in DelPhi; not an APBS option): a face inside the
+    ///     molecular surface takes the value of the atom whose power cell
+    ///     contains it (smallest squared distance minus squared radius), and
+    ///     ``pdie`` is the reference state's dielectric outside the surface.
+    ///     Needs ``surface`` "mol" or "vdw", ``interface="sharp"`` and
+    ///     ``coulomb="grid"``; see :func:`pbsolve.residue_dielectrics`.
     ///
     /// Returns
     /// -------
@@ -970,7 +1004,7 @@ impl PySolver {
     ///     If the arrays do not match or a charge lies outside the grid.
     /// ConvergenceError
     ///     If a linear solve does not converge.
-    #[pyo3(signature = (coords, charges, radii, grid = None))]
+    #[pyo3(signature = (coords, charges, radii, grid = None, dielectrics = None))]
     fn polar_solvation(
         &self,
         py: Python<'_>,
@@ -978,12 +1012,12 @@ impl PySolver {
         charges: PyReadonlyArray1<'_, f64>,
         radii: PyReadonlyArray1<'_, f64>,
         grid: Option<PyGridSpec>,
+        dielectrics: Option<PyReadonlyArray1<'_, f64>>,
     ) -> PyResult<PyPolarResult> {
         let atoms = atoms_from(&coords, &charges, &radii)?;
+        let params = self.params_with(dielectrics.map(|d| d.as_array().to_vec()), atoms.len())?;
         let spec = self.spec_for(&atoms, grid)?;
-        let res = py
-            .detach(|| self.engine.polar(&atoms, &self.params, &spec))
-            .map_err(to_py)?;
+        let res = py.detach(|| self.engine.polar(&atoms, &params, &spec)).map_err(to_py)?;
         Ok(PyPolarResult::from_core(py, res, self.engine.platform()))
     }
 
@@ -1073,11 +1107,14 @@ impl PySolver {
     ///     Frames solved concurrently. Default: 2 on the CPU, 3 on CUDA; on
     ///     CUDA no more than fit in the free GPU memory (see
     ///     :meth:`batch_workers`).
+    /// dielectrics : array_like, shape (N,), optional
+    ///     Interior dielectric of every atom, as for :meth:`polar_solvation`.
     ///
     /// Returns
     /// -------
     /// numpy.ndarray, shape (F,)
-    #[pyo3(signature = (frames, charges, radii, grid = None, workers = None))]
+    #[pyo3(signature = (frames, charges, radii, grid = None, workers = None, dielectrics = None))]
+    #[allow(clippy::too_many_arguments)]
     fn polar_solvation_batch<'py>(
         &self,
         py: Python<'py>,
@@ -1086,6 +1123,7 @@ impl PySolver {
         radii: PyReadonlyArray1<'py, f64>,
         grid: Option<Bound<'py, PyAny>>,
         workers: Option<usize>,
+        dielectrics: Option<PyReadonlyArray1<'py, f64>>,
     ) -> PyResult<Bound<'py, PyArray1<f64>>> {
         let f = frames.as_array();
         if f.shape()[2] != 3 {
@@ -1098,9 +1136,14 @@ impl PySolver {
             let xyz = coords_from(frame)?;
             systems.push(atoms_from_arrays(&xyz, &q, &r).map_err(to_py)?);
         }
+        let eps = dielectrics.map(|d| d.as_array().to_vec());
+        self.params_with(eps.clone(), r.len())?;
+        let eps = vec![eps; systems.len()];
         let specs = self.specs_for(&systems, grid.as_ref())?;
         let workers = self.workers_for(workers)?;
-        let out = py.detach(|| self.run_batch(&systems, &specs, workers)).map_err(to_py)?;
+        let out = py
+            .detach(|| self.run_batch(&systems, &specs, &eps, workers))
+            .map_err(to_py)?;
         Ok(PyArray1::from_vec(py, out.iter().map(|r| r.energy_kcal).collect()))
     }
 
@@ -1121,11 +1164,14 @@ impl PySolver {
     ///     Systems solved concurrently. Default: 2 on the CPU, 3 on CUDA; on
     ///     CUDA no more than fit in the free GPU memory (see
     ///     :meth:`batch_workers`).
+    /// dielectrics : sequence, optional
+    ///     Per system an array of atom dielectrics or None, as for
+    ///     :meth:`polar_solvation`.
     ///
     /// Returns
     /// -------
     /// list of PolarResult
-    #[pyo3(signature = (systems, grid = None, workers = None))]
+    #[pyo3(signature = (systems, grid = None, workers = None, dielectrics = None))]
     #[allow(clippy::type_complexity)]
     fn polar_solvation_many<'py>(
         &self,
@@ -1137,15 +1183,33 @@ impl PySolver {
         )>,
         grid: Option<Bound<'py, PyAny>>,
         workers: Option<usize>,
+        dielectrics: Option<Vec<Option<PyReadonlyArray1<'py, f64>>>>,
     ) -> PyResult<Vec<PyPolarResult>> {
         let atoms: Vec<Vec<Atom>> = systems
             .iter()
             .enumerate()
             .map(|(i, (c, q, r))| atoms_from(c, q, r).map_err(|e| PyValueError::new_err(format!("system {i}: {e}"))))
             .collect::<PyResult<_>>()?;
+        let eps: Vec<Option<Vec<f64>>> = match dielectrics {
+            None => vec![None; atoms.len()],
+            Some(d) if d.len() != atoms.len() => {
+                return Err(PyValueError::new_err(format!(
+                    "dielectrics has {} entries for {} systems",
+                    d.len(),
+                    atoms.len()
+                )))
+            }
+            Some(d) => d.into_iter().map(|e| e.map(|e| e.as_array().to_vec())).collect(),
+        };
+        for (i, (e, a)) in eps.iter().zip(&atoms).enumerate() {
+            self.params_with(e.clone(), a.len())
+                .map_err(|err| PyValueError::new_err(format!("system {i}: {err}")))?;
+        }
         let specs = self.specs_for(&atoms, grid.as_ref())?;
         let workers = self.workers_for(workers)?;
-        let out = py.detach(|| self.run_batch(&atoms, &specs, workers)).map_err(to_py)?;
+        let out = py
+            .detach(|| self.run_batch(&atoms, &specs, &eps, workers))
+            .map_err(to_py)?;
         let platform = self.engine.platform();
         Ok(out
             .into_iter()
@@ -1200,6 +1264,8 @@ impl PySolver {
     /// reference : bool
     ///     Solve the reference state (``pdie`` everywhere, no ions) instead
     ///     of the solvated state.
+    /// dielectrics : array_like, shape (N,), optional
+    ///     Interior dielectric of every atom, as for :meth:`polar_solvation`.
     ///
     /// Returns
     /// -------
@@ -1212,8 +1278,8 @@ impl PySolver {
     /// energy_kt : float
     ///     Electrostatic energy ½Σqu of that state in kT; for the solvated
     ///     state of ``equation="npbe"`` with ions, APBS' free-energy functional.
-    #[pyo3(signature = (coords, charges, radii, grid = None, reference = false))]
-    #[allow(clippy::type_complexity)]
+    #[pyo3(signature = (coords, charges, radii, grid = None, reference = false, dielectrics = None))]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn potential<'py>(
         &self,
         py: Python<'py>,
@@ -1222,16 +1288,18 @@ impl PySolver {
         radii: PyReadonlyArray1<'py, f64>,
         grid: Option<PyGridSpec>,
         reference: bool,
+        dielectrics: Option<PyReadonlyArray1<'py, f64>>,
     ) -> PyResult<(Bound<'py, PyArray3<f64>>, [f64; 3], [f64; 3], f64)> {
         let atoms = atoms_from(&coords, &charges, &radii)?;
+        let params = self.params_with(dielectrics.map(|d| d.as_array().to_vec()), atoms.len())?;
         let spec = self.spec_for(&atoms, grid)?;
         let medium = if reference { Medium::Reference } else { Medium::Solvated };
         let (sol, energy) = py
             .detach(|| -> Result<_, PbError> {
-                let sol = self.engine.field(&atoms, &self.params, &spec, medium)?;
+                let sol = self.engine.field(&atoms, &params, &spec, medium)?;
                 let e = match sol.energy_kt {
                     Some(e) => e,
-                    None => electrostatic_energy_kt(&sol, &atoms, self.params.chgm)?,
+                    None => electrostatic_energy_kt(&sol, &atoms, params.chgm)?,
                 };
                 Ok((sol, e))
             })
@@ -1261,6 +1329,8 @@ impl PySolver {
     /// level : int
     ///     Focusing level, counted from the coarsest (0); negative values
     ///     count from the finest (-1).
+    /// dielectrics : array_like, shape (N,), optional
+    ///     Interior dielectric of every atom, as for :meth:`polar_solvation`.
     ///
     /// Returns
     /// -------
@@ -1271,7 +1341,7 @@ impl PySolver {
     ///     (nx, ny, nz) arrays; the level's ``origin``, ``spacing``,
     ///     ``dims``, ``lengths`` and ``center``; and the bulk
     ///     ``kappa_bar_sq``.
-    #[pyo3(signature = (coords, charges, radii, grid = None, reference = false, level = -1))]
+    #[pyo3(signature = (coords, charges, radii, grid = None, reference = false, level = -1, dielectrics = None))]
     #[allow(clippy::too_many_arguments)]
     fn maps<'py>(
         &self,
@@ -1282,8 +1352,10 @@ impl PySolver {
         grid: Option<PyGridSpec>,
         reference: bool,
         level: isize,
+        dielectrics: Option<PyReadonlyArray1<'py, f64>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let atoms = atoms_from(&coords, &charges, &radii)?;
+        let params = self.params_with(dielectrics.map(|d| d.as_array().to_vec()), atoms.len())?;
         let spec = self.spec_for(&atoms, grid)?;
         let mut levels = spec.levels().map_err(to_py)?;
         let n = levels.len() as isize;
@@ -1298,7 +1370,7 @@ impl PySolver {
         let (maps, q) = py
             .detach(|| -> Result<_, PbError> {
                 let q = spread_charges_with(&g, &atoms, self.params.chgm)?;
-                Ok((coefficient_maps(&g, &atoms, &self.params, medium), q))
+                Ok((coefficient_maps(&g, &atoms, &params, medium), q))
             })
             .map_err(to_py)?;
         let d = grid_dict(py, &g)?;

@@ -37,6 +37,23 @@ use std::sync::Mutex;
 pub struct Job<'a> {
     pub atoms: &'a [Atom],
     pub spec: &'a GridSpec,
+    /// The atoms' interior dielectrics, if any ([`PbParams::atom_pdie`]).
+    pub atom_pdie: Option<&'a [f64]>,
+}
+
+impl Job<'_> {
+    fn solve<B: Backend>(&self, be: &B, params: &PbParams) -> Result<PolarSolvation> {
+        match self.atom_pdie {
+            None => polar_solvation(be, self.atoms, params, self.spec),
+            Some(eps) => {
+                let params = PbParams {
+                    atom_pdie: Some(eps.into()),
+                    ..params.clone()
+                };
+                polar_solvation(be, self.atoms, &params, self.spec)
+            }
+        }
+    }
 }
 
 /// Device memory left to the memory pool's rounding and fragmentation per
@@ -105,10 +122,7 @@ pub fn polar_solvation_batch<B: Backend + Sync>(
     assert!(!backends.is_empty(), "polar_solvation_batch needs at least one backend");
     let workers = backends.len().min(jobs.len());
     if workers <= 1 {
-        return jobs
-            .iter()
-            .map(|j| polar_solvation(backends[0], j.atoms, params, j.spec))
-            .collect();
+        return jobs.iter().map(|j| j.solve(backends[0], params)).collect();
     }
     let threads = (rayon::current_num_threads() / workers).max(1);
     let next = AtomicUsize::new(0);
@@ -120,7 +134,7 @@ pub fn polar_solvation_batch<B: Backend + Sync>(
                 let work = || loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(job) = jobs.get(i) else { break };
-                    let result = polar_solvation(*be, job.atoms, params, job.spec);
+                    let result = job.solve(*be, params);
                     *slots[i].lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
                 };
                 // Fall back to the global pool if a private one cannot be built.
@@ -177,17 +191,39 @@ mod tests {
             .iter()
             .map(|a| GridSpec::auto(a, 0.6, 1.7, 8.0).unwrap())
             .collect();
+        // Every other job with its own atom dielectrics.
+        let eps: Vec<Vec<f64>> = systems
+            .iter()
+            .map(|a| (0..a.len()).map(|n| 1.0 + (n % 3) as f64).collect())
+            .collect();
         let jobs: Vec<Job> = systems
             .iter()
             .zip(&specs)
-            .map(|(atoms, spec)| Job { atoms, spec })
+            .enumerate()
+            .map(|(i, (atoms, spec))| Job {
+                atoms,
+                spec,
+                atom_pdie: (i % 2 == 1).then(|| eps[i].as_slice()),
+            })
             .collect();
         let p = params();
         let cpu = [CpuBackend::new(), CpuBackend::new(), CpuBackend::new()];
         let sequential: Vec<PolarSolvation> = jobs
             .iter()
-            .map(|j| polar_solvation(&cpu[0], j.atoms, &p, j.spec).unwrap())
+            .map(|j| {
+                let own = PbParams {
+                    atom_pdie: j.atom_pdie.map(Into::into),
+                    ..p.clone()
+                };
+                polar_solvation(&cpu[0], j.atoms, &own, j.spec).unwrap()
+            })
             .collect();
+        assert_ne!(
+            sequential[1].energy_kt,
+            polar_solvation(&cpu[0], jobs[1].atoms, &p, jobs[1].spec)
+                .unwrap()
+                .energy_kt
+        );
         for workers in 1..=3 {
             let bes: Vec<&CpuBackend> = cpu.iter().take(workers).collect();
             let batch = polar_solvation_batch(&bes, &p, &jobs);
@@ -213,14 +249,17 @@ mod tests {
             Job {
                 atoms: &good,
                 spec: &spec,
+                atom_pdie: None,
             },
             Job {
                 atoms: &bad,
                 spec: &spec,
+                atom_pdie: None,
             },
             Job {
                 atoms: &good,
                 spec: &spec,
+                atom_pdie: None,
             },
         ];
         let cpu = [CpuBackend::new(), CpuBackend::new()];
@@ -302,6 +341,7 @@ mod tests {
             &[Job {
                 atoms: &atoms,
                 spec: &spec,
+                atom_pdie: None,
             }],
         );
         assert_eq!(one.len(), 1);

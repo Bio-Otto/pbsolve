@@ -181,6 +181,68 @@ accurate = pbsolve.Solver(ionic_strength=0.15, interface="fractional")
 print(f"{accurate.polar_solvation(coords, charges, radii).energy:.2f} kcal/mol")
 ```
 
+### Interior dielectric per atom
+
+`pdie` is one dielectric for the whole solute. With `dielectrics`, an array
+with one value per atom, every atom gets its own, as with DelPhi's multiple
+dielectrics [Rocchia, Alexov & Honig 2001]. {py:meth}`pbsolve.Solver.polar_solvation`,
+the batch methods, `potential`, `maps`, the MM-PBSA functions and
+{py:func}`pbsolve.estimate_error` accept it. Residue-specific values stand for
+the larger reorganisation of charged side chains around a charge [Wang,
+Zhang, Rocchia & Alexov 2013]. For MM/GBSA, Liu, Peng & Zhang (2019) fitted
+2.7 for charged and 1.1 for the other residues to protein–protein binding;
+no values have been fitted for PB. {py:func}`pbsolve.residue_dielectrics`
+gives two values by the net charge of each residue.
+
+A face inside the molecular surface (the sharp `"mol"` or `"vdw"` marking)
+takes the dielectric of the atom whose power cell contains its midpoint x:
+the atom i with the smallest
+
+$$
+\pi_i(\mathbf x) = |\mathbf x - \mathbf c_i|^2 - R_i^2
+$$
+
+(ties go to the lower index). These cells divide two overlapping spheres at
+the plane through the circle where they intersect. A face in a crevice the
+probe cannot reach goes to the nearest sphere in this sense. Atoms of radius
+0 take part with R = 0 and own only faces outside the other spheres. Faces
+outside the surface get `sdie` in the solvated state.
+
+The **reference state** keeps this interior map and has `pdie` outside the
+surface, without ions. ΔG_polar is then the transfer of the molecule, with
+its interior dielectrics, from a medium of `pdie` (vacuum for `pdie=1`) into
+the solvent. The faces around every charge are the same in both states, so
+the grid self-energies cancel as they do with one `pdie`. With every value
+equal to `pdie` the maps and energies are those of `pdie` bit for bit.
+
+The interior dielectric acts through the charges' distances from the
+surface and on each other:
+
+* A charge at the centre of one sphere sees only the outer boundary:
+  ΔG = −(q²/2a)(1/`pdie` − 1/`sdie`) for any interior value.
+* Off-centre charges follow the Kirkwood solution for the sphere's interior
+  value.
+* For two spheres with interiors 4 and 10, pbsolve lies within 0.3–0.7 % of
+  the exact solution at 0.25 Å ([validation](../VALIDATION)).
+
+For binding energies the force field's Coulomb term has to be replaced by
+the interaction in the reference state ({py:attr}`pbsolve.PBSAFrame.delta_reference`,
+[MM-PBSA](many.md#residue-specific-interior-dielectrics)).
+
+Only `"mol"` and `"vdw"` with `interface="sharp"` and `coulomb="grid"` are
+supported ([forces](#forces) need a spline surface). APBS has one `pdie`, so
+there is nothing to compare there. The maps are built on the host, and the
+reference state rebuilds the surface on every level. For 1YCR a calculation
+takes 6 % longer on the CPU and about twice as long on a GPU.
+
+```python
+mol = pbsolve.io.load("tests/data/1ycr_amber_opt_pdb2pqr.pqr")
+labels = [f"{c}:{n}:{i}" for c, n, i in zip(mol.chains, mol.resnames, mol.resids)]
+eps = pbsolve.residue_dielectrics(mol.charges, labels, charged=4.0, neutral=1.0)
+variable = pbsolve.Solver(ionic_strength=0.15, pdie=1.0)
+print(f"{variable.polar_solvation(coords, charges, radii, dielectrics=eps).energy:.2f} kcal/mol")
+```
+
 ## Charges
 
 Point charges are spread onto the grid nodes; `chgm` chooses how, with

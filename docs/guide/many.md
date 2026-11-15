@@ -88,6 +88,35 @@ for xyz in pbsolve.io.frames(mol, "md.nc", step=10, atoms=solute):
 # ... and the last, shorter chunk
 ```
 
+### Residue-specific interior dielectrics
+
+`dielectrics` gives every complex atom its own interior dielectric (see
+[the model](model.md#interior-dielectric-per-atom)); receptor and ligand keep
+their atoms' values. {py:func}`pbsolve.residue_dielectrics` sets one value for
+the atoms of charged residues and another for the rest:
+
+```python
+labels = [f"{c}:{n}:{i}" for c, n, i in zip(mol.chains, mol.resnames, mol.resids)]
+eps = pbsolve.residue_dielectrics(mol.charges, labels, charged=4.0, neutral=1.0)
+varied = pbsolve.pbsa_solvation_frame(solver, frames[0], charges, radii, ligand, dielectrics=eps)
+print(f"ΔG_polar {varied.delta_polar:.2f} kcal/mol (one pdie: {results[0].delta_polar:.2f})")
+```
+
+With atom dielectrics the force field's Coulomb energy no longer fits the
+solvation terms. {py:attr}`pbsolve.PBSAFrame.delta_reference` is the
+receptor–ligand interaction in the reference state, computed on the shared
+grid. With one `pdie` it is the Coulomb energy divided by `pdie` (1YCR:
+within 0.03 % at 0.35 Å). Use it in place of the Coulomb term:
+`delta_reference + delta_polar` is the electrostatic binding energy in water,
+and it does not depend on the choice of reference.
+
+```python
+print(f"ΔE_ref {varied.delta_reference:.2f}  ΔE_ref + ΔΔG_polar {varied.delta_reference + varied.delta_polar:.2f} kcal/mol")
+```
+
+`pbsolve mmpbsa --residue-dielectric CHARGED NEUTRAL` does the same and
+prints `delta_reference`. The CSV file always has a column for it.
+
 ### Per-atom and per-residue shares
 
 Every term also comes per atom, so the binding terms can be split over the

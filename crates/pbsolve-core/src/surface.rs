@@ -119,6 +119,18 @@ pub fn maps_on<B: Backend>(
     surf: Option<&MolecularSurface>,
 ) -> Result<[B::Vector; 4]> {
     let Some(surf) = surf else {
+        if let Some(eps) = &params.atom_pdie {
+            // shortcut: the reference state rebuilds the surface on every level; share it with the
+            // solvated state's if the surface ever shows up in the timings.
+            let surf = MolecularSurface::for_params(atoms, params);
+            let [x, y, z] = atom_dielectric_faces(grid, atoms, &surf, eps, params.pdie)?;
+            return Ok([
+                be.upload_owned(x)?,
+                be.upload_owned(y)?,
+                be.upload_owned(z)?,
+                be.zeros(grid.len())?,
+            ]);
+        }
         if params.surface == SurfaceMethod::Gaussian {
             let [x, y, z] = contour_faces(grid, atoms, params);
             return Ok([
@@ -153,6 +165,12 @@ pub fn maps_on<B: Backend>(
     let (pdie, sdie) = (params.pdie, params.sdie);
     let h = grid.spacing;
     let [eps_x, eps_y, eps_z] = match params.surface {
+        _ if params.atom_pdie.is_some() => {
+            // Not an APBS option; built on the host.
+            let eps = params.atom_pdie.as_deref().unwrap_or_default();
+            let [x, y, z] = atom_dielectric_faces(grid, atoms, surf, eps, sdie)?;
+            [be.upload_owned(x)?, be.upload_owned(y)?, be.upload_owned(z)?]
+        }
         SurfaceMethod::Mol | SurfaceMethod::Vdw if params.interface == InterfaceMethod::Fractional => {
             // Not an APBS option; built on the host.
             let [x, y, z] = fractional_faces(grid, surf, pdie, sdie);
@@ -189,6 +207,61 @@ pub fn maps_on<B: Backend>(
         be.zeros(grid.len())?
     };
     Ok([eps_x, eps_y, eps_z, kappa_sq])
+}
+
+/// Face dielectrics with one interior dielectric per atom (`atom_pdie`, the
+/// multiple dielectrics of DelPhi; Rocchia, Alexov & Honig 2001). A face inside
+/// the solute of `surf` (the sharp `mol`/`vdw` marking, as [`mark_map`] does
+/// it) takes `eps[n]` of the atom n that owns its midpoint x: the smallest
+/// power distance |x − c_n|² − r_n² (the Laguerre cells of the spheres, whose
+/// walls pass through the circles where two spheres meet), ties to the lower
+/// index; radius-0 atoms take part with r = 0. Every other face gets `outside`.
+/// With all `eps` equal to `pdie` the maps equal the sharp marking bit for bit.
+pub fn atom_dielectric_faces(
+    grid: &Grid,
+    atoms: &[Atom],
+    surf: &MolecularSurface,
+    eps: &[f64],
+    outside: f64,
+) -> Result<[Vec<f64>; 3]> {
+    if eps.len() != atoms.len() {
+        return Err(PbError::InvalidInput(format!(
+            "{} atom dielectrics for {} atoms",
+            eps.len(),
+            atoms.len()
+        )));
+    }
+    let centers: Vec<[f64; 3]> = atoms.iter().map(|a| a.position).collect();
+    let reach = surf.solute.iter().map(|s| s.radius).fold(0.0, f64::max);
+    let cells = CellList::new(&centers, reach.max(1.0));
+    // An interior face lies within r_a + srad of some atom a, whose power distance is at most
+    // (r_a + srad)² − r_a²; an atom j with a smaller one is then within r_max + srad. 2h of margin
+    // covers the grid-relative arithmetic of the marking.
+    let radius = reach + 2.0 * grid.spacing.iter().copied().fold(0.0, f64::max);
+    let h = grid.spacing;
+    let [nx, ny, _] = grid.dims;
+    let shifts = [[0.5 * h[0], 0.0, 0.0], [0.0, 0.5 * h[1], 0.0], [0.0, 0.0, 0.5 * h[2]]];
+    Ok(shifts.map(|shift| {
+        let mut map = mark_map(grid, shift, 0.0, &[(&surf.solute, 1.0), (&surf.probes, 0.0)]);
+        map.par_iter_mut().enumerate().for_each(|(c, e)| {
+            if *e == 0.0 {
+                *e = outside;
+                return;
+            }
+            let p = grid.position(c % nx, (c / nx) % ny, c / (nx * ny));
+            let x = [p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]];
+            let mut best = (f64::INFINITY, usize::MAX);
+            cells.any_near(x, radius, |n| {
+                let d = dist2(x, atoms[n].position) - atoms[n].radius * atoms[n].radius;
+                if d < best.0 || (d == best.0 && n < best.1) {
+                    best = (d, n);
+                }
+                false
+            });
+            *e = eps[best.1];
+        });
+        map
+    }))
 }
 
 /// The maps of [`Backend::mark_maps`], one per shift.
@@ -659,6 +732,142 @@ mod tests {
             dz * dz + dy * dy + dx * dx <= s.radius * s.radius
         };
         surf.solute.iter().any(inside) && !surf.probes.iter().any(inside)
+    }
+
+    fn cluster() -> (Vec<Atom>, Grid) {
+        let atoms = vec![
+            atom([-1.6, 0.1, 0.0], 1.7),
+            atom([1.5, 0.0, 0.2], 1.6),
+            atom([0.0, 2.1, -0.3], 1.5),
+            atom([0.2, 0.9, 0.4], 0.0),
+            atom([0.4, -1.3, 1.1], 1.2),
+            atom([-0.7, 0.6, -1.4], 1.9),
+        ];
+        let grid = Grid::centered([0.05, 0.4, 0.1], [13.0, 12.0, 11.0], [27, 25, 23]).unwrap();
+        (atoms, grid)
+    }
+
+    #[test]
+    fn uniform_atom_dielectrics_give_the_sharp_maps_bit_for_bit() {
+        let (atoms, grid) = cluster();
+        for surface in [SurfaceMethod::Mol, SurfaceMethod::Vdw] {
+            let plain = PbParams {
+                pdie: 2.0,
+                surface,
+                ..PbParams::default()
+            };
+            let uniform = PbParams {
+                atom_pdie: Some(vec![2.0; atoms.len()].into()),
+                ..plain.clone()
+            };
+            let a = CoefficientMaps::solvated(&grid, &atoms, &plain);
+            let b = CoefficientMaps::solvated(&grid, &atoms, &uniform);
+            let to_bits = |m: &CoefficientMaps| -> Vec<u64> {
+                [&m.eps_x, &m.eps_y, &m.eps_z]
+                    .iter()
+                    .flat_map(|v| v.iter().map(|x| x.to_bits()))
+                    .collect()
+            };
+            assert_eq!(to_bits(&a), to_bits(&b), "{surface:?} solvated");
+            let r = CoefficientMaps::reference(&grid, &atoms, &uniform);
+            assert!(
+                to_bits(&r).iter().all(|&x| x == 2.0f64.to_bits()),
+                "{surface:?} reference"
+            );
+        }
+    }
+
+    #[test]
+    fn each_interior_face_takes_the_dielectric_of_its_power_cell() {
+        let (atoms, grid) = cluster();
+        let eps: Vec<f64> = (0..atoms.len()).map(|n| 2.0 + 3.0 * n as f64).collect();
+        let base = PbParams {
+            pdie: 1.5,
+            ..PbParams::default()
+        };
+        let params = PbParams {
+            atom_pdie: Some(eps.clone().into()),
+            ..base.clone()
+        };
+        let sharp = CoefficientMaps::solvated(&grid, &atoms, &base);
+        let solvated = CoefficientMaps::solvated(&grid, &atoms, &params);
+        let reference = CoefficientMaps::reference(&grid, &atoms, &params);
+        let h = grid.spacing;
+        let mut interior = 0;
+        for (axis, (s, (v, r))) in [&sharp.eps_x, &sharp.eps_y, &sharp.eps_z]
+            .into_iter()
+            .zip([&solvated.eps_x, &solvated.eps_y, &solvated.eps_z].into_iter().zip([
+                &reference.eps_x,
+                &reference.eps_y,
+                &reference.eps_z,
+            ]))
+            .enumerate()
+        {
+            for c in 0..grid.len() {
+                if s[c] == base.sdie {
+                    assert_eq!((v[c], r[c]), (base.sdie, base.pdie), "exterior face {c}");
+                    continue;
+                }
+                interior += 1;
+                let [nx, ny, _] = grid.dims;
+                let mut x = grid.position(c % nx, (c / nx) % ny, c / (nx * ny));
+                x[axis] += 0.5 * h[axis];
+                // Brute force over every atom.
+                let power = |a: &Atom| dist2(x, a.position) - a.radius * a.radius;
+                let owner = (0..atoms.len())
+                    .min_by(|&i, &j| power(&atoms[i]).total_cmp(&power(&atoms[j])))
+                    .unwrap();
+                assert_eq!((v[c], r[c]), (eps[owner], eps[owner]), "face {c} of axis {axis}");
+            }
+        }
+        assert!(interior > 1000);
+        // Every atom owns faces (also the radius-0 atom 3, at the edge of atom 1).
+        let used: std::collections::BTreeSet<u64> = solvated.eps_x.iter().map(|e| e.to_bits()).collect();
+        assert!(eps.iter().all(|e| used.contains(&e.to_bits())));
+    }
+
+    #[test]
+    fn atom_dielectrics_are_validated() {
+        let (atoms, grid) = cluster();
+        let ok = PbParams {
+            atom_pdie: Some(vec![4.0; atoms.len()].into()),
+            ..PbParams::default()
+        };
+        assert!(ok.validate().is_ok());
+        for n in [2, atoms.len() + 1] {
+            let wrong = PbParams {
+                atom_pdie: Some(vec![4.0; n].into()),
+                ..ok.clone()
+            };
+            assert!(
+                maps_on(&CpuBackend::new(), &grid, &atoms, &wrong, None).is_err(),
+                "{n} values"
+            );
+        }
+        for bad in [
+            PbParams {
+                atom_pdie: Some(vec![0.0; atoms.len()].into()),
+                ..ok.clone()
+            },
+            PbParams {
+                atom_pdie: Some(vec![f64::NAN; atoms.len()].into()),
+                ..ok.clone()
+            },
+            PbParams {
+                surface: SurfaceMethod::Spline2,
+                ..ok.clone()
+            },
+            PbParams {
+                interface: InterfaceMethod::Fractional,
+                ..ok.clone()
+            },
+            PbParams {
+                coulomb: crate::params::CoulombMethod::Analytic,
+                ..ok.clone()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

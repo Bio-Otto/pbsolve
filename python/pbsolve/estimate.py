@@ -84,6 +84,7 @@ def estimate_error(
     parts: Optional[Sequence[npt.ArrayLike]] = None,
     seed: int = 0,
     workers: Optional[int] = None,
+    dielectrics: Optional[npt.ArrayLike] = None,
 ) -> ErrorEstimate:
     """ΔG_polar averaged over grid placements, with its spread and, given two
     spacings, its extrapolation to zero spacing.
@@ -112,6 +113,8 @@ def estimate_error(
         Seed of the random placements; the same seed gives the same result.
     workers : int, optional
         Calculations solved concurrently (as for :meth:`Solver.polar_solvation_many`).
+    dielectrics : array_like, optional
+        Interior dielectric of every atom (as for :meth:`Solver.polar_solvation`).
 
     Returns
     -------
@@ -152,8 +155,12 @@ def estimate_error(
             for d in offsets
         ]
         systems = [(coords[i], charges[i], radii[i]) for i in selections]
+        eps = None if dielectrics is None else [np.asarray(dielectrics, dtype=float)[i] for i in selections]
         results = s.polar_solvation_many(
-            [x for _ in grids for x in systems], grid=[g for g in grids for _ in systems], workers=workers
+            [x for _ in grids for x in systems],
+            grid=[g for g in grids for _ in systems],
+            workers=workers,
+            dielectrics=None if eps is None else [e for _ in grids for e in eps],
         )
         e = [r.energy for r in results]
         k = len(systems)

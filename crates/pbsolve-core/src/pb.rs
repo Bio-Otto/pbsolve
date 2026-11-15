@@ -1102,6 +1102,71 @@ mod tests {
     }
 
     #[test]
+    fn uniform_atom_dielectrics_give_the_same_energies_bit_for_bit() {
+        let atoms = small_protein();
+        for base in [
+            PbParams::default().with_salt(0.15, 2.0),
+            PbParams {
+                pdie: 4.0,
+                equation: crate::params::Equation::Nonlinear,
+                ..PbParams::default().with_salt(0.15, 2.0)
+            },
+        ] {
+            let uniform = PbParams {
+                atom_pdie: Some(vec![base.pdie; atoms.len()].into()),
+                ..base.clone()
+            };
+            let (a, b) = (solve(&atoms, &base, 0.6), solve(&atoms, &uniform, 0.6));
+            assert_eq!(a.energy_kt.to_bits(), b.energy_kt.to_bits());
+            assert_eq!(a.reference_kt.to_bits(), b.reference_kt.to_bits());
+        }
+    }
+
+    #[test]
+    fn atom_dielectrics_of_one_sphere_leave_only_the_outer_boundary() {
+        // A charge at the centre of a sphere with interior ε_1 (radius-0 charge inside a neutral
+        // atom): the interior is the same in both states, so ΔG = −(l_B0/2a)(1/pdie − 1/sdie)
+        // whatever ε_1 is.
+        let a = 2.0;
+        let atoms = [
+            Atom {
+                position: [0.1, -0.05, 0.02],
+                charge: 0.0,
+                radius: a,
+            },
+            Atom {
+                position: [0.1, -0.05, 0.02],
+                charge: 1.0,
+                radius: 0.0,
+            },
+        ];
+        let plain = PbParams {
+            surface: SurfaceMethod::Vdw,
+            ..PbParams::default()
+        };
+        let spec = GridSpec::auto(&atoms, 0.25, 1.7, 12.0).unwrap();
+        let lb0 = bjerrum_length_vacuum(plain.temperature);
+        let exact = -(lb0 / (2.0 * a)) * (1.0 / plain.pdie - 1.0 / plain.sdie);
+        let plain_kt = polar_solvation(&CpuBackend::new(), &atoms, &plain, &spec)
+            .unwrap()
+            .energy_kt;
+        for eps1 in [1.0, 4.0, 20.0] {
+            let p = PbParams {
+                atom_pdie: Some(vec![eps1, eps1].into()),
+                ..plain.clone()
+            };
+            let e = polar_solvation(&CpuBackend::new(), &atoms, &p, &spec)
+                .unwrap()
+                .energy_kt;
+            if eps1 == plain.pdie {
+                assert_eq!(e.to_bits(), plain_kt.to_bits());
+            }
+            // Same limit; the faces next to the boundary see ε_1 instead of pdie (−1.5 % … +0.6 %).
+            assert!((e - exact).abs() < 0.02 * exact.abs(), "ε_1 = {eps1}: {e} vs {exact}");
+        }
+    }
+
+    #[test]
     fn atom_energies_sum_to_the_energy() {
         use crate::params::{ChargeMethod, CoulombMethod, Equation, InterfaceMethod};
         let atoms = quartet();

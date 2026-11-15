@@ -57,6 +57,13 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   K = exp(−z² l_B/(2 r_ion)·(1/ε − 1/sdie)) on the nodes. Its reference
   state is not homogeneous: `maps_on` without a surface gives the Gaussian ε
   where it is at most `gauss_contour`, `pdie` beyond (`contour_faces`).
+  Atom dielectrics (`PbParams::atom_pdie`, Python `dielectrics=`;
+  `surface::atom_dielectric_faces`, host; not an APBS option) mark the
+  sharp `mol`/`vdw` interior with `mark_map` and give each interior face the
+  dielectric of the atom with the smallest power distance |x − c|² − R²
+  (cell-list search within the largest solute sphere + 2h); faces outside
+  get `sdie`, and in the reference state, which rebuilds the surface,
+  `pdie`. Batches carry them per job (`batch::Job::atom_pdie`).
 * **Ions:** κ̄² is zero inside `r_i + r_ion` (largest listed ion radius) of
   every atom with `r_i > 0`, marked the same way.
 * **Nonlinear PB** (`nonlinear.rs`): with `equation="npbe"` the solvated

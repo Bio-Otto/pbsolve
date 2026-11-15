@@ -17,6 +17,7 @@ charges with special application to zwitterions. J Chem Phys 2, 351 (1934).
 from __future__ import annotations
 
 import math
+from typing import Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -211,6 +212,7 @@ def two_sphere_energy(
     ion_radius: float = 2.0,
     temperature: float = 298.15,
     order: int | None = None,
+    sphere_pdie: Sequence[float] | None = None,
 ) -> float:
     """Polar solvation energy of charges inside two dielectric spheres, kcal/mol.
 
@@ -236,6 +238,10 @@ def two_sphere_energy(
     order : int, optional
         Highest multipole order; by default chosen for a relative accuracy of
         about 1e-12 from the geometry (at most 150).
+    sphere_pdie : sequence of 2 float, optional
+        A dielectric for the inside of each sphere instead of ``pdie``; the
+        reference state then keeps them and has ``pdie`` outside the spheres
+        (as ``Solver.polar_solvation`` with ``dielectrics``).
 
     Returns
     -------
@@ -283,6 +289,23 @@ def two_sphere_energy(
         order = 8 if ratio <= 0.0 else min(150, max(8, math.ceil(math.log(1e-12) / math.log(ratio))))
     n_max = order
     stern = b / a
+    lb = bjerrum_length(temperature)
+    if sphere_pdie is None:
+        potential = _two_sphere_potential(q, owner, rho_a, cos_t, phi, a, b, stern, dist, n_max, (pdie, pdie), sdie, kappa)
+        # minus the reference state's Coulomb potential of the other sphere's charges
+        cross = owner[:, None] != owner[None, :]
+        rij = np.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=2)
+        coulomb = np.where(cross, q[None, :] / (pdie * np.where(cross, rij, 1.0)), 0.0).sum(axis=1)
+        return 0.5 * lb * float(q @ (potential - coulomb)) * kt_kcal_per_mol(temperature)
+    eps_in = (float(sphere_pdie[0]), float(sphere_pdie[1]))
+    solvated = _two_sphere_potential(q, owner, rho_a, cos_t, phi, a, b, stern, dist, n_max, eps_in, sdie, kappa)
+    reference = _two_sphere_potential(q, owner, rho_a, cos_t, phi, a, b, stern, dist, n_max, eps_in, pdie, 0.0)
+    return 0.5 * lb * float(q @ (solvated - reference)) * kt_kcal_per_mol(temperature)
+
+
+def _two_sphere_potential(q, owner, rho_a, cos_t, phi, a, b, stern, dist, n_max, eps_in, eps_out, kappa):
+    """Reaction plus transmitted potential at the charges (e/Å) of :func:`two_sphere_energy`:
+    interiors ``eps_in``, the shells and outside ``eps_out`` with screening ``kappa`` beyond r = b."""
     resp = []
     for i in range(2):
         if kappa > 0.0:
@@ -291,7 +314,7 @@ def two_sphere_energy(
         else:
             n = np.arange(n_max + 1)
             lam_in, lam_out = n / stern[i], -(n + 1) / stern[i]
-        resp.append(_radial(n_max, pdie, sdie, stern[i], lam_in, lam_out))
+        resp.append(_radial(n_max, eps_in[i], eps_out, stern[i], lam_in, lam_out))
 
     # Outgoing radial functions S of the other sphere at Gauss nodes on this sphere's r = b.
     x, w = np.polynomial.legendre.leggauss(2 * n_max + 40)
@@ -306,7 +329,6 @@ def two_sphere_energy(
             s_out = (b[j] / r_other)[None, :] ** (np.arange(n_max + 1)[:, None] + 1)
         geo.append((zr / r_other, s_out))
 
-    lb = bjerrum_length(temperature)
     potential = np.zeros(len(q))  # reaction + transmitted potential at the charges, e/Å
     for m in range(n_max + 1):
         k = n_max - m + 1
@@ -334,8 +356,4 @@ def two_sphere_energy(
             sel = owner == i
             val = (coef[:, None] * rho_a[sel][None, :] ** ns[:, None] * ylm[:, sel]).sum(axis=0)
             potential[sel] += (1.0 if m == 0 else 2.0) * val.real
-    # minus the reference state's Coulomb potential of the other sphere's charges
-    cross = owner[:, None] != owner[None, :]
-    rij = np.linalg.norm(pos[:, None, :] - pos[None, :, :], axis=2)
-    coulomb = np.where(cross, q[None, :] / (pdie * np.where(cross, rij, 1.0)), 0.0).sum(axis=1)
-    return 0.5 * lb * float(q @ (potential - coulomb)) * kt_kcal_per_mol(temperature)
+    return potential

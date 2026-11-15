@@ -361,6 +361,7 @@ class Solver:
         charges: npt.ArrayLike,
         radii: npt.ArrayLike,
         grid: Optional[GridSpec] = None,
+        dielectrics: Optional[npt.ArrayLike] = None,
     ) -> PolarResult:
         """Polar solvation free energy ΔG_polar.
 
@@ -380,6 +381,14 @@ class Solver:
             Atomic radii in Å.
         grid : GridSpec, optional
             Grid of the calculation; by default :meth:`make_grid` of the atoms.
+        dielectrics : array_like, shape (N,), optional
+            Interior dielectric of every atom in place of ``pdie`` (multiple
+            dielectrics as in DelPhi; not an APBS option): a face inside the
+            molecular surface takes the value of the atom whose power cell
+            contains it (smallest squared distance minus squared radius), and
+            ``pdie`` is the reference state's dielectric outside the surface.
+            Needs ``surface`` "mol" or "vdw", ``interface="sharp"`` and
+            ``coulomb="grid"``; see :func:`pbsolve.residue_dielectrics`.
 
         Returns
         -------
@@ -441,6 +450,7 @@ class Solver:
         radii: npt.ArrayLike,
         grid: Optional[GridSpec | Sequence[GridSpec]] = None,
         workers: Optional[int] = None,
+        dielectrics: Optional[npt.ArrayLike] = None,
     ) -> npt.NDArray[np.float64]:
         """ΔG_polar in kcal/mol for every frame of a trajectory.
 
@@ -462,6 +472,8 @@ class Solver:
             Frames solved concurrently. Default: 2 on the CPU, 3 on CUDA; on
             CUDA no more than fit in the free GPU memory (see
             :meth:`batch_workers`).
+        dielectrics : array_like, shape (N,), optional
+            Interior dielectric of every atom, as for :meth:`polar_solvation`.
 
         Returns
         -------
@@ -472,6 +484,7 @@ class Solver:
         systems: Sequence[tuple[npt.ArrayLike, npt.ArrayLike, npt.ArrayLike]],
         grid: Optional[GridSpec | Sequence[GridSpec]] = None,
         workers: Optional[int] = None,
+        dielectrics: Optional[Sequence[Optional[npt.ArrayLike]]] = None,
     ) -> list[PolarResult]:
         """ΔG_polar for several systems, several of them solved at once.
 
@@ -490,6 +503,9 @@ class Solver:
             Systems solved concurrently. Default: 2 on the CPU, 3 on CUDA; on
             CUDA no more than fit in the free GPU memory (see
             :meth:`batch_workers`).
+        dielectrics : sequence, optional
+            Per system an array of atom dielectrics or None, as for
+            :meth:`polar_solvation`.
 
         Returns
         -------
@@ -526,6 +542,7 @@ class Solver:
         radii: npt.ArrayLike,
         grid: Optional[GridSpec] = None,
         reference: bool = False,
+        dielectrics: Optional[npt.ArrayLike] = None,
     ) -> tuple[npt.NDArray[np.float64], list[float], list[float], float]:
         """Electrostatic potential on the finest grid.
 
@@ -542,6 +559,8 @@ class Solver:
         reference : bool
             Solve the reference state (``pdie`` everywhere, no ions) instead
             of the solvated state.
+        dielectrics : array_like, shape (N,), optional
+            Interior dielectric of every atom, as for :meth:`polar_solvation`.
 
         Returns
         -------
@@ -563,6 +582,7 @@ class Solver:
         grid: Optional[GridSpec] = None,
         reference: bool = False,
         level: int = -1,
+        dielectrics: Optional[npt.ArrayLike] = None,
     ) -> dict[str, object]:
         """Coefficient maps of one focusing level.
 
@@ -585,6 +605,8 @@ class Solver:
         level : int
             Focusing level, counted from the coarsest (0); negative values
             count from the finest (-1).
+        dielectrics : array_like, shape (N,), optional
+            Interior dielectric of every atom, as for :meth:`polar_solvation`.
 
         Returns
         -------

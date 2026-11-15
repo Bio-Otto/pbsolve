@@ -348,6 +348,12 @@ pub struct PbParams {
     pub max_iter: usize,
     /// Preconditioner of the linear solver.
     pub preconditioner: Preconditioner,
+    /// Interior dielectric of every atom (opt-in, not APBS; DelPhi-style
+    /// multiple dielectrics): a face inside the molecular surface takes the
+    /// value of the atom that owns it ([`crate::surface::atom_dielectric_faces`]),
+    /// and `pdie` is the dielectric outside the surface in the reference state.
+    /// `None`: `pdie` everywhere inside.
+    pub atom_pdie: Option<std::sync::Arc<[f64]>>,
 }
 
 impl Default for PbParams {
@@ -372,6 +378,7 @@ impl Default for PbParams {
             tol: 1.0e-8,
             max_iter: 20_000,
             preconditioner: Preconditioner::DEFAULT,
+            atom_pdie: None,
         }
     }
 }
@@ -460,6 +467,19 @@ impl PbParams {
                      next to a point charge is not, so their Boltzmann density diverges at the charges inside \
                      the molecule; use 'lpbe' or 'smpbe' (bounded ion density)",
                 );
+            }
+        }
+        if let Some(eps) = &self.atom_pdie {
+            if eps.iter().any(|e| !e.is_finite() || *e <= 0.0) {
+                return invalid("atom dielectrics must be positive and finite");
+            }
+            if !matches!(self.surface, SurfaceMethod::Mol | SurfaceMethod::Vdw)
+                || self.interface != InterfaceMethod::Sharp
+            {
+                return invalid("atom dielectrics need surface 'mol' or 'vdw' with interface 'sharp'");
+            }
+            if self.coulomb == CoulombMethod::Analytic {
+                return invalid("atom dielectrics need coulomb 'grid': the decomposition assumes pdie inside");
             }
         }
         if self.equation != Equation::Linear && self.coulomb == CoulombMethod::Analytic {

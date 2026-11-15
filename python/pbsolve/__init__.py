@@ -117,6 +117,7 @@ from .mmpbsa import (  # noqa: E402
     nonpolar_energy,
     pbsa_solvation_frame,
     pbsa_solvation_frames,
+    residue_dielectrics,
 )
 
 __all__ = [
@@ -153,6 +154,7 @@ __all__ = [
     "read_dx",
     "read_pqr",
     "read_structure",
+    "residue_dielectrics",
     "sasa",
     "write_dx",
 ]

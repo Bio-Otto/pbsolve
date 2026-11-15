@@ -8,13 +8,14 @@ energies come from your MM engine (e.g. OpenMM)::
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Sequence
 
 import numpy as np
 import numpy.typing as npt
 
-from ._core import GridSpec, Solver, sasa
+from ._core import GridSpec, Solver, kt_kcal_per_mol, sasa
 
 #: Non-polar model of Sitkoff, Sharp & Honig (1994): ΔG_np = γ·SASA + β.
 SITKOFF_GAMMA = 0.00542  # kcal/(mol·Å²)
@@ -64,6 +65,10 @@ class SolvationTerms:
     for the nonlinear equations with ions."""
     atom_nonpolar: Optional[npt.NDArray[np.float64]] = field(default=None, compare=False, repr=False)
     """γ·SASA of every atom; the constant β belongs to no atom."""
+    reference: Optional[float] = field(default=None, repr=False)
+    """Electrostatic energy ½Σqu of the reference state, kcal/mol. It contains
+    the grid's self-energy, so only differences on one grid mean something
+    (:attr:`PBSAFrame.delta_reference`)."""
 
     @property
     def total(self) -> float:
@@ -153,8 +158,25 @@ class PBSAFrame:
         """Solvation free energy of binding, polar plus non-polar."""
         return self.delta_polar + self.delta_nonpolar
 
+    @property
+    def delta_reference(self) -> Optional[float]:
+        """Receptor–ligand interaction energy in the reference state (complex − receptor − ligand).
+
+        All three share the complex's grid, so the grid self-energies cancel.
+        With one interior dielectric this is the Coulomb energy divided by
+        ``pdie`` (1YCR: within 0.03 % at 0.35 Å). With atom dielectrics it is
+        the interaction screened by them; use it in place of the force
+        field's Coulomb term, so that ``delta_reference + delta_polar`` is the
+        electrostatic binding energy in the solvent. ``None`` if a species
+        has no reference energy.
+        """
+        parts = (self.complex.reference, self.receptor.reference, self.ligand.reference)
+        if any(p is None for p in parts):
+            return None
+        return parts[0] - parts[1] - parts[2]
+
     def as_dict(self) -> dict[str, float]:
-        """All terms as a flat dict (``complex_polar``, ..., ``delta_solvation``)."""
+        """All terms as a flat dict (``complex_polar``, ..., ``delta_solvation``, ``delta_reference``)."""
         out: dict[str, float] = {}
         for name in ("complex", "receptor", "ligand"):
             terms: SolvationTerms = getattr(self, name)
@@ -163,7 +185,56 @@ class PBSAFrame:
         out["delta_polar"] = self.delta_polar
         out["delta_nonpolar"] = self.delta_nonpolar
         out["delta_solvation"] = self.delta_solvation
+        if self.delta_reference is not None:
+            out["delta_reference"] = self.delta_reference
         return out
+
+
+def residue_dielectrics(
+    charges: npt.ArrayLike,
+    residues: Sequence[Any],
+    *,
+    charged: float,
+    neutral: float,
+    threshold: float = 0.5,
+) -> npt.NDArray[np.float64]:
+    """Interior dielectric of every atom from the net charge of its residue.
+
+    Residue-type dielectrics put a higher ε inside charged residues, whose
+    side chains reorganise more around a charge, than in the rest of the
+    protein [Wang, Zhang, Rocchia & Alexov 2013]; for MM/GBSA, Liu, Peng &
+    Zhang (2019) fitted 2.7 (charged) and 1.1 (other residues) to
+    protein–protein binding. Pass the result as ``dielectrics`` to
+    :meth:`Solver.polar_solvation` or :func:`pbsa_solvation_frames`.
+
+    Parameters
+    ----------
+    charges : array_like, shape (N,)
+        Atomic charges in e.
+    residues : sequence, length N
+        A label per atom that is the same for the atoms of one residue, e.g.
+        ``f"{chain}:{resname}:{resid}"``.
+    charged, neutral : float
+        ε of the atoms of charged residues and of all other atoms. No
+        default: the published values were fitted for generalized Born.
+    threshold : float
+        A residue whose charges add up to at least this magnitude (e) is
+        charged.
+
+    Returns
+    -------
+    numpy.ndarray, shape (N,)
+    """
+    q = _vec(charges)
+    if len(residues) != q.size:
+        raise ValueError(f"{len(residues)} residue labels for {q.size} charges")
+    for name, eps in (("charged", charged), ("neutral", neutral)):
+        if not (math.isfinite(eps) and eps > 0.0):
+            raise ValueError(f"{name} dielectric must be positive, got {eps}")
+    net: dict[Any, float] = {}
+    for label, c in zip(residues, q):
+        net[label] = net.get(label, 0.0) + float(c)
+    return np.array([charged if abs(net[label]) >= threshold else neutral for label in residues])
 
 
 def _selections(
@@ -196,6 +267,7 @@ def pbsa_solvation_frames(
     gamma: float = SITKOFF_GAMMA,
     beta: float = SITKOFF_BETA,
     probe: float = 1.4,
+    dielectrics: Optional[npt.ArrayLike] = None,
 ) -> list[PBSAFrame]:
     """Single-trajectory MM-PBSA solvation terms for several frames.
 
@@ -208,14 +280,20 @@ def pbsa_solvation_frames(
     depend on ``workers`` and equal those of :func:`pbsa_solvation_frame`
     bit for bit. Every term also comes per atom
     (:meth:`PBSAFrame.atom_terms`, :meth:`PBSAFrame.residue_terms`).
+    ``dielectrics`` gives every complex atom its own interior dielectric
+    (see :meth:`Solver.polar_solvation` and :func:`residue_dielectrics`);
+    receptor and ligand keep their atoms' values.
     """
     q, r = _vec(charges), _vec(radii)
+    eps = None if dielectrics is None else _vec(dielectrics)
+    if eps is not None and eps.shape != q.shape:
+        raise ValueError(f"{eps.size} dielectrics for {q.size} atoms")
     coords = [_xyz(x) for x in frames]
     if not coords:
         return []
     lig, rec = _selections(coords[0].shape[0], ligand_atoms, receptor_atoms)
     species = (None, rec, lig)
-    systems, grids = [], []
+    systems, grids, atom_eps = [], [], []
     for xyz in coords:
         if xyz.shape[0] != q.shape[0]:
             raise ValueError(f"frame has {xyz.shape[0]} atoms, charges have {q.shape[0]}")
@@ -223,8 +301,12 @@ def pbsa_solvation_frames(
         for idx in species:
             systems.append((xyz, q, r) if idx is None else (xyz[idx], q[idx], r[idx]))
             grids.append(g)
-    polar = solver.polar_solvation_many(systems, grid=grids, workers=workers)
+            atom_eps.append(None if eps is None else eps if idx is None else eps[idx])
+    polar = solver.polar_solvation_many(
+        systems, grid=grids, workers=workers, dielectrics=None if eps is None else atom_eps
+    )
 
+    kt = kt_kcal_per_mol(solver.params["temperature"])
     out = []
     for k in range(len(coords)):
         terms = []
@@ -232,7 +314,9 @@ def pbsa_solvation_frames(
             x, _, rr = systems[3 * k + j]
             res = polar[3 * k + j]
             nonpolar, atom_nonpolar = _nonpolar_terms(x, rr, gamma, beta, probe)
-            terms.append(SolvationTerms(res.energy, nonpolar, res.atom_energies, atom_nonpolar))
+            terms.append(
+                SolvationTerms(res.energy, nonpolar, res.atom_energies, atom_nonpolar, reference=res.reference_kt * kt)
+            )
         out.append(PBSAFrame(terms[0], terms[1], terms[2], rec, lig))
     return out
 
@@ -249,14 +333,16 @@ def pbsa_solvation_frame(
     gamma: float = SITKOFF_GAMMA,
     beta: float = SITKOFF_BETA,
     probe: float = 1.4,
+    dielectrics: Optional[npt.ArrayLike] = None,
 ) -> PBSAFrame:
     """Single-trajectory MM-PBSA solvation terms for one frame.
 
     All three PB calculations share one grid (built from the complex unless
     ``grid`` is given), so discretisation errors cancel in the binding
-    difference. ``receptor_atoms`` defaults to every atom not in the ligand.
+    difference. ``receptor_atoms`` defaults to every atom not in the ligand;
+    ``dielectrics`` as for :func:`pbsa_solvation_frames`.
     """
     return pbsa_solvation_frames(
         solver, [coords], charges, radii, ligand_atoms, receptor_atoms,
-        grid=grid, workers=1, gamma=gamma, beta=beta, probe=probe,
+        grid=grid, workers=1, gamma=gamma, beta=beta, probe=probe, dielectrics=dielectrics,
     )[0]

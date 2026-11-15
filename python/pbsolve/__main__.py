@@ -12,7 +12,7 @@ import numpy as np
 
 from . import Solver, __version__, available_platforms, cuda_info, estimate_error, write_dx
 from .io import Molecule, frames, load
-from .mmpbsa import nonpolar_energy, pbsa_solvation_frames
+from .mmpbsa import nonpolar_energy, pbsa_solvation_frames, residue_dielectrics
 
 
 # ----------------------------------------------------------------- shared options
@@ -156,6 +156,29 @@ def _load(args: argparse.Namespace, need_coords: bool = True) -> Molecule:
     return mol
 
 
+def _residue_labels(mol) -> list[str]:  # noqa: ANN001
+    return [f"{c}:{n}:{i}{ic}" for c, n, i, ic in zip(mol.chains, mol.resnames, mol.resids, mol.icodes)]
+
+
+def _dielectrics(args: argparse.Namespace, mol) -> Optional[np.ndarray]:  # noqa: ANN001
+    """Atom dielectrics from --residue-dielectric (None without it)."""
+    if args.residue_dielectric is None:
+        return None
+    charged, neutral = args.residue_dielectric
+    return residue_dielectrics(mol.charges, _residue_labels(mol), charged=charged, neutral=neutral)
+
+
+def _add_dielectrics(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--residue-dielectric",
+        nargs=2,
+        type=float,
+        metavar=("CHARGED", "NEUTRAL"),
+        help="interior dielectric of the atoms of charged residues (net charge >= 0.5 e) and of all other atoms "
+        "instead of --pdie, which then applies outside the surface in the reference state",
+    )
+
+
 # ----------------------------------------------------------------- commands
 def _solvation(args: argparse.Namespace) -> int:
     if args.extrapolate is not None and args.placements < 2:
@@ -165,7 +188,8 @@ def _solvation(args: argparse.Namespace) -> int:
     coords, charges, radii = mol.coords, mol.charges, mol.radii
     solver = _solver(args, "apbs" if args.apbs_grid else None)
     grid = solver.make_grid(coords, radii)
-    res = solver.polar_solvation(coords, charges, radii, grid=grid)
+    eps = _dielectrics(args, mol)
+    res = solver.polar_solvation(coords, charges, radii, grid=grid, dielectrics=eps)
     out = {
         "file": args.input,
         "atoms": int(len(charges)),
@@ -180,9 +204,13 @@ def _solvation(args: argparse.Namespace) -> int:
         "dime": grid.dims,
         "fine_spacing": grid.fine_spacing,
     }
+    if eps is not None:
+        out["residue_dielectric"] = args.residue_dielectric
     if args.placements:
         spacings = [args.spacing, args.extrapolate] if args.extrapolate is not None else None
-        est = estimate_error(solver, coords, charges, radii, placements=args.placements, spacings=spacings)
+        est = estimate_error(
+            solver, coords, charges, radii, placements=args.placements, spacings=spacings, dielectrics=eps
+        )
         out["placements"] = est.placements
         out["polar_mean_kcal_mol"] = est.energy
         out["polar_sd_kcal_mol"] = est.sd
@@ -191,7 +219,7 @@ def _solvation(args: argparse.Namespace) -> int:
             out["polar_extrapolated_kcal_mol"] = est.extrapolated
             out["extrapolation_spacings"] = est.spacings
     if args.dx:
-        pot, origin, spacing, _ = solver.potential(coords, charges, radii, grid=grid)
+        pot, origin, spacing, _ = solver.potential(coords, charges, radii, grid=grid, dielectrics=eps)
         write_dx(args.dx, pot, origin, spacing, comment=f"pbsolve {__version__} potential (kT/e) for {args.input}")
         out["dx"] = args.dx
     if args.json:
@@ -236,7 +264,8 @@ def _mmpbsa(args: argparse.Namespace) -> int:
     solver = _solver(args)
     if args.per_residue and solver.params["equation"] != "lpbe" and solver.params["ionic_strength"] > 0:
         raise ValueError("--per-residue needs equation 'lpbe' (or no ions): the nonlinear energy is not a sum over atoms")
-    labels = [f"{c}:{n}:{i}{ic}" for c, n, i, ic in zip(mol.chains, mol.resnames, mol.resids, mol.icodes)]
+    labels = _residue_labels(mol)
+    eps = _dielectrics(args, mol)
     residues: dict[str, list[tuple[float, float]]] = {}
     rows = []
     # Frames are solved in chunks so that `workers` calculations overlap
@@ -246,7 +275,9 @@ def _mmpbsa(args: argparse.Namespace) -> int:
     chunk: list = []
 
     def flush() -> None:
-        results = pbsa_solvation_frames(solver, chunk, mol.charges, mol.radii, lig, rec, workers=args.workers)
+        results = pbsa_solvation_frames(
+            solver, chunk, mol.charges, mol.radii, lig, rec, workers=args.workers, dielectrics=eps
+        )
         for f in results:
             row = {"frame": args.start + len(rows) * args.step, **f.as_dict()}
             rows.append(row)
@@ -274,6 +305,10 @@ def _mmpbsa(args: argparse.Namespace) -> int:
     print(f"\n{len(rows)} frames (solvation terms only; add ΔE_MM from your MM engine), kcal/mol:")
     for k in ("delta_polar", "delta_nonpolar", "delta_solvation"):
         print(f"  {k:<16} {mean[k]:10.4f} ± {sd[k] / math.sqrt(len(rows)):.4f} (SEM), SD {sd[k]:.4f}")
+    if eps is not None:
+        k = "delta_reference"
+        print(f"  {k:<16} {mean[k]:10.4f} ± {sd[k] / math.sqrt(len(rows)):.4f} (SEM), SD {sd[k]:.4f}")
+        print("  (receptor–ligand interaction with the atom dielectrics; it replaces the force field's Coulomb term)")
     if args.csv:
         with open(args.csv, "w") as fh:
             fh.write(",".join(["frame", *keys]) + "\n")
@@ -327,6 +362,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metavar="SPACING",
         help="with --placements: repeat at this finer spacing and extrapolate the mean to zero spacing",
     )
+    _add_dielectrics(s)
     s.add_argument("--json", action="store_true")
 
     c = sub.add_parser("convert", help="write a PQR file from any supported input (charges + radii)")
@@ -359,6 +395,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="PB calculations solved concurrently (default: 2 on the CPU, 3 on CUDA; on CUDA at most as many as "
         "fit in the free GPU memory); results do not depend on it",
     )
+    _add_dielectrics(m)
     _add_solver(m)
 
     sub.add_parser("prep", help="PDB/mmCIF -> PQR: hydrogens, protonation, force field (see 'pbsolve prep -h')", add_help=False)

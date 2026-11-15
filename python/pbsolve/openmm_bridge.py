@@ -109,7 +109,11 @@ def positions_angstrom(positions: Union["unit.Quantity", npt.ArrayLike]) -> npt.
 
 
 class OpenMMPBSA:
-    """MM-PBSA solvation terms for an OpenMM complex (single-trajectory protocol)."""
+    """MM-PBSA solvation terms for an OpenMM complex (single-trajectory protocol).
+
+    ``dielectrics`` optionally gives every atom its own interior dielectric
+    (see :func:`pbsolve.residue_dielectrics`).
+    """
 
     def __init__(
         self,
@@ -122,6 +126,7 @@ class OpenMMPBSA:
         gamma: float = SITKOFF_GAMMA,
         beta: float = SITKOFF_BETA,
         probe: float = 1.4,
+        dielectrics: Optional[npt.ArrayLike] = None,
     ) -> None:
         if any(res.name.upper() in _WATER for res in topology.residues()):
             raise ValueError("explicit water found in the topology; strip solvent before MM-PBSA")
@@ -138,6 +143,7 @@ class OpenMMPBSA:
         self.receptor_atoms = None if receptor_atoms is None else np.asarray(receptor_atoms, dtype=np.int64)
         self.solver = solver if solver is not None else Solver()
         self.gamma, self.beta, self.probe = gamma, beta, probe
+        self.dielectrics = None if dielectrics is None else np.ascontiguousarray(dielectrics, dtype=np.float64)
 
     def frame(self, positions: Union["unit.Quantity", npt.ArrayLike]) -> PBSAFrame:
         """Solvation terms of one frame (OpenMM positions in any length unit, or a plain array in Å)."""
@@ -151,6 +157,7 @@ class OpenMMPBSA:
             gamma=self.gamma,
             beta=self.beta,
             probe=self.probe,
+            dielectrics=self.dielectrics,
         )
 
     def trajectory(self, frames: Iterable[Union["unit.Quantity", npt.ArrayLike]]) -> list[PBSAFrame]:

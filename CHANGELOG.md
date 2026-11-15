@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+
+- Interior dielectric per atom: `dielectrics=` on `Solver.polar_solvation`,
+  the batch methods, `potential`, `maps`, `pbsa_solvation_frame(s)`,
+  `OpenMMPBSA` and `estimate_error` (DelPhi-style multiple dielectrics; not
+  an APBS option). A face inside the molecular surface takes the dielectric
+  of the atom whose power cell contains it; the reference state keeps the
+  interior and has `pdie` outside. `pbsolve.residue_dielectrics` gives one
+  value to charged residues and another to the rest, and
+  `pbsolve solvation`/`mmpbsa --residue-dielectric CHARGED NEUTRAL` use it.
+  Equal values reproduce `pdie` bit for bit; one and two spheres with their
+  own interiors converge to the exact solutions.
+- `SolvationTerms.reference` and `PBSAFrame.delta_reference`: the
+  receptor–ligand interaction in the reference state (Coulomb/`pdie` to
+  0.03 % for 1YCR; with atom dielectrics the screened interaction that
+  replaces the force field's Coulomb term). `as_dict()` and the
+  `pbsolve mmpbsa` CSV have a `delta_reference` column.
+- `two_sphere_energy(sphere_pdie=...)`: a dielectric for each sphere.
+
 ## 0.0.4 — 2026-11-15
 
 ### Added

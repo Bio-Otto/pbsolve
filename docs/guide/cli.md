@@ -89,6 +89,7 @@ and the [solver options](#solver-options), and:
 | `--apbs-grid` | print the equivalent APBS grid keywords (implies `--dime-policy apbs`) |
 | `--placements` | also solve on this many grid placements (at least 2) and report the mean, sd and sem of ΔG_polar ([error estimates](solver.md#error-estimates)) |
 | `--extrapolate` | with `--placements`: repeat at this finer spacing and extrapolate the mean to zero spacing |
+| `--residue-dielectric` | two values, CHARGED and NEUTRAL: the interior dielectric of the atoms of charged residues (net charge at least 0.5 e) and of all other atoms, in place of `--pdie`, which then applies outside the surface in the reference state ([interior dielectric per atom](model.md#interior-dielectric-per-atom)) |
 | `--json` | print the results as JSON |
 
 ```bash
@@ -133,6 +134,7 @@ and:
 | `--csv` | write the per-frame terms to this CSV file |
 | `--per-residue` | write every residue's share of ΔG_polar, ΔG_nonpolar and ΔG_solv of binding (mean over frames, and the standard error of the total) to this CSV file; residues are named `chain:resname:resid`; β belongs to no residue |
 | `--workers` | calculations solved at once (default 2 on the CPU, 3 on CUDA, fewer if the GPU memory is short); results do not depend on it |
+| `--residue-dielectric` | two values, CHARGED and NEUTRAL: the interior dielectric of the atoms of charged residues (net charge at least 0.5 e) and of all other atoms, in place of `--pdie`, which then applies outside the surface in the reference state ([interior dielectric per atom](model.md#interior-dielectric-per-atom)); the summary then also gives `delta_reference`, the receptor–ligand interaction that replaces the force field's Coulomb term (always a column of `--csv`) |
 
 ## `pbsolve prep`
 
