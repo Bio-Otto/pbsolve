@@ -405,7 +405,7 @@ of Gaussian-dielectric pKa methods (4.21).
 ### First public release
 
 v0.1–v0.3 are done; the repository is public since 2026-11-15, and the only
-tag is v0.0.2. The first release makes the work usable and checkable by
+tag is v0.0.3. The first release makes the work usable and checkable by
 others. Releases are vX.Y.0 tags that pass CI (decision 5, section 8).
 
 **R1 Public repository and documentation site.** The repository is public
@@ -463,7 +463,7 @@ stays a research topic. Parameters fitted on openly licensed data only (e.g. Fre
 
 **4.15 Per-residue and pairwise decomposition** of polar and nonpolar terms
 (standard in MM-PBSA analysis tools [Miller et al. 2012; Valdés-Tresanco et al. 2021]).
-*Status: per-atom and per-residue done (unreleased); pairwise remains.*
+*Status: per-atom and per-residue done (0.0.3); pairwise remains.*
 * Every polar energy comes per atom, ½ q_i φ_rf(r_i) with the energy's charge
   weights (`PolarResult.atom_energies`), and sums to ΔG_polar; the binding
   terms per atom and residue (`PBSAFrame.atom_terms`, `residue_terms`,

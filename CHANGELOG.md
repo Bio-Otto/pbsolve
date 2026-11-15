@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.3 — 2026-11-15
+
 ### Added
 
 - Per-atom and per-residue decomposition: `PolarResult.atom_energies` (every
