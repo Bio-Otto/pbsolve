@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.2 — 2026-11-15
+
 ### Added
 
 - Geometric multigrid preconditioner for CG (new module `multigrid` in

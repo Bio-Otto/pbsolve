@@ -168,7 +168,7 @@ tests of the readers and the structure preparation against reference tools.
 
 ## Status
 
-v0.0.1 is an early preview; the API may still change. Validation numbers and
+pbsolve is an early preview (0.0.x); the API may still change. Validation numbers and
 the GPU status are in `docs/VALIDATION.md`, the design in `docs/ARCHITECTURE.md`,
 the development plan in `docs/ROADMAP.md`, packaging in `docs/PACKAGING.md`.
 

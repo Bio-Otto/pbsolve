@@ -79,7 +79,7 @@ kernels with the same operation order (invariant 5).
 *Evidence:* iteration count independent of spacing (0.5 → 0.2 Å); ≥ 5× fewer
 operator applications than Jacobi-PCG at 0.25 Å; energies unchanged to the
 solver tolerance; CPU/CUDA agreement < 1e-8; determinism preserved.
-*Status: done (unreleased).* Chebyshev smoothing [Adams et al. 2003] instead
+*Status: done (0.0.2).* Chebyshev smoothing [Adams et al. 2003] instead
 of Gauss–Seidel (no colouring, same kernels for 7- and 27-point operators),
 per-axis coarsening for any grid size. Measured: 10–19 CG iterations
 independent of spacing (Jacobi 155–688), 5.4–7.7× faster full ΔG_polar on the
@@ -91,7 +91,7 @@ CUDA ≤ 3e-14, thread-count independent, APBS parity unchanged
 than whichever `libnvrtc.so` the loader finds first, and compile to CUBIN for
 the detected architecture, so a newer NVRTC works with an older driver (open
 issue in `docs/VALIDATION.md`). Run the CUDA 12 build.
-*Status: done (unreleased).*
+*Status: done (0.0.2).*
 * NVRTC is loaded by pbsolve itself: `$PBSOLVE_NVRTC`, then the versioned
   name of the build's major, then `libnvrtc.so`. The Python preload also finds
   pip's `nvidia-cuda-nvrtc*`.
@@ -106,7 +106,7 @@ issue in `docs/VALIDATION.md`). Run the CUDA 12 build.
 either as one batched kernel launch over small grids or concurrently in streams.
 *Evidence:* frames per second on a public complex for 1, 8 and 64 frames per
 batch; identical energies to single-frame solves.
-*Status: done (unreleased).*
+*Status: done (0.0.2).*
 * Concurrent workers (`batch.rs`), each with its own backend, its own CUDA
   stream and a private share of the CPU threads.
 * `polar_solvation_many`, `pbsa_solvation_frames` and `pbsolve mmpbsa
@@ -128,7 +128,7 @@ batch; identical energies to single-frame solves.
 iterative refinement, the arrangement analysed for multigrid by McCormick,
 Benzaken and Tamstorf [2021a, b]. Optional, off by default until the
 benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
-*Status: done (unreleased); the default since the robustness sweep below.*
+*Status: done (0.0.2); the default since the robustness sweep below.*
 * `preconditioner="multigrid-f32"`: an f32 V-cycle inside f64 flexible CG.
   The kernels are generic over f64/f32, and the f64 results are unchanged bit
   for bit.
@@ -146,7 +146,7 @@ benchmark shows equal energies (|ΔG difference| < 1e-6 relative).
   side, multigrid setup) take 75–78 % of a calculation; the CG solve is
   the smaller part.
 
-**Host stages** (follow-up of 4.4). *Status: done (unreleased).*
+**Host stages** (follow-up of 4.4). *Status: done (0.0.2).*
 * Faster maps, `mdh` sums, operator setup and host transfers, with results
   identical bit for bit: 1.06–1.26× per calculation (CPU), 1.03–1.19× (CUDA).
 * Optional `bcfl="mdh-fast"`: the `mdh` sum is evaluated exactly at Chebyshev
@@ -210,7 +210,7 @@ grid self-energy, so the reference solve is no longer needed, and accuracy
 improves at coarse spacing. It is also the formulation that interface methods
 and forces build on. The current "same grid" reference-state method stays
 available and is the default until the new path is validated.
-*Status: done (unreleased) as `coulomb="analytic"`.*
+*Status: done (0.0.2) as `coulomb="analytic"`.*
 * u = v + χG with G the Coulomb potential in `pdie` and χ the nodes within
   max(1 Å, 2h) of an atom. The substitution is exact; the one approximation
   replaces the charges inside χ by the discrete source of G. The right-hand
@@ -232,7 +232,7 @@ available and is the default until the new path is validated.
 
 **4.6 Charge assignment.** B-spline spreading (smoother source, less
 grid-position dependence) next to trilinear, selectable per run.
-*Status: done (unreleased); the expected gain did not appear.*
+*Status: done (0.0.2); the expected gain did not appear.*
 * `chgm="spl2"` and `"spl4"`: the order-3 and order-5 B-splines (3 and 5
   nodes per axis) that APBS calls cubic and quintic, with APBS' weights and
   energy rule. Maps and energies agree with APBS 3.4.1 as for `spl0`.
@@ -246,7 +246,7 @@ grid-position dependence) next to trilinear, selectable per run.
 off-centre charges in a sphere, with and without salt [Kirkwood 1934]; two
 interacting spheres; the planar interface. Every discretisation must report
 its **observed convergence order** on these, not only the error at one spacing.
-*Status: Kirkwood sphere and two spheres done (unreleased); the planar
+*Status: Kirkwood sphere and two spheres done (0.0.2); the planar
 interface waits for a geometric surface input.*
 * `pbsolve.analytic.kirkwood_energy`: charges anywhere in a sphere, with salt
   beyond a Stern layer; checked against closed forms (Born, Born–Debye–Hückel,
@@ -282,7 +282,7 @@ intersections) comes from an analytic or level-set SES.
 *Evidence:* second-order convergence of the potential on 4.7; Born and
 Kirkwood energy errors < 0.5 % at 0.5 Å; grid-shift spread of ΔG_polar on a
 protein reduced at least 3× relative to v0.0.1.
-*Status: done (unreleased) as `interface="fractional"`; the other schemes
+*Status: done (0.0.2) as `interface="fractional"`; the other schemes
 were not needed.*
 * Faces cut by the surface get the harmonic average of `pdie` and `sdie`
   weighted by the exact lengths of their grid edge inside and outside the
@@ -304,7 +304,7 @@ were not needed.*
 uncertainty from grid-shift averaging and two-spacing extrapolation, so users
 can see whether the discretisation error matters next to the statistical
 error over frames.
-*Status: done (unreleased).*
+*Status: done (0.0.2).*
 * `pbsolve.estimate_error` and `pbsolve solvation --placements
   --extrapolate`: mean, sd and sem over grid placements, and the means at
   two spacings extrapolated to zero spacing at first order. `parts` covers
@@ -323,7 +323,7 @@ error over frames.
 linear solver, with damping for the exponential term [Holst & Saied 1995].
 Energy functional and convergence tests against the linearized equation at
 low potential.
-*Status: done (unreleased) as `equation="npbe"`, APBS `npbe`.*
+*Status: done (0.0.2) as `equation="npbe"`, APBS `npbe`.*
 * Newton from the linearized solution; each step is the linear solve with
   κ̄² replaced by N'(u), inexact [Dembo et al. 1982; Holst et al. 1994]
   and damped by halving until ‖F‖ decreases. Default tolerances: 15 instead
@@ -343,7 +343,7 @@ low potential.
 **4.11 Size-modified PB.** Finite ion size via the lattice-gas (Bikerman /
 Borukhov) free energy [Borukhov, Andelman & Orland 1997], uniform ion size
 first. Relevant for highly charged systems (nucleic acids, membranes).
-*Status: done (unreleased) as `equation="smpbe"` with `ion_size`, uniform
+*Status: done (0.0.2) as `equation="smpbe"` with `ion_size`, uniform
 size.*
 * The lattice denominator D = 1 − Σφ + Σφ e^{−qu} enters the ion term, its
   slope and the energy (ln D / N_A a³), on the `npbe` Newton path and its
@@ -364,7 +364,7 @@ dielectric-boundary formulation for finite-difference solvers [Cai et al.
 dynamics depends on this accuracy [Wang J et al. 2009].
 *Evidence:* forces agree with finite differences of the energy; momentum
 conservation; short NVE runs with OpenMM show bounded drift.
-*Status: done APBS-style (unreleased) as `Solver.polar_forces`, with APBS'
+*Status: done APBS-style (0.0.2) as `Solver.polar_forces`, with APBS'
 spline surfaces `surface="spl2"`/`"spl4"`; the rest remains.*
 * The spline surfaces [Im, Beglov & Roux 1998; Schnieders et al. 2007] give
   maps equal to APBS' to the 7 digits of its DX files.
@@ -388,7 +388,7 @@ which give a few-unit protein interior and a graded interface without an
 explicit surface [Grant, Pickup & Nicholls 2001; Li et al. 2013]. They are
 differentiable everywhere (good for forces and gradients) and are the basis
 of Gaussian-dielectric pKa methods (4.21).
-*Status: done (unreleased) as `surface="gauss"` with `gauss_sigma` and
+*Status: done (0.0.2) as `surface="gauss"` with `gauss_sigma` and
 `gauss_contour`; forces remain.*
 * The dielectric of Li et al. (2013) and the ions' Born penalty of Jia et al.
   (2017); maps equal the formulas to 1e-9.
@@ -405,7 +405,7 @@ of Gaussian-dielectric pKa methods (4.21).
 ### First public release
 
 v0.1–v0.3 are done; the repository is public since 2026-11-15, and the only
-tag is v0.0.1. The first release makes the work usable and checkable by
+tag is v0.0.2. The first release makes the work usable and checkable by
 others. Releases are vX.Y.0 tags that pass CI (decision 5, section 8).
 
 **R1 Public repository and documentation site.** The repository is public
@@ -450,7 +450,7 @@ cavity term plus an integral dispersion term, which models repulsive and
 attractive parts separately [Wagoner & Baker 2006; Tan, Tan & Luo 2007]. The
 coupling of polar and nonpolar terms [Dzubiella, Swanson & McCammon 2006]
 stays a research topic. Parameters fitted on openly licensed data only (e.g. FreeSolv [Mobley & Guthrie 2014]).
-*Status: the model of Wagoner & Baker done (unreleased) as
+*Status: the model of Wagoner & Baker done (0.0.2) as
 `pbsolve.apolar_energy`, as APBS `apolar`; the rest remains.*
 * Surface area, volume and the WCA dispersion integral follow APBS 3.4.1
   operation for operation: APBS' 11 alkane examples to every printed digit
