@@ -1,4 +1,4 @@
-# Read the Docs (free tier, once the repository is public). The same Sphinx
+# Read the Docs (free tier for public repositories). The same Sphinx
 # build runs in .github/workflows/docs.yml for GitHub Pages.
 version: 2
 

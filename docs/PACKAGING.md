@@ -25,8 +25,10 @@ run dependencies and inherits the automatic GPU selection.
 
 ## Publishing on conda-forge
 
-1. Tag a release on GitHub; replace `source: path:` in the recipe with the
-   release tarball `url` and `sha256`.
+1. Tag a release vX.Y.0 on GitHub: CI runs for such tags only and creates
+   the GitHub release when every job passes (patch tags vX.Y.1–vX.Y.9 run no
+   CI). Replace `source: path:` in the recipe with the release tarball `url`
+   and `sha256`.
 2. Open a PR to `conda-forge/staged-recipes` with `recipe/`.
 3. After merge, the feedstock CI builds every CPU/CUDA × Python × platform variant.
 

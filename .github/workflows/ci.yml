@@ -1,9 +1,12 @@
 name: CI
 
+# Runs only for a minor release (a tag vX.Y.0) and on demand. Patch versions
+# (vX.Y.1 to vX.Y.9) are tagged without CI; every tenth version is the next
+# vX.Y.0, which is released only when all jobs pass (job `release`).
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags: ["v*.*.0"]
+  workflow_dispatch:
 
 jobs:
   rust:
@@ -36,7 +39,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - uses: dtolnay/rust-toolchain@stable
-      - run: pip install "maturin>=1.9,<2" pytest numpy
+      - run: pip install "maturin>=1.9,<2" pytest numpy scipy
       # Linux/Windows: CUDA-enabled build, which must fall back to CPU on GPU-less runners.
       - if: runner.os != 'macOS'
         run: maturin build --release --features cuda-12 -o dist
@@ -52,7 +55,7 @@ jobs:
     runs-on: [self-hosted, linux, gpu]
     steps:
       - uses: actions/checkout@v4
-      - run: pip install "maturin>=1.9,<2" pytest numpy nvidia-cuda-nvrtc-cu12
+      - run: pip install "maturin>=1.9,<2" pytest numpy scipy nvidia-cuda-nvrtc-cu12
       - run: maturin build --release --features cuda-12 -o dist && pip install --find-links dist pbsolve
       - run: python -m pbsolve test
       - run: pytest -q tests/test_platforms.py tests/test_multigrid.py
@@ -60,3 +63,16 @@ jobs:
       - run: >-
           PBSOLVE_NVRTC="$(python -c 'import pbsolve; print(pbsolve._nvrtc_candidates(12)[0])')"
           cargo test -p pbsolve-cuda --features cuda-12 --test gpu
+
+  release:
+    # The GitHub release of a vX.Y.0 tag, created only after the jobs above passed.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: [rust, python]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."

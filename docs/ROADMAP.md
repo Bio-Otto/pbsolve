@@ -404,13 +404,13 @@ of Gaussian-dielectric pKa methods (4.21).
 
 ### First public release
 
-v0.1–v0.3 are done, but the repository is private and the only tag is
-v0.0.1. The first public release makes the work usable and checkable by
-others. Its timing and version number are decision 5 (section 8).
+v0.1–v0.3 are done; the repository is public since 2026-11-15, and the only
+tag is v0.0.1. The first release makes the work usable and checkable by
+others. Releases are vX.Y.0 tags that pass CI (decision 5, section 8).
 
-**R1 Public repository and documentation site.** Make the repository
-public; publish the Sphinx site (Read the Docs or GitHub Pages) with
-versioned documentation and install instructions; tag the release and
+**R1 Public repository and documentation site.** The repository is public
+(done, 2026-11-15). Publish the Sphinx site (Read the Docs or GitHub Pages)
+with versioned documentation and install instructions; tag the release and
 archive it with a DOI.
 *Evidence:* the site builds from the tag with `-W`, and every guide example
 runs.
@@ -590,9 +590,10 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
    shipping trained surrogate models.
 4. **Which second method first:** boundary elements (large systems, exact far
    field) or ddLPB (fast forces for MD).
-5. **Timing and version number of the first public release:** now, as
-   v0.1.0 (as planned for the documentation site) or v0.3.0 (the v0.1–v0.3
-   scope is done), or after v0.4, with the binding benchmark (4.19) to show.
+5. **Timing and version number of the first public release.** *Decided
+   (2026-11-15):* versions count v0.0.1, v0.0.2, … and the tenth is v0.1.0
+   instead of v0.0.10; CI runs only for vX.Y.0 tags (and on demand), which
+   are released when it passes. The repository is public since 2026-11-15.
 
 ## References
 
