@@ -25,6 +25,9 @@ solution methods and integrations can be added.
   cheaper.
 * **Automatic GPU** — the CUDA build loads the driver and NVRTC at runtime;
   without a GPU it transparently runs on the CPU (`platform="auto"`).
+* **Forces on the atoms** — `Solver.polar_forces` gives −dΔG_polar/dr on APBS'
+  smooth spline surfaces (`surface="spl2"`/`"spl4"`), split into charge–field,
+  dielectric-boundary and ionic-boundary parts as APBS `calcforce`.
 * **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for
   complex/receptor/ligand, OpenMM bridge, OpenDX maps. Trajectory frames are
   solved several at a time; results do not depend on the number of workers.

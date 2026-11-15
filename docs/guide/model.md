@@ -78,16 +78,25 @@ The derivation, the choice of $\chi$ and the related literature are in the
 ## Dielectric boundary
 
 `pdie` and `sdie` are the dielectric constants of solute and solvent. The
-boundary between them is sharp and is evaluated on the faces between grid
-nodes (one map per axis). `surface` defines it:
+boundary between them is evaluated on the faces between grid nodes (one map
+per axis). `surface` defines it:
 
 | `surface` | Boundary | APBS |
 |---|---|---|
 | `"mol"` (default) | solvent-excluded surface: the region a probe sphere of radius `srad` (Å) cannot reach, built from surface points at density `sdens` (points per Å²) | `srfm mol`; the maps are identical node for node |
 | `"vdw"` | union of the atomic spheres (`"mol"` with a zero probe) | `srfm mol` with `srad 0` |
 | `"harmonic"` | molecular surface evaluated on the nodes; the face values are harmonic means of the neighbouring nodes (smoother) | none; this is **not** APBS `srfm smol` |
+| `"spl2"`, `"spl4"` | atomic spheres smoothed over ±`swin` (Å, default 0.3) by a cubic or septic switch: ε rises continuously from `pdie` to `sdie`, and the ion accessibility from 0 to 1 | `srfm spl2`, `spl4`; the maps are identical to the 7 digits APBS writes |
 
 The defaults `srad=1.4` and `sdens=10.0` are APBS' usual values.
+
+The spline surfaces make the energy a smooth function of the atom positions,
+which [forces](#forces) need. They are a different model: no probe fills the
+crevices, and the smoothing moves the effective boundary about 0.2 Å inwards.
+1YCR has ΔG_polar −1231 kcal/mol with `"mol"`, −1754 with `"vdw"` and
+−2609 with `"spl2"`. Use radii fitted for a smooth boundary with them. Every
+charged atom should lie inside the solute: a charge with radius 0 near the
+surface feels a grid-dependent self-energy.
 
 With `"mol"` and `"vdw"`, `interface` sets the dielectric of the faces the
 surface cuts:
@@ -241,3 +250,46 @@ print(f"SASA {area.sum():.0f} Å², non-polar term {nonpolar:.2f} kcal/mol")
 
 [Trajectories and MM-PBSA](many.md) combines both terms for complex, receptor and
 ligand.
+
+## Forces
+
+{py:meth}`~pbsolve.Solver.polar_forces` computes ΔG_polar and the force
+−dΔG_polar/dr on every atom (kcal/mol/Å), as APBS `calcforce`. It needs a
+spline surface:
+
+```python
+smooth = pbsolve.Solver(ionic_strength=0.15, surface="spl2", chgm="spl2")
+f = smooth.polar_forces(coords, charges, radii)
+print(f"ΔG_polar {f.energy:.2f} kcal/mol, largest force {abs(f.forces).max():.2f} kcal/mol/Å")
+```
+
+The free energy is a functional of the potential that is stationary at the
+solution, so the force is its derivative at the converged potential, in three
+parts [Gilson et al. 1993; Im, Beglov & Roux 1998]:
+
+| part | attribute | origin |
+|---|---|---|
+| charge–field | `f.qf` | the reaction field at the charges (the derivative of the charge-assignment weights) |
+| dielectric boundary | `f.db` | the field's pressure on the moving dielectric boundary |
+| ionic boundary | `f.ib` | the ions' osmotic pressure on the moving ion-accessibility boundary |
+
+`f.forces` is their sum, `f.result` the energy calculation.
+
+* **Exactness.** Each part is the solvated state's minus the reference
+  state's, from the finest grid level. As in APBS the coarser levels and the
+  boundary values do not contribute. On one grid with `bcfl="zero"` the
+  forces are the exact gradient of the discrete energy (to 4e-9); with
+  `mdh` the neglected boundary term is ~1e-5 of the largest force.
+* **APBS.** The forces agree with APBS 3.4.1 to ≤ 4e-7 of the largest force
+  (≤ 6e-10 with `bcfl zero`), for `lpbe` and `npbe`; `smpbe` works as well.
+* **Accuracy.** The charge–field part is accurate to a few per cent. The
+  dielectric-boundary part carries the grid's noise: the net force on an
+  isolated molecule, zero in the continuum, scatters by 5–10 % of the
+  boundary force over grid placements. A spacing well below 2·`swin`
+  reduces it.
+* **Grid.** Every atom's boundary force needs the finest grid to extend
+  radius + `swin` + `srad` and one node beyond the atom; pbsolve fails
+  rather than dropping the force, as APBS does.
+
+The [validation record](../VALIDATION) has the derivation and the checks
+(finite differences, APBS, a charge in a dielectric sphere).

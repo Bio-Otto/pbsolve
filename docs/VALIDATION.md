@@ -49,6 +49,7 @@ should update the status table below.
 |---|---|
 | Born ion, `mol`, h = 0.500 / 0.333 / 0.250 / 0.200 Å | −4.73 % / −1.08 % / −1.27 % / −0.94 % vs analytic (−81.96 kcal/mol); converging overall, not monotonically (before the APBS-exact surface: −4.73 / −1.09 / −1.23 / −0.71 %) |
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
+| Spline surfaces and forces (unreleased): `surface="spl2"`/`"spl4"`, `Solver.polar_forces` | APBS 3.4.1 spline maps equal to the 7 digits of its DX files, energies ≤ 1e-9 (solvated) and 3e-10 (ΔG, `bcfl zero`) in APBS units; forces (qf, db, ib; `lpbe`, `npbe`, `smpbe`) = the exact gradient of the discrete energy on one level with `bcfl zero` (2e-9 to 4e-9), APBS `calcforce comps` to ≤ 4e-7 of the largest force (≤ 6e-10 with `zero`); a charge in a dielectric sphere: Kirkwood's force at the surface's Born radius to 0.08 %, momentum balanced to 1 %; db scatters 5–10 % over grid placements; spline surfaces are a different model (Born −11…−16 %, 1YCR −2609 vs −1231 kcal/mol with `mol`); 14/14 mutations; default path bit-identical; see *Spline surfaces and forces* |
 | Size-modified PB (unreleased): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (unreleased): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (unreleased): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -2639,6 +2640,236 @@ calculation, or a batch worker, sets aside. The first version needed 10:
 Reproduce: `pbsolve apbs compare complex.pqr --ionic-strength 0.15
 --equation npbe --spacing 0.5`; `pytest tests/test_apbs_parity.py -k
 nonlinear`.
+
+## Spline surfaces and forces (`surface="spl2"`/`"spl4"`, `Solver.polar_forces`)
+
+**Change.**
+* **Surfaces.** `surface="spl2"` and `"spl4"` with `swin` (Å, default 0.3):
+  APBS' spline surfaces (`srfm spl2`, `spl4`), smooth in the atom positions.
+* **Forces.** `Solver.polar_forces(coords, charges, radii)` returns a
+  `PolarForces`: ΔG_polar, the force on every atom (kcal/mol/Å) and its
+  charge–field (`qf`), dielectric-boundary (`db`) and ionic-boundary (`ib`)
+  parts, as APBS `calcforce comps`.
+* **APBS.** `pbsolve apbs compare --forces` compares the forces; `--surface
+  spl2|spl4` and `--swin` the surfaces; APBS inputs with `srfm spl2/spl4` are
+  read.
+* **Defaults unchanged.** `mol` stays the default; the default path is
+  bit-identical, and `polar_forces` gives `polar_solvation`'s energy bit for
+  bit.
+
+### The spline surfaces
+
+**Method.** Every atom of radius r has a switching function S(d) of the
+distance d to its centre that rises from 0 at r − w to 1 at r + w (w =
+`swin`). The solvent fraction is H = Π_atoms S, the face dielectric ε = pdie
++ (sdie − pdie) H, and the ion accessibility K the same product with
+r + r_ion. The smooth boundary is what makes the energy differentiable in the
+atom positions [Im, Beglov & Roux 1998]. `spl2` uses the cubic ¾ s²/w² − ¼
+s³/w³ of s = d − r + w (C¹). `spl4` uses the septic smoothstep with three
+vanishing derivatives, which APBS added for multipole force fields
+[Schnieders et al. 2007]. The maps follow APBS' `fillcoCoefSpline` and
+`fillcoCoefSpline4` operation for operation:
+* the atoms in order;
+* the guards that stop multiplying once a value is ≤ 1e-12;
+* atoms off the box skipped;
+* `spl4`'s monomial evaluation, which squares the distance differently for
+  the x/y and the z faces.
+
+**APBS' rounding in `spl4`.** APBS evaluates the septic in monomials of d
+with coefficients up to 2e5 (atoms) and 1e7 (atom plus ion radius). It
+therefore loses up to 7 digits: 5e-10 for r = 1.7 Å, 2e-7 for the ion map
+with r = 3.7 Å (measured against the closed form 35t⁴ − 84t⁵ + 70t⁶ − 20t⁷).
+pbsolve reproduces this to keep APBS' maps.
+
+**APBS 3.4.1** (synthetic 30-atom molecule, 0.6 Å, `pbsolve apbs compare`):
+
+| case | partial faces | max \|Δε\| | max \|ΔK\| | solvated energy (APBS units) | ΔG_polar (APBS units) |
+|---|---|---|---|---|---|
+| `spl2`, 0.15 M, `mdh` | 1773 | 5.0e-6 | 5.0e-8 | 1.0e-9 | −6.8e-7 |
+| `spl4`, 0.15 M, `mdh` | 1759 | 5.0e-6 | 5.0e-8 | 6.0e-10 | −7.1e-7 |
+| `spl2`, `swin` 0.5, pdie 2, 0.1 M, `zero` | 2933 | 5.0e-6 | 5.0e-8 | −3.9e-10 | −1.3e-9 |
+| `spl4`, `chgm spl2`, 0.1 M, `zero` | 1759 | 5.0e-6 | 5.0e-8 | 8.4e-12 | −3.1e-10 |
+
+* **Maps.** No face or node differs by more than half of the last digit APBS
+  writes to its DX files (7 significant digits).
+* **Energies.** With `bcfl zero` ΔG_polar agrees to 3e-10. With `mdh` the
+  remaining 7e-7 is the reference state's boundary constants, as for `mol`.
+  `npbe` on `spl2` agrees as well.
+
+**A different model.** The smooth boundary moves the dielectric jump inwards:
+ε rises fast once S > 0, so the effective sharp boundary lies near r − 0.7w.
+
+| Born ion (a = 2 Å) | 0.5 Å | 0.333 Å | 0.25 Å | 0.2 Å |
+|---|---|---|---|---|
+| `spl2` | −16.49 % | −14.56 % | −13.73 % | −14.07 % |
+| `spl4` | −13.49 % | −12.22 % | −11.01 % | −11.09 % |
+
+(`mol`, `harmonic` and `mol+frac` unchanged.) A 6 Å sphere has the Born
+radius 5.77 Å (`spl2`) and 5.82 Å (`spl4`) at 0.35 Å.
+* **Proteins.** With van der Waals spheres and no probe, crevices count as
+  solvent. 1YCR has ΔG_polar −1231.3 (`mol`), −1754.1 (`vdw`) and −2609.0
+  kcal/mol (`spl2`, 0.5 Å).
+* **Radii.** As in APBS, spline surfaces need radii fitted for them (for
+  example [Nina, Im & Roux 1999] for a smoothed boundary); with `mol` radii
+  they are not an accuracy option.
+* **Exposed charges.** A charged atom whose own position has H > 0 (a radius-0
+  atom near the surface) feels a grid-dependent self-energy. The synthetic
+  molecule's atom 5 (radius 0, H = 0.36) has forces of 40, 80, 128, 134 and
+  63 kcal/mol/Å in changing directions on five grids, and ΔG_polar runs from
+  −412 to −485 kcal/mol as h → 0. 1YCR's 18 radius-0 hydrogens are buried (H
+  = 0).
+
+### Forces
+
+**Method.** pbsolve's free energy is the functional of the discrete
+potential ([`nonlinear.rs`](../crates/pbsolve-core/src/nonlinear.rs); for the
+linearized equation with the ion density ½u²):
+
+G(u; R) = Σ_n q_n(R) u_n − ½ Σ_faces c_f ε_f(R) (Δu_f)² / 4π l_B − V Σ_n κ̄²_n(R) ρ(u_n) / 4π l_B.
+
+It is stationary in u at the solution, so −dG/dR is the explicit derivative
+at fixed u [Gilson et al. 1993; Im, Beglov & Roux 1998]:
+* **qf** = −q ∇_R Σ_n W_n(R) u_n, the derivative of the charge-assignment
+  weights (`spl0`: trilinear; `spl2`, `spl4`: the B-splines and their
+  derivatives);
+* **db** = ½ Σ_faces c_f ∂ε_f/∂R (Δu_f)² / 4π l_B, with ∂H_f/∂R_a = H_f ∇ ln
+  S_a;
+* **ib** = V Σ_n ∂κ̄²_n/∂R ρ(u_n) / 4π l_B: ρ = ½u² (`lpbe`), the Boltzmann
+  terms (`npbe`), ln D / N_A a³ (`smpbe`).
+
+**Scope.** The forces come from each state's finest level, solvated minus
+reference (APBS `print force 1 - 2`). The coarser levels and the boundary
+values' dependence on the atoms are left out, as in APBS. The loops, node
+ranges and sums follow `qfForceSpline1/2/4`, `Vpmg_dbForce` and
+`Vpmg_ibForce`, with two deliberate differences:
+* Where APBS sets an atom's force to zero because the atom is too close to
+  the box edge, pbsolve fails and asks for a larger grid.
+* APBS' choice to set a trilinear qf component to zero when the atom sits
+  exactly on a grid line is kept.
+
+**The exact gradient.** On one level with `bcfl zero` the forces are the
+derivative of the discrete energy. Central differences of `polar_solvation`,
+Richardson-extrapolated, agree to 1.7e-9 to 4e-9 of the largest force
+(`forces.rs` tests, 4 atoms, a non-cubic 41³ grid):
+* `lpbe` with `spl0` and `spl2` charges;
+* `npbe` and `smpbe` with charges × 6;
+* every term contributes.
+
+On `spl4` the agreement is 6e-7 (APBS' map rounding). With `mdh` the
+neglected boundary term is 7e-5 (fadd 10 Å) and 5e-6 (fadd 20 Å) of the
+largest force (synthetic molecule).
+
+**APBS 3.4.1** (`calcforce comps`, `print force solvated - reference`;
+synthetic molecule, 0.6 Å, maximum difference per term over all atoms
+relative to the largest force, APBS units):
+
+| case | largest \|F\| (kJ/mol/Å) | qf | db | ib | total |
+|---|---|---|---|---|---|
+| `spl2`, `chgm spl2`, 0.15 M, `mdh` | 242.3 | 2.4e-7 | 1.8e-9 | 7.2e-10 | 2.4e-7 |
+| `spl2`, `chgm spl0`, 0.15 M, `zero` | 792.1 | 5.7e-10 | 2.3e-10 | 1.4e-10 | 4.3e-10 |
+| `spl4`, `chgm spl4`, `swin` 0.4, pdie 2, 0.1 M, `mdh` | 74.7 | 3.8e-7 | 1.9e-9 | 1.9e-9 | 3.8e-7 |
+| `spl2`, `chgm spl2`, `npbe`, 0.15 M, `mdh` | 242.3 | 2.4e-7 | 4.9e-10 | 6.5e-10 | 2.4e-7 |
+
+With `bcfl zero` every term agrees to ≤ 6e-10. With `mdh` qf carries the
+reference state's boundary constants (as the energies do); db and ib agree
+to ~1e-9. APBS also computes forces on the finest levels only (one force
+calculation per state).
+
+**A charge in a dielectric sphere** (Kirkwood; analytic). A unit charge
+2.5 Å off the centre of an uncharged sphere (radius 6 Å, pdie 2, sdie 78.54;
+0.35 Å, mean of 4 grid placements). The charge is pushed outwards, the sphere
+the other way:
+
+| surface | force on the charge | Kirkwood at the Born radius | Kirkwood at 6 Å | force on the sphere | net force |
+|---|---|---|---|---|---|
+| `spl2` | 3.1416 ± 0.034 | 3.1394 (5.773 Å) | 2.7037 | −3.1081 | +0.034 |
+| `spl4` | 3.0452 ± 0.041 | 3.0428 (5.820 Å) | 2.7037 | −3.0650 | −0.020 |
+
+(kcal/mol/Å; the Born radius is that of the same sphere's Born energy on
+the same grids.)
+* **qf against Kirkwood.** The reaction-field force agrees with Kirkwood's to
+  0.07–0.08 % once the boundary is placed where the surface puts it.
+* **Momentum.** The sphere's dielectric-boundary force balances it to 1 %.
+  The forces across the axis stay below 0.06.
+
+**Translation invariance.** The net force on an isolated solute vanishes in
+the continuum. On a grid it measures the discretisation error (the same
+sphere and charge, 8 placements):
+
+| `swin` | h (Å) | force on the charge | its sd | net force | its sd |
+|---|---|---|---|---|---|
+| 0.3 | 0.5 | 3.175 | 0.092 | −0.072 | 0.319 |
+| 0.3 | 0.35 | 3.134 | 0.032 | +0.099 | 0.155 |
+| 0.3 | 0.25 | 3.122 | 0.042 | −0.056 | 0.163 |
+| 0.6 | 0.5 | 3.700 | 0.111 | +0.088 | 0.463 |
+| 0.6 | 0.35 | 3.653 | 0.062 | −0.004 | 0.240 |
+| 0.6 | 0.25 | 3.641 | 0.052 | −0.031 | 0.122 |
+
+* **qf is accurate** to a few per cent per placement.
+* **db is noisy.** It is the small difference of large pressures over the
+  whole surface, so it carries the derivative of the grid's placement noise
+  in the energy: 5–10 % of the sphere's force per placement. It shrinks
+  with h only once h is well below 2w. This is the inaccuracy of
+  finite-difference dielectric-boundary forces that Cai et al. (2011) address
+  with a different discretisation of the boundary force (not done).
+
+**Checks:**
+* Rust:
+  * `spline.rs` (3 tests): the switches against their closed forms, ∇ ln S
+    against differences, the maps against an independent product;
+  * `forces.rs` (3 tests): the exact gradient above, and qf in a linear
+    potential (−q∇u exactly for every `chgm`; zero on a grid line, as APBS);
+  * the B-spline derivatives against differences.
+* `tests/test_forces.py` (8 tests, 10 s):
+  * the API and the energy equality;
+  * the errors (sharp surfaces, `coulomb="analytic"`, atoms near the grid
+    edge);
+  * the gradient in kcal/mol/Å;
+  * Kirkwood and momentum for `spl2` and `spl4`;
+  * the spline maps and parameters;
+  * the command line;
+  * CUDA = CPU to 1e-9 (forces of 1YCR on both platforms differ by 5.6e-12
+    kcal/mol/Å).
+* `tests/test_apbs_parity.py`:
+  * maps and energies for `spl2`/`spl4` (`lpbe`, `npbe`) and an APBS input
+    with `srfm spl4`;
+  * forces in 4 cases and through the command line.
+* Mutations caught: 14/14:
+  * db (factor, face, a dropped face, loop range);
+  * ib (factor, ion radius, nonlinear density);
+  * qf (sign, spacing);
+  * ∇ ln S (sign, window);
+  * the ion map's switch;
+  * the reference state's forces added instead of subtracted.
+* Default path: the fingerprint set is bit-identical on CPU and CUDA; the
+  existing rows of the Born table are unchanged.
+
+**Cost** (0.15 M, 0.5 Å, `chgm spl2` with `spl2`; seconds per calculation,
+minimum of 3). GROMACS shared the GPU and the CPU during these runs, so the
+absolute times are high; the differences between the columns are what matter:
+
+| | `mol` | `spl2` | `spl2` + forces | energy and force stage |
+|---|---|---|---|---|
+| 1YCR, CPU | 1.82 | 1.79 | 1.82 | 0.07 |
+| 1YCR, CUDA | 0.44 | 0.49 | 0.49 | 0.05 |
+| 5DK3, CUDA | 5.53 | 5.02 | 5.54 | 0.72 |
+
+* **Forces.** They add the download of both finest potentials and a host
+  pass over every atom's stencils: 2 % (1YCR) to 10 % (5DK3).
+* **Spline maps.** They are built on the host and cost about as much as the
+  molecular surface on the device.
+
+**Not done.**
+* The accurate dielectric-boundary force of Cai et al. (2011) and forces of
+  the reaction-field decomposition (4.5); forces of sharp surfaces (APBS
+  refuses them too).
+* The coarser levels' and the boundary's share of the force.
+* Forces along trajectories and molecular dynamics through OpenMM.
+
+Reproduce:
+* `cargo test -p pbsolve-core forces spline`;
+* `pytest tests/test_forces.py tests/test_apbs_parity.py -k "forces or spl"`;
+* `pbsolve apbs compare molecule.pqr --surface spl2 --chgm spl2 --forces`.
 
 ## Size-modified PB (`equation="smpbe"`)
 

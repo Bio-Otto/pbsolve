@@ -25,6 +25,8 @@ fn main() {
         (SurfaceMethod::Mol, InterfaceMethod::Sharp),
         (SurfaceMethod::HarmonicMol, InterfaceMethod::Sharp),
         (SurfaceMethod::Mol, InterfaceMethod::Fractional),
+        (SurfaceMethod::Spline2, InterfaceMethod::Sharp),
+        (SurfaceMethod::Spline4, InterfaceMethod::Sharp),
     ] {
         for h in [0.5, 0.35, 0.25, 0.2] {
             let params = PbParams {

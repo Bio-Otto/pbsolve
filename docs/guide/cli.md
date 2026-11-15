@@ -44,7 +44,8 @@ Commands that solve take these options; they are the
 | `--ionic-strength` | 0.0 | 1:1 salt (mol/L) |
 | `--ion-radius` | 2.0 | ion radius (Å) |
 | `--srad` | 1.4 | solvent probe radius (Å) |
-| `--surface` | `mol` | `mol`, `vdw` or `harmonic` |
+| `--surface` | `mol` | `mol`, `vdw`, `harmonic`, or the spline surfaces `spl2` and `spl4` (see [the model](model.md#dielectric-boundary)) |
+| `--swin` | 0.3 | with `--surface spl2`/`spl4`: half-width of the switching window (Å) |
 | `--interface` | `sharp` | dielectric of the faces the surface cuts: `sharp` (as APBS) or `fractional` (edge-weighted harmonic average, see [the model](model.md#dielectric-boundary)) |
 | `--equation` | `lpbe` | Poisson–Boltzmann equation of the solvated state: `lpbe` (linearized), `npbe` (nonlinear, as APBS) or `smpbe` (nonlinear with ions of finite size), see [the model](model.md#nonlinear-equation) |
 | `--ion-size` | 0 | with `--equation smpbe`: edge of the lattice cell one ion fills (Å) |
@@ -165,7 +166,9 @@ pbsolve reads (converted to PQR first).
 | `--coords`, `--radii`, `--keep-solvent`, `-I`, `--include`, `--ff` | as in the [input options](#input-options) |
 | `--platform`, `--spacing`, `--pdie`, `--sdie`, `--temperature`, `--ionic-strength`, `--ion-radius`, `--srad` | as in the [solver options](#solver-options) |
 | `--sdens` | surface point density (points per Å², default 10) |
-| `--surface` | `mol` (default) or `vdw`; `harmonic` has no APBS equivalent |
+| `--surface` | `mol` (default), `vdw`, `spl2` or `spl4`; `harmonic` has no APBS equivalent |
+| `--swin` | with `spl2`/`spl4`: half-width of the switching window (Å, default 0.3), written as APBS `swin` |
+| `--forces` | also compare the per-atom forces (APBS `calcforce comps`; needs `--surface spl2` or `spl4`) |
 | `--bcfl` | `mdh` (default), `mdh-fast` (pbsolve's interpolated `mdh`; APBS runs `mdh`), `sdh` or `zero` |
 | `--chgm` | charge assignment, `spl0` (default), `spl2` or `spl4`, written as APBS `chgm` |
 | `--equation` | `lpbe` (default) or `npbe`, written as the APBS keyword |

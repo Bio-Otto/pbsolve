@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT AND BSD-3-Clause
+// Portions derived from APBS 3.4.1 (vpmg.c: Vpmg_energy, Vpmg_extEnergy, Vpmg_setPart;
+// mypdec.c: the ion terms of Vc_vecpmg), Copyright (c) 2010-2022 Battelle Memorial Institute
+// and other APBS contributors, BSD-3-Clause. See THIRD_PARTY_NOTICES.md for the full license
+// text.
+
 //! Nonlinear Poisson–Boltzmann equation ([`Equation::Nonlinear`], APBS
 //! `npbe`).
 //!
@@ -167,7 +173,7 @@ impl IonTerms {
     /// The ion energy density / κ̄²: Σ_j (c_j / 2I)(e^{−q_j u} − 1) for point
     /// ions, ln D / (2I N_A a³) for finite-size ions [Borukhov et al. 1997].
     #[inline]
-    fn density(&self, u: f64) -> f64 {
+    pub(crate) fn density(&self, u: f64) -> f64 {
         if self.lattice > 0.0 {
             ion_sums(&self.species, u)[3].ln() / self.lattice
         } else {

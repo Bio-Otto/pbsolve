@@ -59,6 +59,11 @@ pub enum SurfaceMethod {
     /// harmonic mean of the two adjacent nodes (DelPhi/pbsa-style smoothing).
     /// Parity with APBS `srfm smol` is NOT claimed; see docs/VALIDATION.md.
     HarmonicMol,
+    /// APBS `srfm spl2`: van der Waals spheres smoothed by a cubic switch of
+    /// half-width `swin` ([`crate::spline`]); differentiable, so forces work.
+    Spline2,
+    /// APBS `srfm spl4`: the same with a septic switch.
+    Spline4,
 }
 
 impl SurfaceMethod {
@@ -67,8 +72,10 @@ impl SurfaceMethod {
             "mol" => Ok(Self::Mol),
             "vdw" => Ok(Self::Vdw),
             "harmonic" | "harmonic-mol" | "hmol" => Ok(Self::HarmonicMol),
+            "spl2" => Ok(Self::Spline2),
+            "spl4" => Ok(Self::Spline4),
             other => invalid(format!(
-                "unknown surface method '{other}' (expected 'mol', 'vdw' or 'harmonic')"
+                "unknown surface method '{other}' (expected 'mol', 'vdw', 'harmonic', 'spl2' or 'spl4')"
             )),
         }
     }
@@ -78,7 +85,14 @@ impl SurfaceMethod {
             Self::Mol => "mol",
             Self::Vdw => "vdw",
             Self::HarmonicMol => "harmonic",
+            Self::Spline2 => "spl2",
+            Self::Spline4 => "spl4",
         }
+    }
+
+    /// `spl2` or `spl4`: smooth in the atom positions.
+    pub fn is_spline(&self) -> bool {
+        matches!(self, Self::Spline2 | Self::Spline4)
     }
 }
 
@@ -294,6 +308,9 @@ pub struct PbParams {
     /// Surface sphere density in points/Å² (molecular surface construction).
     pub sdens: f64,
     pub surface: SurfaceMethod,
+    /// Half-width (Å) of the switching window of the spline surfaces
+    /// (APBS `swin`).
+    pub swin: f64,
     /// Dielectric of the faces the surface cuts (`mol` and `vdw` only).
     pub interface: InterfaceMethod,
     /// How ΔG_polar removes the Coulomb potential (reference solve or
@@ -325,6 +342,7 @@ impl Default for PbParams {
             srad: 1.4,
             sdens: 10.0,
             surface: SurfaceMethod::Mol,
+            swin: 0.3,
             interface: InterfaceMethod::Sharp,
             coulomb: CoulombMethod::Grid,
             equation: Equation::Linear,
@@ -387,8 +405,13 @@ impl PbParams {
         if self.srad < 0.0 || self.sdens <= 0.0 {
             return invalid("srad must be >= 0 and sdens > 0");
         }
-        if self.interface == InterfaceMethod::Fractional && self.surface == SurfaceMethod::HarmonicMol {
+        if self.interface == InterfaceMethod::Fractional
+            && !matches!(self.surface, SurfaceMethod::Mol | SurfaceMethod::Vdw)
+        {
             return invalid("interface 'fractional' needs surface 'mol' or 'vdw'");
+        }
+        if self.swin.is_nan() || self.swin <= 0.0 {
+            return invalid("swin must be positive");
         }
         if self.equation != Equation::Linear && self.coulomb == CoulombMethod::Analytic {
             return invalid(format!("equation '{}' needs coulomb 'grid'", self.equation.as_str()));

@@ -46,7 +46,8 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
     p.add_argument("--ionic-strength", type=float, default=0.0)
     p.add_argument("--ion-radius", type=float, default=2.0)
     p.add_argument("--srad", type=float, default=1.4)
-    p.add_argument("--surface", default="mol", choices=["mol", "vdw", "harmonic"])
+    p.add_argument("--surface", default="mol", choices=["mol", "vdw", "harmonic", "spl2", "spl4"])
+    p.add_argument("--swin", type=float, default=0.3, help="spl2/spl4 surfaces: half-width of the switching window (Å)")
     p.add_argument(
         "--interface",
         default="sharp",
@@ -118,6 +119,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         coulomb=args.coulomb,
         equation=args.equation,
         ion_size=args.ion_size,
+        swin=args.swin,
         bcfl=args.bcfl,
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,

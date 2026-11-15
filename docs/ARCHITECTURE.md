@@ -45,6 +45,11 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   outside the solute (chords through the solute spheres minus chords through
   the probe spheres) and gives cut faces the harmonic average weighted by
   them; `mark_map` first classifies the nodes whose edges cannot be cut.
+  `spl2` and `spl4` (`spline.rs`, host) are APBS' spline surfaces
+  (`fillcoCoefSpline`, `fillcoCoefSpline4`): ε = pdie + (sdie − pdie)·Π S_a
+  on the faces and the accessibility K = Π S_a(r + r_ion) on the nodes, with
+  each atom's cubic or septic switch over [r − swin, r + swin], in APBS'
+  order of atoms, products and guards.
 * **Ions:** κ̄² is zero inside `r_i + r_ion` (largest listed ion radius) of
   every atom with `r_i > 0`, marked the same way.
 * **Nonlinear PB** (`nonlinear.rs`): with `equation="npbe"` the solvated
@@ -58,9 +63,18 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   keeps 4 vectors beside the linear solve (`calculation_device_bytes`).
   `equation="smpbe"` divides the ion terms by the lattice denominator
   D = 1 − Σφ + Σφ e^{−qu} of finite-size ions and uses ln D for their energy;
-  with φ = 0 (point ions) D is exactly 1 and the code is that of `npbe`. The energy is APBS' functional
-  Σqu − E_ε − E_ion plus the coarser levels' outer terms
-  (`NonlinearLevel::external_terms`, APBS `Vpmg_extEnergy`).
+  with φ = 0 (point ions) D is exactly 1 and the code is that of `npbe`.
+  The energy is APBS' functional Σqu − E_ε − E_ion plus the coarser levels'
+  outer terms (`NonlinearLevel::external_terms`, APBS `Vpmg_extEnergy`).
+* **Forces** (`forces.rs`, `pb::polar_forces`): the explicit derivative of
+  each state's functional at its converged finest-level potential, read back
+  in full: charge–field (derivative of the `chgm` weights), dielectric
+  boundary (∂ε_f/∂R = (sdie − pdie) H_f ∇ ln S_a, `spline::LogGradient`) and
+  ionic boundary (∂κ̄²/∂R times the ion density ½u², the Boltzmann terms or
+  ln D). Solvated minus reference, on the host, parallel over atoms,
+  following APBS `qfForceSpline1/2/4`, `Vpmg_dbForce`, `Vpmg_ibForce`; it
+  needs a spline surface. Without forces `polar` reads only the charged
+  nodes, as before.
 * **Coulomb part** (`coulomb.rs`): with `coulomb="analytic"` the finest level
   solves A v = χ·A_p G − A(χG) for v = u − χG, where G is the Coulomb
   potential in `pdie` and χ the interior nodes within max(1 Å, 2h) of an

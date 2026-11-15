@@ -1,9 +1,11 @@
 # Comparing with APBS
 
-With `surface="mol"` and `bcfl` `"mdh"`, `"sdh"` or `"zero"`, pbsolve follows
-APBS 3.4.1 (`mg-auto`, `lpbe` or `npbe`, `srfm mol`, `chgm spl0`, `spl2` or `spl4`)
-operation for operation: its focusing grids, dielectric and ion maps are
-identical to APBS', and its energies agree to a few parts per million.
+With `surface="mol"`, `"spl2"` or `"spl4"` and `bcfl` `"mdh"`, `"sdh"` or
+`"zero"`, pbsolve follows APBS 3.4.1 (`mg-auto`, `lpbe` or `npbe`, `srfm mol`,
+`spl2` or `spl4`, `chgm spl0`, `spl2` or `spl4`) operation for operation: its
+focusing grids, dielectric and ion maps are identical to APBS', and its
+energies agree to a few parts per million. So do the forces on the atoms
+(`calcforce comps`) with the spline surfaces.
 `pbsolve.apbs` runs both programs on the same problem and shows where they
 differ, if they do. It needs APBS 3.4.1 on the `PATH`
 (`conda install -c conda-forge apbs=3.4.1`).
@@ -15,7 +17,8 @@ pbsolve apbs compare complex.pqr --spacing 0.5 --ionic-strength 0.15 --ligand-ch
 ```
 
 pbsolve writes an APBS input with its own settings, runs both programs and
-compares, in layers, so that a disagreement can be located:
+compares, in layers, so that a disagreement can be located (with `--forces`
+and a spline surface also the per-atom forces, see below):
 
 1. **grids**: the dimensions, spacings and centres APBS reports for every
    focusing level must equal pbsolve's;
@@ -92,6 +95,20 @@ units, and ΔΔG_polar of binding to 0.004 kcal/mol. A synthetic 30-atom
 molecule with crevices and zero-radius atoms, run with all three boundary
 conditions, both surfaces, 0 to 0.15 M salt and two or three focusing levels,
 gives identical maps as well (`tests/test_apbs_parity.py`).
+
+**Forces.** With `--surface spl2` (or `spl4`) and `--forces`, both programs
+also compute the force on every atom; the report gives the largest
+difference of each part (charge–field, dielectric boundary, ionic boundary)
+relative to the largest force:
+
+```bash
+pbsolve apbs compare molecule.pqr --surface spl2 --chgm spl2 --ionic-strength 0.15 --forces
+```
+
+On the synthetic molecule they agree to ≤ 4e-7 with `mdh` (the reference
+state's boundary constants, as in the energies) and to ≤ 6e-10 with `bcfl
+zero`, for `lpbe` and `npbe`. The spline maps agree with APBS' to the 7
+digits of its DX files, and the energies as with `mol`.
 
 Three larger proteins give the same picture:
 * **1HPV**, the HIV-1 protease dimer (3 137 atoms);

@@ -135,6 +135,29 @@ class PolarResult:
     platform: str
     """Platform the calculation ran on, "CPU" or "CUDA"."""
 
+class PolarForces:
+    """Polar solvation free energy and the forces on the atoms (:meth:`Solver.polar_forces`).
+
+    The forces are −dΔG_polar/dr of every atom in kcal/mol/Å, split as APBS
+    ``calcforce comps`` splits them. Each part is the solvated state's minus
+    the reference state's on the finest grid level.
+    """
+
+    energy: float
+    """Polar solvation free energy ΔG_polar in kcal/mol."""
+    forces: npt.NDArray[np.float64]
+    """Total force on every atom in kcal/mol/Å, shape (N, 3) (qf + db + ib)."""
+    qf: npt.NDArray[np.float64]
+    """Charge–field part, shape (N, 3), the reaction field acting on the charges."""
+    db: npt.NDArray[np.float64]
+    """Dielectric-boundary part, shape (N, 3), the field's pressure on the
+    smoothed dielectric boundary."""
+    ib: npt.NDArray[np.float64]
+    """Ionic-boundary part, shape (N, 3), the ions' osmotic pressure on the
+    ion-accessibility boundary."""
+    result: PolarResult
+    """The energy calculation (iterations, timings, grid)."""
+
 class Solver:
     """Linearized Poisson–Boltzmann solver with APBS ``mg-auto`` style focusing.
 
@@ -175,9 +198,14 @@ class Solver:
         Surface sphere density in points per Å² (APBS ``sdens``).
     surface : str
         Dielectric boundary (APBS ``srfm``): "mol" (solvent-excluded
-        surface, as APBS ``srfm mol``), "vdw" (union of the atomic spheres)
-        or "harmonic" (molecular surface on the nodes with harmonic-mean face
-        values; not APBS ``smol``).
+        surface, as APBS ``srfm mol``), "vdw" (union of the atomic spheres),
+        "harmonic" (molecular surface on the nodes with harmonic-mean face
+        values; not APBS ``smol``), "spl2" or "spl4" (atomic spheres smoothed
+        over ±``swin`` by a cubic or septic switch, as APBS ``srfm spl2`` and
+        ``spl4``; smooth in the atom positions, as forces need).
+    swin : float
+        Half-width in Å of the switching window of the "spl2" and "spl4"
+        surfaces (APBS ``swin``).
     bcfl : str
         Boundary condition of the coarsest grid (APBS ``bcfl``): "mdh" (one
         Debye–Hückel sphere per atom), "mdh-fast" (the same sum interpolated
@@ -274,6 +302,7 @@ class Solver:
         coulomb: str = "grid",
         equation: str = "lpbe",
         ion_size: float = 0.0,
+        swin: float = 0.3,
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:
@@ -343,6 +372,48 @@ class Solver:
         ------
         ValueError
             If the arrays do not match or a charge lies outside the grid.
+        ConvergenceError
+            If a linear solve does not converge.
+        """
+    def polar_forces(
+        self,
+        coords: npt.ArrayLike,
+        charges: npt.ArrayLike,
+        radii: npt.ArrayLike,
+        grid: Optional[GridSpec] = None,
+    ) -> PolarForces:
+        """Polar solvation free energy ΔG_polar and the forces on the atoms.
+
+        Computes :meth:`polar_solvation` and, from each state's finest grid level,
+        the forces −dΔG_polar/dr as APBS ``calcforce`` does: the explicit derivative
+        of the free energy at the converged potential (charge–field,
+        dielectric-boundary and ionic-boundary parts). Like APBS it needs a surface
+        that is smooth in the atom positions, ``surface="spl2"`` or ``"spl4"``.
+        The coarser focusing levels and the boundary values do not contribute; on a
+        single grid with ``bcfl="zero"`` the forces are the exact gradient of the
+        discrete energy.
+
+        Parameters
+        ----------
+        coords : array_like, shape (N, 3)
+            Atom positions in Å.
+        charges : array_like, shape (N,)
+            Atomic charges in e.
+        radii : array_like, shape (N,)
+            Atomic radii in Å.
+        grid : GridSpec, optional
+            Grid of the calculation; by default :meth:`make_grid` of the atoms.
+
+        Returns
+        -------
+        PolarForces
+
+        Raises
+        ------
+        ValueError
+            If the surface is not "spl2" or "spl4", ``coulomb`` is not "grid", the
+            arrays do not match, or an atom lies too close to the edge of the
+            finest grid.
         ConvergenceError
             If a linear solve does not converge.
         """

@@ -1,6 +1,6 @@
 """Reciprocal validation against APBS.
 
-pbsolve and APBS (multigrid, ``lpbe`` or ``npbe``, ``srfm mol``, ``chgm spl0/spl2/spl4``) can be run
+pbsolve and APBS (multigrid, ``lpbe`` or ``npbe``, ``srfm mol/spl2/spl4``, ``chgm spl0/spl2/spl4``) can be run
 on the same problem in both directions:
 
 * :func:`compare` — pbsolve settings → APBS input → run both → layered report;
@@ -124,6 +124,8 @@ class ElecCalc:
     ions: list[tuple[float, float, float]] = field(default_factory=list)  # (charge, conc M, radius Å)
     srad: float = 1.4
     sdens: float = 10.0
+    srfm: str = "mol"  # or "spl2", "spl4"
+    swin: float = 0.3
     bcfl: str = "mdh"
     chgm: str = "spl0"
     method: str = "mg-auto"  # or "mg-manual"
@@ -131,6 +133,7 @@ class ElecCalc:
     mol: int = 1
     etol: Optional[float] = None
     calcenergy: str = "total"
+    calcforce: str = "no"  # or "comps" (per-atom forces)
     writes: list[tuple[str, str]] = field(default_factory=list)  # (APBS type, file stem), DX format
     requested_dims: Optional[tuple[int, int, int]] = None  # dims in the file, before APBS' reset
 
@@ -151,7 +154,8 @@ class ElecCalc:
             ions=list(self.ions) if self.ions else None,
             srad=self.srad,
             sdens=self.sdens,
-            surface="mol",
+            surface=self.srfm,
+            swin=self.swin,
             bcfl=self.bcfl,
             chgm=self.chgm,
             equation=self.pbe,
@@ -197,6 +201,7 @@ def elec_from_solver(
     if p["equation"] == "smpbe":
         raise ValueError("equation='smpbe' cannot be compared: APBS 3.4.1 disables smpbe")
     srad = 0.0 if p["surface"] == "vdw" else p["srad"]
+    srfm = p["surface"] if p["surface"] in ("spl2", "spl4") else "mol"
     grid.to_apbs()  # raises ValueError if APBS would change the grid
     return ElecCalc(
         name=name,
@@ -207,6 +212,8 @@ def elec_from_solver(
         ions=[] if reference else [tuple(i) for i in p["ions"]],
         srad=srad,
         sdens=p["sdens"],
+        srfm=srfm,
+        swin=p["swin"],
         # mdh-fast is pbsolve's interpolated evaluation of APBS' mdh.
         bcfl="mdh" if p["bcfl"] == "mdh-fast" else p["bcfl"],
         chgm=p["chgm"],
@@ -221,8 +228,14 @@ def _fmt(x: float) -> str:
     return repr(float(x))
 
 
-def write_input(molecules: Sequence[PathLike], elecs: Sequence[ElecCalc], prints: Sequence[str] = ()) -> str:
-    """APBS input text. ``prints`` are expressions like ``"solvated - reference"``."""
+def write_input(
+    molecules: Sequence[PathLike],
+    elecs: Sequence[ElecCalc],
+    prints: Sequence[str] = (),
+    force_prints: Sequence[str] = (),
+) -> str:
+    """APBS input text. ``prints`` (energies) and ``force_prints`` (forces) are
+    expressions like ``"solvated - reference"``."""
     out = ["read"]
     out += [f"    mol pqr {pathlib.Path(m)}" for m in molecules]
     out.append("end")
@@ -244,21 +257,23 @@ def write_input(molecules: Sequence[PathLike], elecs: Sequence[ElecCalc], prints
             out.append(f"    ion charge {_fmt(z)} conc {_fmt(c)} radius {_fmt(r)}")
         out.append(f"    pdie {_fmt(e.pdie)}")
         out.append(f"    sdie {_fmt(e.sdie)}")
-        out.append("    srfm mol")
+        out.append(f"    srfm {e.srfm}")
         out.append(f"    chgm {e.chgm}")
         out.append(f"    sdens {_fmt(e.sdens)}")
         out.append(f"    srad {_fmt(e.srad)}")
-        out.append("    swin 0.3")
+        out.append(f"    swin {_fmt(e.swin)}")
         out.append(f"    temp {_fmt(e.temperature)}")
         if e.etol is not None:
             out.append(f"    etol {e.etol:g}")
         out.append(f"    calcenergy {e.calcenergy}")
-        out.append("    calcforce no")
+        out.append(f"    calcforce {e.calcforce}")
         for kind, stem in e.writes:
             out.append(f"    write {kind} dx {stem}")
         out.append("end")
     for expr in prints:
         out.append(f"print elecEnergy {expr} end")
+    for expr in force_prints:
+        out.append(f"print force {expr} end")
     out.append("quit")
     return "\n".join(out) + "\n"
 
@@ -392,8 +407,8 @@ def parse_input(path: PathLike) -> ApbsInput:
                     e[tl] = float(take())
                 elif tl == "srfm":
                     s = take().lower()
-                    if s != "mol":
-                        raise NotImplementedError(f"srfm {s}: only 'srfm mol' is reproduced exactly by pbsolve")
+                    if s not in ("mol", "spl2", "spl4"):
+                        raise NotImplementedError(f"srfm {s}: pbsolve reproduces 'srfm mol', 'spl2' and 'spl4'")
                     e["srfm"] = s
                 elif tl == "chgm":
                     c = take().lower()
@@ -405,7 +420,7 @@ def parse_input(path: PathLike) -> ApbsInput:
                 elif tl == "calcforce":
                     f = take().lower()
                     if f != "no":
-                        notes.append(f"calcforce {f} ignored (pbsolve computes no forces)")
+                        notes.append(f"calcforce {f} ignored here; compare forces with `pbsolve apbs compare --forces`")
                 elif tl == "write":
                     kind, fmt, stem = take().lower(), take().lower(), take()
                     e["writes"].append((kind, stem))
@@ -483,8 +498,13 @@ def parse_input(path: PathLike) -> ApbsInput:
             else:
                 raise ApbsError(f"elec {name}: mg-manual needs glen or grid")
             grid = GridSpec(center_of(e.get("gcent", ("mol", e.get("mol", 1)))), dims, glen)
-        missing = [k for k in ("bcfl", "pdie", "sdie", "srfm", "srad", "temp") if k not in e]
-        if "sdens" not in e and e.get("srad", 0.0) > 1e-9:
+        spline = e.get("srfm") in ("spl2", "spl4")
+        missing = [k for k in ("bcfl", "pdie", "sdie", "srfm", "temp") if k not in e]
+        if spline and "swin" not in e:
+            missing.append("swin")
+        if not spline and "srad" not in e:
+            missing.append("srad")
+        if not spline and "sdens" not in e and e.get("srad", 0.0) > 1e-9:
             missing.append("sdens")
         if missing:
             raise ApbsError(f"elec {name}: APBS requires {', '.join(missing)}")
@@ -496,8 +516,10 @@ def parse_input(path: PathLike) -> ApbsInput:
                 sdie=e["sdie"],
                 temperature=e["temp"],
                 ions=e["ions"],
-                srad=e["srad"],
+                srad=e.get("srad", 1.4),
                 sdens=e.get("sdens", 10.0),
+                srfm=e["srfm"],
+                swin=e.get("swin", 0.3),
                 bcfl=e["bcfl"],
                 chgm=e.get("chgm", "spl0"),
                 method=method,
@@ -536,6 +558,8 @@ class ApbsOutput:
     prints: list[tuple[str, float]]  # (expression as echoed by APBS, kJ/mol)
     warnings: list[str]
     text: str
+    # The per-atom forces of the first `print force` (kJ/mol/Å): "qf", "ib", "db", "tot" -> {atom: (x, y, z)}.
+    forces: dict[str, dict[int, tuple[float, float, float]]] = field(default_factory=dict)
 
 
 _RE_CALC = re.compile(r"^CALCULATION #(\d+) \((.*)\): MULTIGRID", re.M)
@@ -574,7 +598,12 @@ def parse_output(text: str) -> ApbsOutput:
         for m in re.finditer(rf"print energy (.*?) end\s*\n(?:.*\n)*?\s*Global net ELEC energy = ({_NUM}) kJ/mol", text)
     ]
     warnings = sorted(set(re.findall(r"^(NOsh:.*(?:Bad|Reset).*|.*off the mesh.*)$", text, re.M)))
-    return ApbsOutput(calcs=calcs, prints=prints, warnings=warnings, text=text)
+    forces: dict[str, dict[int, tuple[float, float, float]]] = {}
+    at = text.find("Printing per-atom forces (kJ/mol/A).")
+    if at >= 0:
+        for m in re.finditer(rf"^\s+(qf|ib|db|tot)\s+(\d+)\s+({_NUM})\s+({_NUM})\s+({_NUM})\s*$", text[at:], re.M):
+            forces.setdefault(m.group(1), {})[int(m.group(2))] = (float(m.group(3)), float(m.group(4)), float(m.group(5)))
+    return ApbsOutput(calcs=calcs, prints=prints, warnings=warnings, text=text, forces=forces)
 
 
 def find_apbs(exe: Optional[str] = None) -> Optional[str]:
@@ -681,11 +710,14 @@ class ComparisonReport:
     maps: dict[str, Any] = field(default_factory=dict)
     injection: dict[str, Any] = field(default_factory=dict)
     unit_factor: float = 1.0  # apbs_unit_factor(T): expected E_APBS / E_pbsolve
+    # Per-atom forces (if compared): term -> {max_abs, max_rel_to_max} in kJ/mol/Å, APBS units.
+    forces: dict[str, Any] = field(default_factory=dict)
 
     def passed(self, energy_rtol: float = 1e-3) -> bool:
         """Grids identical, maps (if compared) identical up to ties, injection
-        potential within 1e-4 of the potential scale, and ``|ΔG|`` relative
-        difference ≤ ``energy_rtol``."""
+        potential within 1e-4 of the potential scale, forces (if compared)
+        within 1e-5 of the largest force, and ``|ΔG|`` relative difference ≤
+        ``energy_rtol``."""
         if self.grid_issues:
             return False
         m = self.maps
@@ -697,6 +729,8 @@ class ComparisonReport:
         for inj in self.injection.values():
             if inj["potential"]["max_rel_to_max"] > 1e-4:
                 return False
+        if any(v["max_rel_to_max"] > 1e-5 for k, v in self.forces.items() if k != "largest"):
+            return False
         return abs(self.delta_g["rel"]) <= energy_rtol
 
     def to_dict(self) -> dict[str, Any]:
@@ -747,6 +781,15 @@ class ComparisonReport:
             f"  ΔG_polar (kcal/mol): APBS {d['apbs']:.4f}   pbsolve {d['pbsolve']:.4f}   "
             f"diff {d['diff']:+.4f} ({100 * d['rel']:+.4f} %; {100 * d['rel_unit_corrected']:+.4f} % in APBS units)"
         )
+        if self.forces:
+            lines.append(
+                f"  forces (kJ/mol/Å, APBS units; largest |F| {self.forces['largest']:.4g}): "
+                + ", ".join(
+                    f"{k} max |ΔF| {v['max_abs']:.2e} ({v['max_rel_to_max']:.1e})"
+                    for k, v in self.forces.items()
+                    if k != "largest"
+                )
+            )
         lines.append(f"  verdict: {'PASS' if self.passed() else 'FAIL'}")
         return "\n".join(lines)
 
@@ -762,8 +805,13 @@ def compare(
     exe: Optional[str] = None,
     etol: Optional[float] = None,
     atoms: Optional[tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]] = None,
+    forces: bool = False,
 ) -> ComparisonReport:
     """Run pbsolve and APBS on ``pqr`` with ``solver``'s settings and compare.
+
+    ``forces=True`` also compares the per-atom forces (APBS ``calcforce
+    comps``, ``print force``) with :meth:`Solver.polar_forces`; it needs
+    ``surface="spl2"`` or ``"spl4"``.
 
     ``grid`` defaults to ``solver.make_grid`` — build the solver with
     ``dime_policy="apbs"`` so APBS accepts it. Raises :class:`GridMismatchError`
@@ -785,7 +833,10 @@ def compare(
         writes += [(k, f"solvated_{k}") for k in ("dielx", "diely", "dielz", "kappa", "charge")]
     solv = elec_from_solver(solver, grid, "solvated", etol=etol, writes=writes)
     refr = elec_from_solver(solver, grid, "reference", reference=True, etol=etol, writes=[("pot", "reference_pot")])
-    out = run_apbs(write_input([pqr], [solv, refr], ["solvated - reference"]), work, exe)
+    if forces:
+        solv.calcforce = refr.calcforce = "comps"
+    force_prints = ["solvated - reference"] if forces else []
+    out = run_apbs(write_input([pqr], [solv, refr], ["solvated - reference"], force_prints), work, exe)
     groups = _split_calcs([solv, refr], out)
     issues = _check_grids(solv, groups[0]) + _check_grids(refr, groups[1])
     if issues:
@@ -831,8 +882,11 @@ def compare(
         },
         unit_factor=uf,
     )
+    if forces:
+        report.forces = _compare_forces(solver, (coords, charges, radii), grid, out, T)
 
     if maps or inject:
+        spline = solver.params["surface"] in ("spl2", "spl4")
         theirs_maps = {k: read_dx(work / f"solvated_{k}.dx") for k in ("dielx", "diely", "dielz", "kappa", "charge")}
         ours = solver.maps(coords, charges, radii, grid=grid)
         vol = float(np.prod(ours["spacing"]))
@@ -844,11 +898,13 @@ def compare(
             for ok, ak in (("eps_x", "dielx"), ("eps_y", "diely"), ("eps_z", "dielz")):
                 bad = np.abs(ours[ok] - theirs_maps[ak][0]) > 1e-6 * pdie_sdie
                 res[ok] = {"mismatch": int(bad.sum()), "total": int(bad.size), "mismatch_fraction": float(bad.mean())}
-            acc_ours = ours["kappa_sq"] > 0
-            acc_theirs = theirs_maps["kappa"][0] > 0.5
             if ours["kappa_bar_sq"] == 0:
-                acc_ours = acc_theirs = np.zeros_like(acc_ours)
-            bad = acc_ours != acc_theirs
+                bad = np.zeros(theirs_maps["kappa"][0].shape, dtype=bool)
+            elif spline:
+                # A continuous accessibility, which APBS writes with 6 significant digits.
+                bad = np.abs(ours["kappa_sq"] / ours["kappa_bar_sq"] - theirs_maps["kappa"][0]) > 1e-6
+            else:
+                bad = (ours["kappa_sq"] > 0) != (theirs_maps["kappa"][0] > 0.5)
             res["kappa"] = {"mismatch": int(bad.sum()), "total": int(bad.size), "mismatch_fraction": float(bad.mean())}
             res["charge"] = _field_diff(ours["charge"], apbs_q)
             res["potential"] = {}
@@ -862,8 +918,9 @@ def compare(
             eps = {"solvated": [theirs_maps[k][0] for k in ("dielx", "diely", "dielz")]}
             pdie = solver.params["pdie"]
             eps["reference"] = [np.full_like(apbs_q, pdie)] * 3
+            accessible = theirs_maps["kappa"][0] if spline else theirs_maps["kappa"][0] > 0.5
             kap = {
-                "solvated": (theirs_maps["kappa"][0] > 0.5) * ours["kappa_bar_sq"],
+                "solvated": accessible * ours["kappa_bar_sq"],
                 "reference": np.zeros_like(apbs_q),
             }
             for st in ("solvated", "reference"):
@@ -886,6 +943,28 @@ def compare(
                 report.injection[st] = inj
     (work / "report.json").write_text(json.dumps(report.to_dict(), indent=2))
     return report
+
+
+def _compare_forces(
+    solver: Solver,
+    atoms: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]],
+    grid: GridSpec,
+    out: ApbsOutput,
+    temperature: float,
+) -> dict[str, Any]:
+    """pbsolve's forces against APBS' ``print force`` (kJ/mol/Å, in APBS units)."""
+    if not out.forces:
+        raise ApbsError("APBS printed no per-atom forces")
+    ours = solver.polar_forces(*atoms, grid=grid)
+    scale = _kj_per_kcal(temperature) * apbs_unit_factor(temperature)
+    n = len(atoms[1])
+    theirs = {k: np.array([out.forces[k][i] for i in range(n)]) for k in ("qf", "db", "ib", "tot")}
+    largest = float(np.abs(theirs["tot"]).max())
+    res: dict[str, Any] = {"largest": largest}
+    for k, mine in (("qf", ours.qf), ("db", ours.db), ("ib", ours.ib), ("tot", ours.forces)):
+        d = float(np.abs(mine * scale - theirs[k]).max())
+        res[k] = {"max_abs": d, "max_rel_to_max": d / largest if largest > 0 else d}
+    return res
 
 
 @dataclass
@@ -1134,7 +1213,8 @@ def _add_solver_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--ion-radius", type=float, default=2.0)
     ap.add_argument("--srad", type=float, default=1.4)
     ap.add_argument("--sdens", type=float, default=10.0)
-    ap.add_argument("--surface", default="mol", choices=["mol", "vdw"])
+    ap.add_argument("--surface", default="mol", choices=["mol", "vdw", "spl2", "spl4"])
+    ap.add_argument("--swin", type=float, default=0.3, help="spl2/spl4: half-width of the switching window (Å)")
     ap.add_argument(
         "--bcfl",
         default="mdh",
@@ -1203,6 +1283,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     lig.add_argument("--ligand-atoms", help="ligand atoms as 1-based ranges, e.g. 1450-1670")
     c.add_argument("--workdir", default="apbs_compare")
     c.add_argument("--no-maps", action="store_true", help="skip map comparison and injection (faster)")
+    c.add_argument("--forces", action="store_true", help="also compare the per-atom forces (needs --surface spl2/spl4)")
     c.add_argument("--apbs", help="APBS executable (default: $APBS or 'apbs' on PATH)")
     c.add_argument("--json", help="also write the report to this JSON file")
     c.add_argument("--energy-rtol", type=float, default=1e-3)
@@ -1241,6 +1322,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 srad=a.srad,
                 sdens=a.sdens,
                 surface=a.surface,
+                swin=a.swin,
                 bcfl=a.bcfl,
                 chgm=a.chgm,
                 equation=a.equation,
@@ -1263,7 +1345,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     sel = _selection(a.ligand_atoms, n)
                 rep = compare_binding(a.pqr, solver, sel, workdir=a.workdir, maps=maps, inject=maps, exe=a.apbs)
             else:
-                rep = compare(a.pqr, solver, workdir=a.workdir, maps=maps, inject=maps, exe=a.apbs)
+                rep = compare(a.pqr, solver, workdir=a.workdir, maps=maps, inject=maps, exe=a.apbs, forces=a.forces)
             ok = rep.passed(a.energy_rtol)
     except (ApbsError, NotImplementedError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

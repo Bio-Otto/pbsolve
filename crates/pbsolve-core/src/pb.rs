@@ -8,7 +8,8 @@ use crate::batch::calculation_device_bytes;
 use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
 use crate::charge::{spread_charges_sparse_with, spread_charges_with};
 use crate::coulomb::{coulomb_energy_kt, Split};
-use crate::error::{PbError, Result};
+use crate::error::{invalid, PbError, Result};
+use crate::forces::{state_forces, ForceTerms};
 use crate::grid::Grid;
 use crate::molecule::Atom;
 use crate::nonlinear::{self, IonTerms, NonlinearLevel};
@@ -98,6 +99,18 @@ pub struct PolarSolvation {
     pub grid: GridSpec,
     /// Both states and the energy evaluation.
     pub timings: Timings,
+}
+
+/// ΔG_polar with the forces on the atoms ([`polar_forces`]).
+#[derive(Clone, Debug)]
+pub struct PolarForces {
+    pub solvation: PolarSolvation,
+    /// Charge–field, dielectric-boundary and ionic-boundary forces on every
+    /// atom (kcal/mol/Å) from the finest level: the solvated state's minus
+    /// the reference state's (APBS `calcforce comps`, `print force 1 - 2`).
+    pub qf: Vec<[f64; 3]>,
+    pub db: Vec<[f64; 3]>,
+    pub ib: Vec<[f64; 3]>,
 }
 
 /// Dielectric and ion maps of one grid level for the given medium.
@@ -769,17 +782,83 @@ pub fn polar_solvation<B: Backend>(
     params: &PbParams,
     spec: &GridSpec,
 ) -> Result<PolarSolvation> {
+    polar(be, atoms, params, spec, false).map(|(r, _)| r)
+}
+
+/// [`polar_solvation`] with the forces on the atoms ([`crate::forces`]):
+/// the explicit derivative of each state's free energy on its finest level
+/// (as APBS `calcforce`, which ignores the coarser levels and the boundary
+/// values' dependence on the atoms). Needs a spline surface (`spl2`,
+/// `spl4`) and `coulomb = grid`. The time counts as energy time.
+pub fn polar_forces<B: Backend>(be: &B, atoms: &[Atom], params: &PbParams, spec: &GridSpec) -> Result<PolarForces> {
+    if params.coulomb == CoulombMethod::Analytic {
+        return invalid("forces need coulomb 'grid'");
+    }
+    if !params.surface.is_spline() {
+        return invalid(format!(
+            "forces need surface 'spl2' or 'spl4' (smooth in the atom positions, as APBS requires), not '{}'",
+            params.surface.as_str()
+        ));
+    }
+    let (solvation, forces) = polar(be, atoms, params, spec, true)?;
+    let [solvated, reference] = forces.expect("forces were asked for");
+    let kt = kt_in_kcal_per_mol(params.temperature);
+    let diff = |s: &[[f64; 3]], r: &[[f64; 3]]| -> Vec<[f64; 3]> {
+        s.iter()
+            .zip(r)
+            .map(|(a, b)| [0, 1, 2].map(|l| (a[l] - b[l]) * kt))
+            .collect()
+    };
+    Ok(PolarForces {
+        qf: diff(&solvated.qf, &reference.qf),
+        db: diff(&solvated.db, &reference.db),
+        ib: diff(&solvated.ib, &reference.ib),
+        solvation,
+    })
+}
+
+/// [`polar_solvation`], with `forces` also each state's forces (solvated,
+/// reference).
+fn polar<B: Backend>(
+    be: &B,
+    atoms: &[Atom],
+    params: &PbParams,
+    spec: &GridSpec,
+    forces: bool,
+) -> Result<(PolarSolvation, Option<[ForceTerms; 2]>)> {
     let lb0 = bjerrum_length_vacuum(params.temperature);
-    let energy =
-        |sol: LevelSolution<B>, (nodes, charges): NodeCharges, extra, external: [f64; 2], timings: &mut Timings| {
+    // The finest level's energy and, with `forces`, the forces from its full
+    // potential (whose values at the charged nodes are those `energy_at_charges` reads).
+    let finish = |medium: Medium| {
+        move |sol: LevelSolution<B>,
+              (nodes, charges): NodeCharges,
+              extra: LevelExtra,
+              external: [f64; 2],
+              timings: &mut Timings|
+              -> Result<(f64, Option<ForceTerms>)> {
             let t = Instant::now();
-            let e = match nonlinear_energy(&extra, params, lb0, (&nodes, &charges), external) {
-                Some(e) => e,
-                None => energy_at_charges(be, &sol, (nodes, charges))?,
+            let nonlinear = nonlinear_energy(&extra, params, lb0, (&nodes, &charges), external);
+            let out = if forces {
+                let (grid, u) = sol.potential(be)?;
+                let e = match nonlinear {
+                    Some(e) => e,
+                    None => 0.5 * charges.iter().zip(&nodes).map(|(q, &c)| q * u[c]).sum::<f64>(),
+                };
+                (
+                    e,
+                    Some(state_forces(&grid, atoms, params, &u, medium == Medium::Solvated)?),
+                )
+            } else {
+                let e = match nonlinear {
+                    Some(e) => e,
+                    None => energy_at_charges(be, &sol, (nodes, charges))?,
+                };
+                (e, None)
             };
             timings.energy += t.elapsed().as_secs_f64();
-            Ok(e)
-        };
+            Ok(out)
+        }
+    };
     params.validate()?;
     let levels = spec.levels()?;
     let hold = hold_memory(be, spec, params)?;
@@ -818,7 +897,10 @@ pub fn polar_solvation<B: Backend>(
         let t = Instant::now();
         let coulomb_kt = coulomb_energy_kt(atoms, params.pdie, lb0);
         timings.energy += t.elapsed().as_secs_f64();
-        return Ok(result(coulomb_kt + energy_kt, coulomb_kt, stats, Vec::new(), timings));
+        return Ok((
+            result(coulomb_kt + energy_kt, coulomb_kt, stats, Vec::new(), timings),
+            None,
+        ));
     }
     // The states are independent, so their order does not change any result.
     // The reference state, whose inputs are cheap (no surface, no `exp` in
@@ -829,34 +911,35 @@ pub fn polar_solvation<B: Backend>(
     // nothing to do: built in the background too, it would compete with the
     // solvated inputs for the same threads.
     let reference = StateInputs::build(&levels, atoms, params, Medium::Reference);
-    let ((reference_kt, stats_reference, ref_timings), (solvated_kt, stats_solvated, mut timings)) =
-        match background_pool_for(be) {
-            Some(pool) => with_background_inputs(
-                &pool,
-                &levels,
-                atoms,
-                params,
-                Medium::Solvated,
-                |solvated| -> Result<_> {
-                    let reference = focused(be, &levels, atoms, params, reference, false, energy)?;
-                    Ok((reference, focused(be, &levels, atoms, params, solvated, false, energy)?))
-                },
-            )?,
-            None => {
-                let reference = focused(be, &levels, atoms, params, reference, false, energy)?;
-                let solvated = StateInputs::build(&levels, atoms, params, Medium::Solvated);
-                (reference, focused(be, &levels, atoms, params, solvated, false, energy)?)
-            }
-        };
+    let (
+        ((reference_kt, ref_forces), stats_reference, ref_timings),
+        ((solvated_kt, forces), stats_solvated, mut timings),
+    ) = match background_pool_for(be) {
+        Some(pool) => with_background_inputs(
+            &pool,
+            &levels,
+            atoms,
+            params,
+            Medium::Solvated,
+            |solvated| -> Result<_> {
+                let reference = focused(be, &levels, atoms, params, reference, false, finish(Medium::Reference))?;
+                let solvated = focused(be, &levels, atoms, params, solvated, false, finish(Medium::Solvated))?;
+                Ok((reference, solvated))
+            },
+        )?,
+        None => {
+            let reference = focused(be, &levels, atoms, params, reference, false, finish(Medium::Reference))?;
+            let solvated = StateInputs::build(&levels, atoms, params, Medium::Solvated);
+            (
+                reference,
+                focused(be, &levels, atoms, params, solvated, false, finish(Medium::Solvated))?,
+            )
+        }
+    };
     timings += ref_timings;
     hold.release()?;
-    Ok(result(
-        solvated_kt,
-        reference_kt,
-        stats_solvated,
-        stats_reference,
-        timings,
-    ))
+    let res = result(solvated_kt, reference_kt, stats_solvated, stats_reference, timings);
+    Ok((res, forces.zip(ref_forces).map(|(s, r)| [s, r])))
 }
 
 #[cfg(test)]

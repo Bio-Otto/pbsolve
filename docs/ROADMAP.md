@@ -362,6 +362,24 @@ dielectric-boundary formulation for finite-difference solvers [Cai et al.
 dynamics depends on this accuracy [Wang J et al. 2009].
 *Evidence:* forces agree with finite differences of the energy; momentum
 conservation; short NVE runs with OpenMM show bounded drift.
+*Status: done APBS-style (unreleased) as `Solver.polar_forces`, with APBS'
+spline surfaces `surface="spl2"`/`"spl4"`; the rest remains.*
+* The spline surfaces [Im, Beglov & Roux 1998; Schnieders et al. 2007] give
+  maps equal to APBS' to the 7 digits of its DX files.
+* The forces are the explicit derivative of the free-energy functional at the
+  converged finest-level potential [Gilson et al. 1993], as APBS `calcforce`:
+  * charge–field, dielectric-boundary and ionic-boundary parts, for `lpbe`,
+    `npbe` and `smpbe`;
+  * on one grid with zero boundary values the exact gradient of the discrete
+    energy (finite differences to 4e-9);
+  * APBS 3.4.1 to ≤ 4e-7 of the largest force.
+* Momentum: a charge in a dielectric sphere is pushed with Kirkwood's force
+  (0.08 %, at the surface's Born radius) and the sphere back with it (1 %).
+* Remaining:
+  * the dielectric-boundary force is noisy over grid placements (5–10 %),
+    which the formulation of Cai et al. (2011) addresses;
+  * forces with the decomposition of 4.5;
+  * NVE runs with OpenMM.
 
 **4.13 Smooth dielectric models.** Gaussian-based dielectric functions,
 which give a few-unit protein interior and a graded interface without an
@@ -542,6 +560,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Dzubiella J, Swanson JMJ, McCammon JA. Coupling hydrophobicity, dispersion, and electrostatics in continuum solvent models. Phys. Rev. Lett. 96, 087802 (2006).
 * Geng W, Yu S, Wei GW. Treatment of charge singularities in implicit solvent models. J. Chem. Phys. 127, 114106 (2007).
 * Genheden S, Ryde U. The MM/PBSA and MM/GBSA methods to estimate ligand-binding affinities. Expert Opin. Drug Discov. 10, 449 (2015).
+* Gilson MK, Davis ME, Luty BA, McCammon JA. Computation of electrostatic forces on solvated molecules using the Poisson–Boltzmann equation. J. Phys. Chem. 97, 3591 (1993).
 * Golub GH, Ye Q. Inexact preconditioned conjugate gradient method with inner-outer iteration. SIAM J. Sci. Comput. 21, 1305 (1999).
 * Grant JA, Pickup BT, Nicholls A. A smooth permittivity function for Poisson–Boltzmann solvation methods. J. Comput. Chem. 22, 608 (2001).
 * Greene D, Qi R, Nguyen R, Qiu T, Luo R. Heterogeneous dielectric implicit membrane model for the calculation of MMPBSA binding free energies. J. Chem. Inf. Model. 59, 3041 (2019).
@@ -561,11 +580,13 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * McCormick SF, Benzaken J, Tamstorf R. Algebraic error analysis for mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S392 (2021a).
 * Miller BR, McGee TD, Swails JM, Homeyer N, Gohlke H, Roitberg AE. MMPBSA.py: an efficient program for end-state free energy calculations. J. Chem. Theory Comput. 8, 3314 (2012).
 * Mobley DL, Guthrie JP. FreeSolv: a database of experimental and calculated hydration free energies, with input files. J. Comput. Aided Mol. Des. 28, 711 (2014).
+* Nina M, Im W, Roux B. Optimized atomic radii for protein continuum electrostatics solvation forces. Biophys. Chem. 78, 89 (1999).
 * Notay Y. Flexible conjugate gradients. SIAM J. Sci. Comput. 22, 1444 (2000).
 * Qi R, Botello-Smith WM, Luo R. Acceleration of linear finite-difference Poisson–Boltzmann methods on graphics processing units. J. Chem. Theory Comput. 13, 3378 (2017).
 * Qi R, Luo R. Robustness and efficiency of Poisson–Boltzmann modeling on graphics processing units. J. Chem. Inf. Model. 59, 409 (2019).
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
 * Reis PBPS, Vila-Viçosa D, Rocchia W, Machuqueiro M. PypKa: a flexible Python module for Poisson–Boltzmann-based pKa calculations. J. Chem. Inf. Model. 60, 4442 (2020).
+* Schnieders MJ, Baker NA, Ren P, Ponder JW. Polarizable atomic multipole solutes in a Poisson–Boltzmann continuum. J. Chem. Phys. 126, 124114 (2007).
 * Sharp KA, Honig B. Calculating total electrostatic energies with the nonlinear Poisson–Boltzmann equation. J. Phys. Chem. 94, 7684 (1990).
 * Silalahi ARJ, Boschitsch AH, Harris RC, Fenley MO. Comparing the predictions of the nonlinear Poisson–Boltzmann equation and the ion size-modified Poisson–Boltzmann equation for a low-dielectric charged spherical cavity in an aqueous salt solution. J. Chem. Theory Comput. 6, 3631 (2010).
 * Tamstorf R, Benzaken J, McCormick SF. Discretization-error-accurate mixed-precision multigrid solvers. SIAM J. Sci. Comput. 43, S420 (2021b).

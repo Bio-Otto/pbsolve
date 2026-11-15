@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: MIT AND BSD-3-Clause
+// Portions derived from APBS 3.4.1 (vpmg.c: bspline2, bspline4, dbspline2, dbspline4,
+// fillcoChargeSpline2, fillcoPermanentMultipole), Copyright (c) 2010-2022 Battelle Memorial
+// Institute and other APBS contributors, BSD-3-Clause. See THIRD_PARTY_NOTICES.md for the full
+// license text.
+
 //! Charge discretisation (APBS `chgm`): trilinear spreading (`spl0`) and the
 //! B-splines of order 3 and 5 (`spl2`, `spl4`). The B-spline weights, their
 //! node ranges and the order of the products follow APBS 3.4.1 (`vpmg.c`:
@@ -54,7 +60,7 @@ pub fn spread_charges_sparse_with(grid: &Grid, atoms: &[Atom], method: ChargeMet
 }
 
 /// B-spline of order 3 on [0, 3] (APBS `bspline2`).
-fn bspline2(x: f64) -> f64 {
+pub(crate) fn bspline2(x: f64) -> f64 {
     let m2m = if (0.0..=2.0).contains(&x) {
         1.0 - (x - 1.0).abs()
     } else {
@@ -73,7 +79,7 @@ fn bspline2(x: f64) -> f64 {
 }
 
 /// B-spline of order 5 on [0, 5] (APBS `bspline4`).
-fn bspline4(x: f64) -> f64 {
+pub(crate) fn bspline4(x: f64) -> f64 {
     const ONE6: f64 = 1.0 / 6.0;
     const ONE8: f64 = 1.0 / 8.0;
     const ONE24: f64 = 1.0 / 24.0;
@@ -99,6 +105,51 @@ fn bspline4(x: f64) -> f64 {
         let m = x - 4.0;
         let m2 = m * m;
         SEVENTEEN24 - ONE6 * x + m2 * (0.25 - ONE6 * m + ONE24 * m2)
+    } else {
+        0.0
+    }
+}
+
+/// The derivative of [`bspline2`] (APBS `dbspline2`).
+pub(crate) fn dbspline2(x: f64) -> f64 {
+    let m2m = if (0.0..=2.0).contains(&x) {
+        1.0 - (x - 1.0).abs()
+    } else {
+        0.0
+    };
+    let m2 = if (1.0..=3.0).contains(&x) {
+        1.0 - (x - 2.0).abs()
+    } else {
+        0.0
+    };
+    m2m - m2
+}
+
+/// The derivative of [`bspline4`] (APBS `dbspline4`).
+pub(crate) fn dbspline4(x: f64) -> f64 {
+    const ONE6: f64 = 1.0 / 6.0;
+    const ONE3: f64 = 1.0 / 3.0;
+    const TWO3: f64 = 2.0 / 3.0;
+    const THIRTEEN6: f64 = 13.0 / 6.0;
+    if x > 0.0 && x <= 1.0 {
+        let m2 = x * x;
+        ONE6 * x * m2
+    } else if x > 1.0 && x <= 2.0 {
+        let m = x - 1.0;
+        let m2 = m * m;
+        -ONE3 + 0.5 * x + m2 * (0.5 - TWO3 * m)
+    } else if x > 2.0 && x <= 3.0 {
+        let m = x - 2.0;
+        let m2 = m * m;
+        1.5 - 0.5 * x + m2 * (-1.5 + m)
+    } else if x > 3.0 && x <= 4.0 {
+        let m = x - 3.0;
+        let m2 = m * m;
+        1.0 - 0.5 * x + m2 * (1.5 - TWO3 * m)
+    } else if x > 4.0 && x <= 5.0 {
+        let m = x - 4.0;
+        let m2 = m * m;
+        -THIRTEEN6 + 0.5 * x + m2 * (-0.5 + ONE6 * m)
     } else {
         0.0
     }
@@ -196,6 +247,22 @@ mod tests {
     use super::*;
 
     const METHODS: [ChargeMethod; 3] = [ChargeMethod::Trilinear, ChargeMethod::Spline2, ChargeMethod::Spline4];
+
+    #[test]
+    fn b_spline_derivatives_are_the_slopes_of_the_splines() {
+        for (b, db, width) in [
+            (bspline2 as fn(f64) -> f64, dbspline2 as fn(f64) -> f64, 3),
+            (bspline4, dbspline4, 5),
+        ] {
+            for i in 1..(100 * width) {
+                let x = 0.01 * i as f64 + 0.003; // off the knots
+                let fd = (b(x + 1e-6) - b(x - 1e-6)) / 2e-6;
+                assert!((db(x) - fd).abs() < 1e-8, "{width}: x = {x}: {} vs {fd}", db(x));
+            }
+            assert_eq!(db(-0.5), 0.0);
+            assert_eq!(db(width as f64 + 0.5), 0.0);
+        }
+    }
 
     /// Charge, centre and spread of one point charge's node charges per axis.
     fn moments(g: &Grid, q: &[f64]) -> (f64, [f64; 3], [f64; 3]) {

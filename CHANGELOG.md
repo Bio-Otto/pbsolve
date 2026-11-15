@@ -148,6 +148,18 @@
   entropic cost [Silalahi et al. 2010], and saturates counterions at one per
   cell where point ions would reach 84 M. It costs about as much as `npbe`,
   which stays bit-identical (`docs/VALIDATION.md`).
+- `Solver(surface="spl2" | "spl4", swin=0.3)`, `--surface spl2|spl4 --swin`:
+  APBS' spline surfaces (`srfm spl2`, `spl4`), smooth in the atom positions;
+  the maps equal APBS' to the 7 digits of its DX files. `pbsolve.apbs`
+  writes and reads them.
+- `Solver.polar_forces(coords, charges, radii)` and `pbsolve.PolarForces`:
+  ΔG_polar and the force on every atom (kcal/mol/Å) with its charge–field,
+  dielectric-boundary and ionic-boundary parts, as APBS `calcforce comps`
+  (spline surfaces; `lpbe`, `npbe` and `smpbe`). On one grid with
+  `bcfl="zero"` they are the exact gradient of the energy (to 4e-9); they
+  agree with APBS 3.4.1 to ≤ 4e-7 of the largest force and with Kirkwood's
+  force on a charge in a sphere to 0.08 %. `pbsolve apbs compare --forces`
+  compares them with APBS (`docs/VALIDATION.md`).
 - `batch::calculation_device_bytes`: the device memory of a calculation
   with its settings (the nonlinear equation needs 4 more vectors); used to
   reserve memory and to size batch workers.

@@ -10,10 +10,10 @@ use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
 use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
 use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, kt_in_kj_per_mol};
 use pbsolve_core::{
-    apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_solvation, solve_focused, solve_with_maps,
-    solve_with_maps_nonlinear, Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps, CoulombMethod,
-    CpuBackend, DimePolicy, Equation, Grid, GridSpec, InterfaceMethod, IonSpecies, Medium, PbError, PbParams,
-    PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
+    apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_forces, polar_solvation, solve_focused,
+    solve_with_maps, solve_with_maps_nonlinear, Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps,
+    CoulombMethod, CpuBackend, DimePolicy, Equation, Grid, GridSpec, InterfaceMethod, IonSpecies, Medium, PbError,
+    PbParams, PolarForces, PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -113,6 +113,10 @@ impl Engine {
 
     fn polar(&self, atoms: &[Atom], params: &PbParams, spec: &GridSpec) -> Result<PolarSolvation, PbError> {
         dispatch!(self, be => polar_solvation(be, atoms, params, spec))
+    }
+
+    fn forces(&self, atoms: &[Atom], params: &PbParams, spec: &GridSpec) -> Result<PolarForces, PbError> {
+        dispatch!(self, be => polar_forces(be, atoms, params, spec))
     }
 
     fn field(
@@ -460,6 +464,36 @@ impl PyPolarResult {
     }
 }
 
+/// Polar solvation free energy and the forces on the atoms (:meth:`Solver.polar_forces`).
+///
+/// The forces are −dΔG_polar/dr of every atom in kcal/mol/Å, split as APBS
+/// ``calcforce comps`` splits them. Each part is the solvated state's minus
+/// the reference state's on the finest grid level.
+#[pyclass(name = "PolarForces", module = "pbsolve", frozen, get_all)]
+struct PyPolarForces {
+    /// Polar solvation free energy ΔG_polar in kcal/mol.
+    energy: f64,
+    /// Total force on every atom in kcal/mol/Å, shape (N, 3) (qf + db + ib).
+    forces: Py<PyArray2<f64>>,
+    /// Charge–field part, shape (N, 3), the reaction field acting on the charges.
+    qf: Py<PyArray2<f64>>,
+    /// Dielectric-boundary part, shape (N, 3), the field's pressure on the
+    /// smoothed dielectric boundary.
+    db: Py<PyArray2<f64>>,
+    /// Ionic-boundary part, shape (N, 3), the ions' osmotic pressure on the
+    /// ion-accessibility boundary.
+    ib: Py<PyArray2<f64>>,
+    /// The energy calculation (iterations, timings, grid).
+    result: Py<PyPolarResult>,
+}
+
+#[pymethods]
+impl PyPolarForces {
+    fn __repr__(&self) -> String {
+        format!("PolarForces(energy={:.4} kcal/mol)", self.energy)
+    }
+}
+
 // ---------------------------------------------------------------- Solver
 
 /// Linearized Poisson–Boltzmann solver with APBS ``mg-auto`` style focusing.
@@ -501,9 +535,14 @@ impl PyPolarResult {
 ///     Surface sphere density in points per Å² (APBS ``sdens``).
 /// surface : str
 ///     Dielectric boundary (APBS ``srfm``): "mol" (solvent-excluded
-///     surface, as APBS ``srfm mol``), "vdw" (union of the atomic spheres)
-///     or "harmonic" (molecular surface on the nodes with harmonic-mean face
-///     values; not APBS ``smol``).
+///     surface, as APBS ``srfm mol``), "vdw" (union of the atomic spheres),
+///     "harmonic" (molecular surface on the nodes with harmonic-mean face
+///     values; not APBS ``smol``), "spl2" or "spl4" (atomic spheres smoothed
+///     over ±``swin`` by a cubic or septic switch, as APBS ``srfm spl2`` and
+///     ``spl4``; smooth in the atom positions, as forces need).
+/// swin : float
+///     Half-width in Å of the switching window of the "spl2" and "spl4"
+///     surfaces (APBS ``swin``).
 /// bcfl : str
 ///     Boundary condition of the coarsest grid (APBS ``bcfl``): "mdh" (one
 ///     Debye–Hückel sphere per atom), "mdh-fast" (the same sum interpolated
@@ -720,7 +759,7 @@ impl PySolver {
         srad = 1.4, sdens = 10.0, surface = "mol", bcfl = "mdh",
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
         preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid",
-        equation = "lpbe", ion_size = 0.0
+        equation = "lpbe", ion_size = 0.0, swin = 0.3
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -748,6 +787,7 @@ impl PySolver {
         coulomb: &str,
         equation: &str,
         ion_size: f64,
+        swin: f64,
     ) -> PyResult<Self> {
         let mut params = PbParams {
             pdie,
@@ -756,6 +796,7 @@ impl PySolver {
             srad,
             sdens,
             surface: SurfaceMethod::parse(surface).map_err(to_py)?,
+            swin,
             bcfl: BoundaryCondition::parse(bcfl).map_err(to_py)?,
             chgm: ChargeMethod::parse(chgm).map_err(to_py)?,
             interface: InterfaceMethod::parse(interface).map_err(to_py)?,
@@ -811,6 +852,7 @@ impl PySolver {
         d.set_item("srad", p.srad)?;
         d.set_item("sdens", p.sdens)?;
         d.set_item("surface", p.surface.as_str())?;
+        d.set_item("swin", p.swin)?;
         d.set_item("bcfl", p.bcfl.as_str())?;
         d.set_item("chgm", p.chgm.as_str())?;
         d.set_item("interface", p.interface.as_str())?;
@@ -920,6 +962,72 @@ impl PySolver {
             .detach(|| self.engine.polar(&atoms, &self.params, &spec))
             .map_err(to_py)?;
         Ok(PyPolarResult::from_core(res, self.engine.platform()))
+    }
+
+    /// Polar solvation free energy ΔG_polar and the forces on the atoms.
+    ///
+    /// Computes :meth:`polar_solvation` and, from each state's finest grid level,
+    /// the forces −dΔG_polar/dr as APBS ``calcforce`` does: the explicit derivative
+    /// of the free energy at the converged potential (charge–field,
+    /// dielectric-boundary and ionic-boundary parts). Like APBS it needs a surface
+    /// that is smooth in the atom positions, ``surface="spl2"`` or ``"spl4"``.
+    /// The coarser focusing levels and the boundary values do not contribute; on a
+    /// single grid with ``bcfl="zero"`` the forces are the exact gradient of the
+    /// discrete energy.
+    ///
+    /// Parameters
+    /// ----------
+    /// coords : array_like, shape (N, 3)
+    ///     Atom positions in Å.
+    /// charges : array_like, shape (N,)
+    ///     Atomic charges in e.
+    /// radii : array_like, shape (N,)
+    ///     Atomic radii in Å.
+    /// grid : GridSpec, optional
+    ///     Grid of the calculation; by default :meth:`make_grid` of the atoms.
+    ///
+    /// Returns
+    /// -------
+    /// PolarForces
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     If the surface is not "spl2" or "spl4", ``coulomb`` is not "grid", the
+    ///     arrays do not match, or an atom lies too close to the edge of the
+    ///     finest grid.
+    /// ConvergenceError
+    ///     If a linear solve does not converge.
+    #[pyo3(signature = (coords, charges, radii, grid = None))]
+    fn polar_forces(
+        &self,
+        py: Python<'_>,
+        coords: PyReadonlyArray2<'_, f64>,
+        charges: PyReadonlyArray1<'_, f64>,
+        radii: PyReadonlyArray1<'_, f64>,
+        grid: Option<PyGridSpec>,
+    ) -> PyResult<PyPolarForces> {
+        let atoms = atoms_from(&coords, &charges, &radii)?;
+        let spec = self.spec_for(&atoms, grid)?;
+        let res = py
+            .detach(|| self.engine.forces(&atoms, &self.params, &spec))
+            .map_err(to_py)?;
+        let array = |v: &[[f64; 3]]| -> PyResult<Py<PyArray2<f64>>> {
+            Ok(PyArray1::from_vec(py, v.iter().flatten().copied().collect())
+                .reshape([v.len(), 3])?
+                .unbind())
+        };
+        let total: Vec<[f64; 3]> = (0..atoms.len())
+            .map(|n| [0, 1, 2].map(|l| res.qf[n][l] + res.db[n][l] + res.ib[n][l]))
+            .collect();
+        Ok(PyPolarForces {
+            energy: res.solvation.energy_kcal,
+            forces: array(&total)?,
+            qf: array(&res.qf)?,
+            db: array(&res.db)?,
+            ib: array(&res.ib)?,
+            result: Py::new(py, PyPolarResult::from_core(res.solvation, self.engine.platform()))?,
+        })
     }
 
     /// ΔG_polar in kcal/mol for every frame of a trajectory.
@@ -1557,6 +1665,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySolver>()?;
     m.add_class::<PyGridSpec>()?;
     m.add_class::<PyPolarResult>()?;
+    m.add_class::<PyPolarForces>()?;
     m.add_function(wrap_pyfunction!(available_platforms, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_info, m)?)?;
     m.add_function(wrap_pyfunction!(sasa, m)?)?;

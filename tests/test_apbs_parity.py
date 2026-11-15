@@ -57,6 +57,9 @@ def _check(rep, bcfl):
         dict(ionic_strength=0.05, bcfl="zero", surface="vdw"),
         dict(ionic_strength=0.15, bcfl="mdh", chgm="spl2"),
         dict(ionic_strength=0.0, bcfl="sdh", chgm="spl4"),
+        # Spline surfaces: continuous maps, identical to the DX file's 7 digits.
+        dict(ionic_strength=0.15, bcfl="mdh", surface="spl2"),
+        dict(ionic_strength=0.1, bcfl="zero", surface="spl4", swin=0.5, pdie=2.0, chgm="spl2"),
     ],
 )
 def test_layered_parity(tmp_path, molecule_pqr, kw):
@@ -71,6 +74,7 @@ def test_layered_parity(tmp_path, molecule_pqr, kw):
         dict(ionic_strength=0.15, bcfl="mdh"),
         dict(ions=[(2.0, 0.05, 2.0), (-1.0, 0.1, 1.8)], bcfl="sdh", pdie=2.0),
         dict(ionic_strength=0.1, bcfl="zero", surface="vdw", chgm="spl2"),
+        dict(ionic_strength=0.1, bcfl="zero", surface="spl2"),
     ],
 )
 def test_nonlinear_parity(tmp_path, molecule_pqr, kw):
@@ -93,6 +97,34 @@ def test_nonlinear_highly_charged(tmp_path):
     _check(non, "mdh")
     assert non.delta_g["apbs"] - lin.delta_g["apbs"] < -90.0
     assert abs(non.delta_g["rel_unit_corrected"]) < 1e-5
+
+
+@pytest.mark.parametrize(
+    "kw, rtol",
+    [
+        # mdh: the reference state's boundary constants (2.4e-7 measured, as in the energies).
+        (dict(ionic_strength=0.15, bcfl="mdh", surface="spl2", chgm="spl2"), 1e-6),
+        (dict(ionic_strength=0.15, bcfl="zero", surface="spl2", chgm="spl0"), 1e-8),  # 6e-10 measured
+        (dict(ionic_strength=0.1, bcfl="mdh", surface="spl4", chgm="spl4", swin=0.4, pdie=2.0), 1e-6),
+        (dict(ionic_strength=0.15, bcfl="zero", surface="spl2", chgm="spl2", equation="npbe"), 1e-8),
+    ],
+)
+def test_forces_parity(tmp_path, molecule_pqr, kw, rtol):
+    """Per-atom forces (qf, db, ib) as APBS `calcforce comps` + `print force`."""
+    s = pbsolve.Solver(platform="CPU", grid_spacing=0.6, fadd=10.0, dime_policy="apbs", **kw)
+    rep = apbs.compare(molecule_pqr, s, workdir=tmp_path / "w", maps=False, inject=False, forces=True)
+    for k in ("qf", "db", "ib", "tot"):
+        assert rep.forces[k]["max_rel_to_max"] < rtol, (k, rep.forces[k])
+    assert rep.passed() and "forces (kJ/mol/Å" in rep.format()
+
+
+def test_forces_cli(tmp_path, molecule_pqr):
+    args = ["compare", str(molecule_pqr), "--platform", "CPU", "--spacing", "0.6", "--fadd", "10"]
+    out = tmp_path / "r.json"
+    assert apbs.main(args + ["--surface", "spl2", "--forces", "--no-maps", "--workdir", str(tmp_path / "w"), "--json", str(out)]) == 0
+    assert json.loads(out.read_text())["forces"]["tot"]["max_rel_to_max"] < 1e-6
+    # A sharp surface has no forces.
+    assert apbs.main(args + ["--forces", "--no-maps", "--workdir", str(tmp_path / "m")]) == 2
 
 
 def test_three_level_focusing(tmp_path, molecule, molecule_pqr):
@@ -172,4 +204,11 @@ def test_run_existing_input(tmp_path, molecule, molecule_pqr):
     path.write_text(path.read_text().replace("    lpbe", "    npbe"))
     assert [e.pbe for e in apbs.parse_input(path).elecs] == ["npbe", "npbe"]
     rep = apbs.run_input(path, platform="CPU", workdir=tmp_path / "npbe")
+    assert rep.passed(energy_rtol=1e-4)
+    # A spline surface, read from the input (srfm spl4, swin 0.4).
+    path.write_text(path.read_text().replace("srfm mol", "srfm spl4").replace("swin 0.3", "swin 0.4"))
+    parsed = apbs.parse_input(path).elecs
+    assert [(e.srfm, e.swin) for e in parsed] == [("spl4", 0.4)] * 2
+    assert parsed[0].solver(platform="CPU").params["surface"] == "spl4"
+    rep = apbs.run_input(path, platform="CPU", workdir=tmp_path / "spl4")
     assert rep.passed(energy_rtol=1e-4)

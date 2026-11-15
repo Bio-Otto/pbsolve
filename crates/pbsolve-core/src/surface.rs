@@ -36,6 +36,7 @@ use crate::grid::Grid;
 use crate::molecule::{dist2, Atom};
 use crate::params::{InterfaceMethod, PbParams, SurfaceMethod};
 use crate::spatial::CellList;
+use crate::spline::{spline_maps, SplineMaps};
 use crate::units::kappa_bar_squared;
 use rayon::prelude::*;
 use std::f64::consts::PI;
@@ -107,6 +108,21 @@ pub fn maps_on<B: Backend>(
         let [x, y, z] = exactly(be.mark_maps(grid, &[[0.0; 3]; 3], params.pdie, &[])?)?;
         return Ok([x, y, z, be.zeros(grid.len())?]);
     };
+    let kbar2 = kappa_bar_squared(&params.ions, params.temperature);
+    if params.surface.is_spline() {
+        // Built on the host (APBS `fillcoCoefSpline*`).
+        let SplineMaps {
+            eps: [x, y, z],
+            mut accessibility,
+        } = spline_maps(grid, atoms, params);
+        accessibility.par_iter_mut().for_each(|k| *k *= kbar2);
+        return Ok([
+            be.upload_owned(x)?,
+            be.upload_owned(y)?,
+            be.upload_owned(z)?,
+            be.upload_owned(accessibility)?,
+        ]);
+    }
     let (pdie, sdie) = (params.pdie, params.sdie);
     let h = grid.spacing;
     let [eps_x, eps_y, eps_z] = match params.surface {
@@ -127,9 +143,9 @@ pub fn maps_on<B: Backend>(
             let (x, y, z) = harmonic_faces(grid, &node);
             [be.upload_owned(x)?, be.upload_owned(y)?, be.upload_owned(z)?]
         }
+        SurfaceMethod::Spline2 | SurfaceMethod::Spline4 => unreachable!("built above"),
     };
 
-    let kbar2 = kappa_bar_squared(&params.ions, params.temperature);
     let kappa_sq = if kbar2 > 0.0 {
         let ion_r = params.ion_exclusion_radius();
         let spheres: Vec<Sphere> = atoms
@@ -384,7 +400,8 @@ impl MolecularSurface {
     /// The surface `params.surface` asks for (`vdw`: no probe).
     pub fn for_params(atoms: &[Atom], params: &PbParams) -> Self {
         let srad = match params.surface {
-            SurfaceMethod::Vdw => 0.0,
+            // The spline maps do not use the surface beyond marking the state as solvated.
+            SurfaceMethod::Vdw | SurfaceMethod::Spline2 | SurfaceMethod::Spline4 => 0.0,
             SurfaceMethod::Mol | SurfaceMethod::HarmonicMol => params.srad,
         };
         Self::new(atoms, srad, params.sdens, apbs_clist_radius(params))

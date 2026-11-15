@@ -33,6 +33,7 @@ pub mod charge;
 pub mod coulomb;
 pub mod cpu;
 pub mod error;
+pub mod forces;
 pub mod grid;
 pub mod molecule;
 pub mod multigrid;
@@ -44,6 +45,7 @@ pub mod real;
 pub mod sasa;
 pub mod solver;
 pub mod spatial;
+pub mod spline;
 pub mod surface;
 pub mod units;
 
@@ -58,8 +60,8 @@ pub use params::{
     SurfaceMethod,
 };
 pub use pb::{
-    coefficient_maps, polar_solvation, solve_focused, solve_with_maps, solve_with_maps_nonlinear, FieldSolution,
-    Medium, PolarSolvation, Timings,
+    coefficient_maps, polar_forces, polar_solvation, solve_focused, solve_with_maps, solve_with_maps_nonlinear,
+    FieldSolution, Medium, PolarForces, PolarSolvation, Timings,
 };
 pub use solver::{SolveStats, SolverOptions};
 pub use surface::{CoefficientMaps, MolecularSurface};

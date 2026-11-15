@@ -15,7 +15,10 @@ derived from the APBS 3.4.1 source code (https://github.com/Electrostatics/apbs)
 | `crates/pbsolve-core/src/surface.rs` | `src/generic/vacc.c` (`VaccSurf_refSphere`, `Vacc_atomSurf`, `ivdwAccExclus`), `src/generic/vpbe.c` (cell-list radius), `src/mg/vpmg.c` (`markSphere`, `fillcoCoefMolDielNoSmooth`, `fillcoCoefMolIon`) |
 | `crates/pbsolve-core/src/boundary.rs` | `src/mg/vpmg.c` (`bcflnew`, `bcfl1sp`, `bcfl_sdh`, `multipolebc`) |
 | `crates/pbsolve-core/src/autogrid.rs` | `src/generic/mgparm.c` (`MGparm_check`), `src/generic/nosh.c` (`NOsh_setupCalcMGAUTO`) |
-| `crates/pbsolve-core/src/charge.rs` | `src/mg/vpmg.c` (`bspline2`, `bspline4`, `fillcoChargeSpline2`, `fillcoPermanentMultipole`, `Vpmg_qfEnergy`) |
+| `crates/pbsolve-core/src/charge.rs` | `src/mg/vpmg.c` (`bspline2`, `bspline4`, `dbspline2`, `dbspline4`, `fillcoChargeSpline2`, `fillcoPermanentMultipole`, `Vpmg_qfEnergy`) |
+| `crates/pbsolve-core/src/nonlinear.rs` | `src/mg/vpmg.c` (`Vpmg_energy`, `Vpmg_extEnergy`, `Vpmg_setPart`), `src/pmgc/mypdec.c` (ion terms of `Vc_vecpmg`) |
+| `crates/pbsolve-core/src/spline.rs` | `src/mg/vpmg.c` (`fillcoCoefSpline`, `fillcoCoefSpline4`), `src/generic/vacc.c` (`Vacc_splineAccGradAtomNorm`, `Vacc_splineAccGradAtomNorm4`) |
+| `crates/pbsolve-core/src/forces.rs` | `src/mg/vpmg.c` (`qfForceSpline1`, `qfForceSpline2`, `qfForceSpline4`, `Vpmg_dbForce`, `Vpmg_ibForce`) |
 
 APBS is not bundled with pbsolve; `pbsolve.apbs` only runs an APBS executable
 that the user installed, for validation. pbsolve is an independent project and
