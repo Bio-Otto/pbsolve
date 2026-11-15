@@ -107,6 +107,7 @@ _preload_nvrtc(_CUDA_MAJOR)
 from . import io, prep, radii  # noqa: E402
 from .apolar import ApolarEnergy, apolar_energy  # noqa: E402
 from .dx import read_dx, write_dx  # noqa: E402
+from .entropy import InteractionEntropy, interaction_energy, interaction_entropy  # noqa: E402
 from .estimate import ErrorEstimate, estimate_error  # noqa: E402
 from .mmpbsa import (  # noqa: E402
     SITKOFF_BETA,
@@ -123,6 +124,7 @@ __all__ = [
     "ConvergenceError",
     "ErrorEstimate",
     "GridSpec",
+    "InteractionEntropy",
     "PBSAFrame",
     "PolarForces",
     "PolarResult",
@@ -138,6 +140,8 @@ __all__ = [
     "bjerrum_length",
     "cuda_info",
     "estimate_error",
+    "interaction_energy",
+    "interaction_entropy",
     "io",
     "kt_kcal_per_mol",
     "kt_kj_per_mol",

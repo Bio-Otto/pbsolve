@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Interaction entropy: `pbsolve.interaction_entropy(energies)` returns −TΔS
+  of binding from the fluctuations of the receptor–ligand interaction energy
+  over the frames, both as the exponential average (IE, Duan, Liu & Zhang
+  2016) and its second-order cumulant (C2), with σ, standard errors over
+  blocks of frames and a `reliable` flag (σ ≤ 15 kJ/mol, Ekberg & Ryde 2021).
+  `pbsolve.interaction_energy(...)` computes that energy (Coulomb plus
+  Lorentz–Berthelot Lennard-Jones, e.g. with the parameters from
+  `pbsolve.openmm_bridge`); it equals OpenMM to 1.7e-12 on ff14SB peptides.
+
 ## 0.0.3 — 2026-11-15
 
 ### Added

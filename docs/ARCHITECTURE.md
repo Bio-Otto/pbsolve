@@ -2,7 +2,8 @@
 
 ```
 python/pbsolve/         pure-Python API: io (load/select/frames), prep (PDB -> PQR),
-        │               MM-PBSA helpers, OpenMM bridge, APBS parity, DX I/O, CLI
+        │               MM-PBSA helpers, interaction entropy, OpenMM bridge,
+        │               APBS parity, DX I/O, CLI
         │  (PyO3, GIL released during solves and file reads)
 crates/pbsolve-py       thin bindings: argument conversion + platform selection
         │

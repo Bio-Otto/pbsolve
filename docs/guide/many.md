@@ -61,8 +61,9 @@ print(terms.as_dict())  # flat dict, e.g. for a CSV row
 The receptor defaults to all atoms that are not ligand (`receptor_atoms`
 overrides it). {py:func}`pbsolve.pbsa_solvation_frame` does the same for a
 single frame. pbsolve provides the solvation terms; the binding free energy
-adds the gas-phase energy ΔE_MM from your force field:
-ΔG_bind ≈ ΔE_MM + ΔG_solv.
+adds the gas-phase energy ΔE_MM from your force field and, optionally, the
+entropy term (see [Binding entropy](#binding-entropy)):
+ΔG_bind ≈ ΔE_MM + ΔG_solv − TΔS.
 
 A call solves all the frames it is given together, so pass a long trajectory
 in chunks of a few frames per worker, as `pbsolve mmpbsa` does. With files
@@ -115,6 +116,54 @@ force field for a full decomposition. With `equation="npbe"` or `"smpbe"` and
 ions the energy is a functional, not a sum over the charges, and there are
 no per-atom terms.
 
+### Binding entropy
+
+The single-trajectory protocol leaves out the entropy of binding, −TΔS. The
+interaction entropy [Duan, Liu & Zhang 2016] takes it from the fluctuations
+of the gas-phase receptor–ligand interaction energy E_int over the same
+frames,
+
+    −TΔS = kT ln⟨exp(β (E_int − ⟨E_int⟩))⟩,
+
+and its second-order cumulant (C2) approximation is σ²/(2kT), with σ the
+standard deviation of E_int; both are ≥ 0, and they are equal when E_int is
+normally distributed. The exponential average is dominated by the rare frames
+with the highest energy: it converges slowly and comes out too low when σ is
+large. Ekberg & Ryde (2021) therefore advise reporting σ, comparing IE and C2
+over blocks of the trajectory, not using IE above σ = 15 kJ/mol (3.6 kcal/mol),
+and trusting C2 where the two differ. {py:func}`pbsolve.interaction_entropy`
+returns both, with their standard errors over consecutive blocks:
+
+```python
+# a stand-in for E_int of 1000 frames (kcal/mol); see below for your own frames
+e_int = np.random.default_rng(0).normal(-62.0, 1.5, 1000)
+s = pbsolve.interaction_entropy(e_int, temperature=298.15, blocks=5)
+print(f"-TΔS  IE {s.ie:.2f} ± {s.ie_sem:.2f}  C2 {s.c2:.2f} ± {s.c2_sem:.2f} kcal/mol, "
+      f"σ {s.sigma:.2f} ({'IE usable' if s.reliable else 'use C2'})")
+```
+
+For normally distributed energies with σ = 3 kcal/mol, 10⁵ frames still give IE
+7.0 ± 0.4 against the exact 7.60, while C2 gives 7.59 ± 0.03 (see the
+[validation](../VALIDATION.md#interaction-entropy)).
+
+E_int is the force field's Coulomb plus Lennard-Jones energy between receptor
+and ligand atoms, without solvent and cutoff. {py:func}`pbsolve.interaction_energy`
+computes it for force fields with Lorentz–Berthelot combining rules (AMBER,
+CHARMM without NBFIX), for example with the parameters of an OpenMM `System`:
+
+```{code-block} python
+from pbsolve.openmm_bridge import charges_from_system, lennard_jones_from_system
+
+q = charges_from_system(system)
+lj_radii, lj_eps = lennard_jones_from_system(system)
+e_int = []
+for xyz in frames_in_angstrom:
+    coulomb, vdw = pbsolve.interaction_energy(xyz, q, lj_radii, lj_eps, ligand_indices)
+    e_int.append(coulomb + vdw)
+entropy = pbsolve.interaction_entropy(e_int)
+minus_t_ds = entropy.ie if entropy.reliable else entropy.c2
+```
+
 ## From the command line
 
 `pbsolve mmpbsa` does all of this for a topology and a trajectory, and writes
@@ -148,4 +197,8 @@ for positions in trajectory_positions:   # OpenMM Quantity, or an array in Å
     dg_bind = delta_e_mm + terms.delta_solvation
 ```
 
-`examples/mmpbsa_openmm.py` in the repository is a complete script.
+The same `System` provides the Lennard-Jones parameters for
+{py:func}`pbsolve.interaction_energy` (`lennard_jones_from_system`), and so
+the interaction entropy of the trajectory (see [Binding entropy](#binding-entropy)).
+`examples/mmpbsa_openmm.py` in the repository is a complete script that
+reports both.

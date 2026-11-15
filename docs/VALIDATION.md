@@ -53,6 +53,7 @@ should update the status table below.
 | Gaussian dielectric (0.0.2): `surface="gauss"`, `gauss_sigma`, `gauss_contour` | maps = the formulas to 1e-9 (ε and the ions' Born accessibility); reference state with the Gaussian ε inside the ε ≤ 20 contour (Li et al. 2014): one Gaussian atom against its exact radial solution within 1.0–3.2 % at 0.5 Å and 0.45–1.4 % at 0.18 Å, salt effect to 0.07 %; with a homogeneous reference 17–63 % off (charges' grid self-energies); 1YCR ΔΔG_polar 385.9 / 383.3 / 383.5 kcal/mol at 0.49 / 0.35 / 0.25 Å (`mol` 434.9 / 429.0 / 427.6); `npbe` refused (Born penalty bounded, density diverges at charges); CPU = CUDA; 9/9 mutations; default path bit-identical; see *Gaussian dielectric* |
 | Non-polar terms (0.0.2): `apolar_energy` (γ·SASA + p·SAV + WCA dispersion, as APBS `apolar`) | APBS' 11 alkane examples to every printed digit (totals ≤ 2.2e-13); APBS 3.4.1 live on neopentane, a synthetic molecule with radius-0 atoms and 1YCR (1670 atoms) ≤ 1.3e-12, volumes identical, per atom ≤ 5e-13; one sphere, two spheres and one atom's dispersion against closed forms (0.2–0.5 %); Lennard-Jones from OpenMM = APBS' AMBER parameters to 1e-9; 10/10 mutations; 1YCR 0.75 s on 18 threads (APBS 12.7 s); see *Non-polar terms* |
 | Per-atom and per-residue decomposition (0.0.3): `PolarResult.atom_energies`, `PBSAFrame.atom_terms`/`residue_terms`, `pbsolve mmpbsa --per-residue` | shares sum to ΔG_polar (1e-12; `spl0`, `spl2`, `spl4`, `coulomb="analytic"`, forces path identical); linear response: E_i of all charges = E_i alone + pair terms from single and pair solves (1e-8, focusing and `mdh`), pair terms symmetric with one level and `zero` (1e-8); APBS 3.4.1 `calcenergy comps` per atom ≤ 2.8e-6 of the largest share with `mdh`, 1e-9 (synthetic) and 3.2e-8 (1YCR) with `zero`; 9/9 mutations; energies bit-identical (CPU, CUDA), the shares add ≤ 50 ms to 5DK3; see *Per-atom and per-residue decomposition* |
+| Interaction entropy (0.0.4): `interaction_entropy`, `interaction_energy` | IE and C2 of two-level energy distributions = closed form (1e-12); normal energies: C2 = σ²/2kT, IE → C2, and the low bias of IE at large σ reproduces Ekberg & Ryde 2021 (σ = 3 kcal/mol: IE 7.0 ± 0.4 vs exact 7.60 with 10⁵ frames, C2 7.59 ± 0.03); no overflow at σ = 200 kcal/mol; E_int = OpenMM 8.6 (Reference platform, ff14SB peptides from tleap, bonds and 1-4 exceptions inside the molecules) to 1.7e-12, and = an explicit pair sum to 1e-12; 16/16 mutations; see *Interaction entropy* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3181,6 +3182,71 @@ The 13-digit alkane comparison catches the five the closed forms miss.
 **Cost** (1YCR, 18 threads, shared machine): area 0.07 s (sdens 100), volume
 0.02 s, dispersion 0.72 s at 0.5 Å and 2.99 s at 0.3 Å (1.08 and 4.73 s
 before the accessibility tests were restricted to 14 Å).
+
+## Interaction entropy
+
+**Change.**
+* `pbsolve.interaction_entropy(energies, temperature, blocks)`: −TΔS of
+  binding from the gas-phase receptor–ligand interaction energy of every
+  frame, IE = kT ln⟨exp(β(E_int − ⟨E_int⟩))⟩ [Duan, Liu & Zhang 2016] and the
+  second-order cumulant C2 = σ²/(2kT), with σ, both per block of consecutive
+  frames, their standard errors and `reliable` = σ ≤ 15 kJ/mol, as
+  recommended by [Ekberg & Ryde 2021] (they found IE impossible to converge
+  above that σ and recommend C2 where the two differ). The exponential
+  average is evaluated as a shifted log-sum-exp.
+* `pbsolve.interaction_energy(coords, charges, lj_radii, lj_epsilons,
+  ligand_atoms)`: Coulomb (e²/4πε0 = 332.0637133 kcal·Å/mol, CODATA 2018,
+  the same constants as OpenMM) and Lennard-Jones ε_ij[(R_ij/r)¹² − 2(R_ij/r)⁶]
+  with R_ij = R_i + R_j, ε_ij = √(ε_i ε_j) over every receptor–ligand pair, no
+  cutoff.
+
+**Closed forms** (`tests/test_entropy.py`). For energies that take two
+values a and b with frequencies p and 1 − p, IE = kT ln(p e^{β(a−m)} + (1 − p)
+e^{β(b−m)}) and C2 = p(1 − p)(a − b)²/2kT: three cases agree to 1e-12. IE and
+C2 are invariant under a constant shift, positive (Jensen), and C2 scales as
+1/kT.
+
+**Normal energies** (exact −TΔS = σ²/2kT for IE and C2; mean ± sd over 20
+random samples, kcal/mol, 298.15 K):
+
+| σ | exact | IE, 10³ frames | IE, 10⁴ | IE, 10⁵ | C2, 10³ | C2, 10⁵ |
+|---|---|---|---|---|---|---|
+| 0.5 | 0.211 | 0.208 ± 0.010 | 0.211 ± 0.003 | 0.211 ± 0.001 | 0.208 ± 0.008 | 0.211 ± 0.001 |
+| 1 | 0.844 | 0.824 ± 0.060 | 0.844 ± 0.017 | 0.842 ± 0.005 | 0.833 ± 0.033 | 0.843 ± 0.003 |
+| 2 | 3.376 | 3.04 ± 0.38 | 3.34 ± 0.25 | 3.34 ± 0.10 | 3.33 ± 0.13 | 3.372 ± 0.012 |
+| 3 | 7.595 | 5.87 ± 0.81 | 6.80 ± 0.67 | 7.05 ± 0.44 | 7.50 ± 0.30 | 7.588 ± 0.028 |
+| 4 | 13.50 | 8.86 ± 1.23 | 10.53 ± 1.05 | 11.19 ± 0.81 | 13.33 ± 0.53 | 13.49 ± 0.05 |
+| 6 | 30.38 | 14.99 ± 2.02 | 18.19 ± 1.73 | 19.79 ± 1.46 | 29.98 ± 1.18 | 30.35 ± 0.11 |
+
+IE converges from below and needs exponentially many frames as σ grows;
+C2 is unbiased up to its 1/N term. This is the behaviour Ekberg & Ryde
+describe, and the reason the result carries σ, both estimates and a
+`reliable` flag. With σ = 200 kcal/mol (βΔE ~ 10³) IE stays finite and equals
+the largest fluctuation minus kT ln N, as it must when one frame dominates.
+
+**Interaction energy against OpenMM 8.6.** tleap/ff14SB peptides
+ACE-ALA-ARG-LYS-TRP-NME (92 atoms, +2 e) and ACE-GLU-ASP-PHE-NME (59 atoms,
+−2 e), the ligand shifted along y; OpenMM `NoCutoff`, Reference platform,
+E_int = E(all) − E(receptor only) − E(ligand only) + E(none), with the
+other group's charges and ε switched off (bonded terms and the 1-4
+exceptions stay inside the molecules); pbsolve parameters from
+`charges_from_system` and `lennard_jones_from_system`:
+
+| shift (Å) | closest pair (Å) | OpenMM (kcal/mol) | pbsolve | Coulomb | LJ | rel. diff |
+|---|---|---|---|---|---|---|
+| 11 | 1.72 | 5.54656389 | 5.54656389 | −106.72 | 112.26 | 1.7e-12 |
+| 13 | 3.10 | −96.03719065 | −96.03719065 | −94.94 | −1.10 | 2.4e-13 |
+| 20 | 9.52 | −62.90649119 | −62.90649119 | −62.88 | −0.026 | 5.3e-13 |
+
+Overlapping placements (closest pair 0.16–1.5 Å, E_int up to 3e15 kcal/mol)
+agree to 5e-14. A synthetic system with exceptions inside each group is
+the unit test; an explicit double loop over the pairs (ligand larger than
+one 256-atom chunk, 7000 pairs) agrees to 1e-12.
+
+**Mutations.** 16/16 seeded faults caught (log-sum-exp shift, mean vs sum,
+ddof of σ and of the block errors, the 2 in C2 and in the LJ term, the σ
+limit and its comparison, the block-size check, combining rules, the chunk
+stride, the dielectric, the default receptor).
 
 ## Size-modified PB (`equation="smpbe"`)
 

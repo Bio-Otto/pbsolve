@@ -404,14 +404,15 @@ of Gaussian-dielectric pKa methods (4.21).
 
 ### First public release
 
-v0.1–v0.3 are done; the repository is public since 2026-11-15, and the only
+v0.1–v0.3 are done; the repository is public since 2026-11-15, and the latest
 tag is v0.0.3. The first release makes the work usable and checkable by
 others. Releases are vX.Y.0 tags that pass CI (decision 5, section 8).
 
 **R1 Public repository and documentation site.** The repository is public
-(done, 2026-11-15). Publish the Sphinx site (Read the Docs or GitHub Pages)
-with versioned documentation and install instructions; tag the release and
-archive it with a DOI.
+(done, 2026-11-15), and Read the Docs builds the site from every push and tag
+(https://pbsolve.readthedocs.io, `latest` and `stable`). With v0.1.0: link
+it from the README, add install instructions and versioned documentation;
+tag the release and archive it with a DOI.
 *Evidence:* the site builds from the tag with `-W`, and every guide example
 runs.
 
@@ -481,6 +482,16 @@ trajectory [Duan, Liu & Zhang 2016], which large benchmarks (summarised in
 MM/PB(GB)SA, and
 optional formula-based entropy estimates [ChemRxiv 2024 preprint]. Variable
 or residue-dependent interior dielectric as an option, not a default.
+*Status: interaction entropy done (0.0.4); the interior dielectric and the
+formula-based estimates remain.*
+* `pbsolve.interaction_entropy` gives IE and its second-order cumulant C2,
+  σ, standard errors over blocks of frames and `reliable` (σ ≤ 15 kJ/mol), as
+  [Ekberg & Ryde 2021] recommend; `pbsolve.interaction_energy` the Coulomb +
+  Lorentz–Berthelot Lennard-Jones energy between receptor and ligand (equal to
+  OpenMM to 1.7e-12 on ff14SB peptides); `examples/mmpbsa_openmm.py` reports
+  both. Closed forms and the normal-energy limits in docs/VALIDATION.md.
+* Remaining: variable or residue-dependent interior dielectric; the
+  formula-based estimates.
 
 **4.17 Membranes.** Implicit membrane slab with a depth-dependent dielectric,
 which correlates better with experiment than a uniform slab [Greene et al.
@@ -640,6 +651,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Di Florio V, Ansalone P, Siryk SV, Decherchi S, de Falco C, Rocchia W. NextGenPB: an analytically-enhanced finite element solver for the linearized Poisson–Boltzmann equation. Comput. Phys. Commun. 317, 109816 (2025).
 * Duan L, Liu X, Zhang JZH. Interaction entropy: a new paradigm for highly efficient and reliable computation of protein–ligand binding free energy. J. Am. Chem. Soc. 138, 5722 (2016).
 * Dzubiella J, Swanson JMJ, McCammon JA. Coupling hydrophobicity, dispersion, and electrostatics in continuum solvent models. Phys. Rev. Lett. 96, 087802 (2006).
+* Ekberg V, Ryde U. On the use of interaction entropy and related methods to estimate binding entropies. J. Chem. Theory Comput. 17, 5379 (2021).
 * Geng W, Yu S, Wei GW. Treatment of charge singularities in implicit solvent models. J. Chem. Phys. 127, 114106 (2007).
 * Genheden S, Ryde U. The MM/PBSA and MM/GBSA methods to estimate ligand-binding affinities. Expert Opin. Drug Discov. 10, 449 (2015).
 * Gilson MK, Davis ME, Luty BA, McCammon JA. Computation of electrostatic forces on solvated molecules using the Poisson–Boltzmann equation. J. Phys. Chem. 97, 3591 (1993).
