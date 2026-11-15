@@ -48,6 +48,7 @@ with an error estimate. Four properties set the direction:
 | v0.1 | Performance foundation | multigrid-preconditioned CG (CPU + GPU), robust NVRTC loading, batched multi-frame solves, mixed precision |
 | v0.2 | Accuracy | reaction-field decomposition, B-spline charges, analytic test suite, second-order interface method, error estimates |
 | v0.3 | Physics | nonlinear and size-modified PB, forces, smooth dielectric models |
+| First public release | Release | public repository and documentation site, PyPI wheels and the conda-forge recipe, speed on an idle machine and several GPUs, cross-check of the Gaussian dielectric |
 | v0.4 | End-point free energies | nonpolar models, per-residue decomposition, entropy options, membranes, uncertainty, public benchmark |
 | v0.5 | Gradients and ML | adjoint gradients, PyTorch/JAX interop, dataset generation, Δ-learning hooks |
 | v0.6+ | New solution methods | boundary-element (FMM/treecode), domain-decomposition LPB, PB-based pKa, AMD/HIP |
@@ -55,7 +56,8 @@ with an error estimate. Four properties set the direction:
 
 The order follows dependencies: multigrid makes fine grids affordable, which
 the accuracy work needs; the decomposed formulation from v0.2 is the basis
-for forces (v0.3) and gradients (v0.5).
+for forces (v0.3) and gradients (v0.5). v0.1–v0.3 are done; the first public
+release is the next milestone besides v0.4 (its timing is decision 5).
 
 ## 4. Detailed plan
 
@@ -400,6 +402,47 @@ of Gaussian-dielectric pKa methods (4.21).
   undefined; a smoothed contour would be a new model), and `npbe`, whose
   Boltzmann density diverges at the charges under the bounded Born penalty.
 
+### First public release
+
+v0.1–v0.3 are done, but the repository is private and the only tag is
+v0.0.1. The first public release makes the work usable and checkable by
+others. Its timing and version number are decision 5 (section 8).
+
+**R1 Public repository and documentation site.** Make the repository
+public; publish the Sphinx site (Read the Docs or GitHub Pages) with
+versioned documentation and install instructions; tag the release and
+archive it with a DOI.
+*Evidence:* the site builds from the tag with `-W`, and every guide example
+runs.
+
+**R2 Packages.** PyPI wheels besides the conda-forge recipe
+(`docs/PACKAGING.md`): Linux x86_64 first, a CPU build and CUDA builds,
+which load the driver and NVRTC at runtime and run on the CPU without them.
+How pip users choose the CUDA major (separate package names or extras) is
+part of the work.
+*Evidence:* `pip install` in a clean environment passes `pbsolve test` on a
+machine without a GPU and on one with a GPU.
+
+**R3 Speed on reference hardware.** A first measurement on a shared machine
+(2026-11-15; GPU 94 % busy with other jobs): 1YCR, 0.15 M, 129³ with two
+focusing levels takes 8.96 s with APBS 3.4.1, 2.52 s with pbsolve on 18 CPU
+threads and 0.48 s on an RTX 2080 SUPER. Repeat this on an idle machine for
+several system sizes, with matched and unmatched CPU thread counts, and on at
+least two further NVIDIA GPU generations (consumer and data-centre).
+*Evidence:* tables in `docs/VALIDATION.md` with hardware, driver and load;
+CPU = CUDA energies on every GPU.
+
+**R4 Cross-check of the Gaussian dielectric (4.13) with pyDelPhi.** pyDelPhi
+implements DelPhi's Gaussian dielectric and salt model; it is AGPL-3.0, so
+it runs only as a separate program and only its outputs are compared
+(section 7). Compare dielectric and ion maps and solvated-state energies on
+shared grids with the same σ, interior dielectric and radii, and solvation
+energies with pdie = 1, where pbsolve's contour reference coincides with Li
+et al.'s (vacuum beyond the contour).
+*Evidence:* every difference in the maps explained to the last digit or by a
+stated difference in definition (e.g. DelPhi's cutoff at 3σ, the sign of the
+Born penalty).
+
 ### v0.4 — End-point free energies (MM-PBSA and related)
 
 **4.14 Nonpolar solvation.** Besides γ·SASA + β: a solvent-accessible-volume
@@ -516,17 +559,18 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 | Level | Tests | Run |
 |---|---|---|
 | Analytic | Born, Kirkwood (with salt), two spheres, planar interface; observed convergence order | every PR |
-| Cross-code | map- and energy-level comparison with established FD and BEM codes | release |
+| Cross-code | map- and energy-level comparison with established FD and BEM codes (APBS done; pyDelPhi for the Gaussian dielectric, R4) | release |
 | Physical | forces vs energy differences, energy conservation, nonlinear → linear limit | every PR (small), release (full) |
 | Applied | small-molecule solvation (FreeSolv), protein–ligand binding benchmark, membrane systems | release |
-| Performance | iterations vs spacing, frames per second, GPU vs CPU, memory | release, tracked over versions |
+| Performance | iterations vs spacing, frames per second, GPU vs CPU, memory; on an idle machine and several GPU generations (R3) | release, tracked over versions |
 
 ## 7. Licensing guardrails
 
 * pbsolve stays MIT (plus the BSD notices in `THIRD_PARTY_NOTICES.md`).
   Implement methods from **papers**. Do not copy or translate code from
-  copyleft or non-OSI projects; for example NextGenPB is GPL-3.0 and PROPKA
-  is LGPL-2.1. Check the license of any other code before reading it.
+  copyleft or non-OSI projects; for example NextGenPB is GPL-3.0, pyDelPhi
+  AGPL-3.0 and PROPKA LGPL-2.1. Check the license of any other code before
+  reading it. Copyleft programs may be run separately to compare outputs.
 * Permissive libraries (MIT/BSD/Apache, e.g. Bempp-cl, Exafmm) may be optional
   dependencies; copyleft libraries (e.g. FEniCSx) only as optional, separately
   installed runtime dependencies.
@@ -546,6 +590,9 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
    shipping trained surrogate models.
 4. **Which second method first:** boundary elements (large systems, exact far
    field) or ddLPB (fast forces for MD).
+5. **Timing and version number of the first public release:** now, as
+   v0.1.0 (as planned for the documentation site) or v0.3.0 (the v0.1–v0.3
+   scope is done), or after v0.4, with the binding benchmark (4.19) to show.
 
 ## References
 

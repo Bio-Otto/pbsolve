@@ -50,6 +50,9 @@ finds the pip NVRTC in `site-packages/nvidia/` by itself. The NVRTC may be
 newer than the driver as long as the major version matches: kernels are
 compiled to CUBIN, not PTX.
 
+No wheels are on PyPI yet; publishing them is part of the first public
+release (`docs/ROADMAP.md`, R2).
+
 ## Troubleshooting
 
 `pbsolve info` (or `pbsolve.cuda_info()`) prints whether CUDA was compiled in,
