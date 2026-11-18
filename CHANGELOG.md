@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.7 — 2026-11-18
+
 ### Added
 
 - Periodic lateral boundaries: `Solver(period=(Lx, Ly))` makes the solvated
