@@ -17,6 +17,11 @@
   summary lines are unchanged. For the binding energy of a 5 ns MDM2–p53
   simulation the corrected error is 5.3 times SD/√N.
 
+### Documentation
+
+- The pbsolve logo heads the README and the documentation site
+  (`docs/_static/pbsolve-logo.svg`; its mark is the site's icon).
+
 ## 0.0.7 — 2026-11-18
 
 ### Added

@@ -71,4 +71,8 @@ napoleon_numpy_docstring = True
 
 html_theme = "furo"
 html_title = f"pbsolve {release}"
-html_static_path: list[str] = []
+html_static_path = ["_static"]
+html_logo = "_static/pbsolve-logo.svg"
+html_favicon = "_static/pbsolve-mark.svg"
+# The logo carries the name.
+html_theme_options = {"sidebar_hide_name": True}
