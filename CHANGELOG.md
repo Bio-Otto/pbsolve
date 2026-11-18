@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added
+
+- Implicit membrane: `Solver(zmem=, lmem=, mdie=)` adds a slab normal to z
+  without ions to the solvated state, by the rule of APBS' `draw_membrane2`
+  (APBSmem): non-solute faces get the membrane's dielectric, nodes lose their
+  ions, `membrane_exclusion=(r_bottom, r_top)` leaves a cone for channel
+  pores. pbsolve's maps equal `draw_membrane2`'s node for node.
+  `membrane_profile="greene2019"` (Greene et al. 2019) or (depth, ε) points
+  give a dielectric that varies with depth (PCHIP); `membrane_fill=True`
+  keeps pores the protein encloses as water. Command line: `--zmem`,
+  `--lmem`, `--mdie`, `--membrane-profile`, `--membrane-exclusion`,
+  `--membrane-fill`. A charge in the membrane agrees with the exact layered
+  solution to 0.2 %. Not available with `gauss`, atom dielectrics,
+  `coulomb="analytic"` or forces; `pbsolve.apbs` refuses it.
+
 ## 0.0.5 — 2026-11-15
 
 ### Added

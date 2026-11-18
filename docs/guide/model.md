@@ -243,6 +243,73 @@ variable = pbsolve.Solver(ionic_strength=0.15, pdie=1.0)
 print(f"{variable.polar_solvation(coords, charges, radii, dielectrics=eps).energy:.2f} kcal/mol")
 ```
 
+### Implicit membrane
+
+`zmem` adds a lipid membrane to the solvated state as a slab normal to z,
+from `zmem` to `zmem + lmem` (Å), without mobile ions [Callenberg et al.
+2010]. The rule is that of APBS' `draw_membrane2` (APBSmem): every
+dielectric face in the slab that is not solute gets the membrane's
+dielectric, and every node in the slab loses its ions. APBS itself has no
+keyword for it; `draw_membrane2` edits APBS' maps. pbsolve's maps are
+identical to its output node for node (`mol` and `spl2`, with and without
+an exclusion cone; [validation](../VALIDATION)).
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `zmem` | none | z of the lower membrane surface (Å); none: no membrane |
+| `lmem` | 40 | thickness (Å) |
+| `mdie` | 2.0 | dielectric of a uniform membrane |
+| `membrane_profile` | none | a dielectric that varies with depth instead of `mdie` (below) |
+| `membrane_exclusion` | (0, 0) | radii (Å) at the bottom and the top of a cone around the vertical axis that stays water, for channel pores |
+| `membrane_fill` | off | keep water and ions where a membrane plane is not connected to the sides of the box |
+
+The axis of the cone runs through the grid's centre shifted by half a
+spacing in x and y, as in `draw_membrane2`, so the protein has to be
+centred and aligned with z (the automatic grid is centred on it).
+`membrane_fill=True` finds pores without a cone: in every z plane of the
+slab, only the parts connected to the sides of the box become membrane, so
+a pore or cavity that the protein encloses keeps its water and ions.
+
+**Depth profile.** The low dielectric of the hydrocarbon core rises
+through the ester and headgroup regions to that of water. Greene et al.
+(2019) fitted this profile to decharging free energies of amino-acid side
+chains in an explicit DMPC membrane. It is ε = 1, 2, 4, 20 and 80 at 20,
+15, 10, 5 and 0 Å below the membrane surface, interpolated by PCHIP. For
+the P2Y12 receptor it raised the correlation of MM-PBSA with experiment
+from R = 0.59 (uniform ε = 4) to 0.92. `membrane_profile="greene2019"`
+uses it, and a sequence of (depth, ε) points defines another profile. The
+depth is measured from the nearer surface, and the value of the last point
+continues to the centre; a membrane thicker than 40 Å therefore has a
+wider ε = 1 core. Amber implements the same data (`membraneopt=2`), but
+its interpolation of a thicker membrane's core is not documented, so the
+two need not agree to the last digit.
+
+The **reference state** has no membrane: ΔG_polar is the transfer of the
+solute from a medium of `pdie` into water with the membrane. With
+`pbsa_solvation_frame` the complex, receptor and ligand all see the same
+membrane on the complex's grid. The non-polar term γ·SASA still counts the
+area buried in the membrane as exposed to water.
+
+**Boundaries.** The slab runs into the faces of the box, where the
+boundary condition (`mdh`, `zero`, ...) assumes water around the molecule.
+For a charge in the middle of a 30 Å slab against the exact layered
+solution, the error is below 0.2 % with a 150 Å coarse box and 0.25 Å
+spacing. A larger coarse box does not help at 0.5 Å (−2.3 % with 600 Å):
+its coarse levels resolve the slab badly. Amber uses periodic lateral
+boundaries for membranes; pbsolve does not have them yet.
+
+Not available with `surface="gauss"`, atom dielectrics, `coulomb="analytic"`
+or [forces](#forces). With the GPU, the membrane is drawn into the maps on
+the host: a calculation of the APBS helix example took 0.15 instead of
+0.11 s.
+
+```{code-block} python
+# A membrane protein aligned with z and centred at the origin; a 40 Å bilayer.
+membrane = pbsolve.Solver(ionic_strength=0.1, pdie=4.0, zmem=-20.0, lmem=40.0,
+                          membrane_profile="greene2019", membrane_fill=True)
+result = membrane.polar_solvation(coords, charges, radii)
+```
+
 ## Charges
 
 Point charges are spread onto the grid nodes; `chgm` chooses how, with

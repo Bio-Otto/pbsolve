@@ -507,6 +507,18 @@ or residue-dependent interior dielectric as an option, not a default.
 which correlates better with experiment than a uniform slab [Greene et al.
 2019], and periodic lateral boundaries to avoid edge effects. Benchmarks in
 [Wang et al. 2022] show that membrane dielectric parameters must be tuned per system.
+*Status: membrane maps done (0.0.6); periodic lateral boundaries remain.*
+* `zmem`, `lmem`, `mdie`: the slab of APBS' `draw_membrane2` [Callenberg et
+  al. 2010] (non-solute faces get the membrane's ε, nodes lose their ions,
+  optional exclusion cone `membrane_exclusion`); the maps are identical to
+  `draw_membrane2`'s output. `membrane_profile="greene2019"` or user (depth,
+  ε) points (PCHIP [Fritsch & Carlson 1980]); `membrane_fill` keeps pores
+  enclosed by the protein as water. A charge in the membrane agrees with the
+  exact layered solution (images [Parsegian 1969] and a Hankel-transform
+  reference for the profile) to 0.2 %.
+* Remaining: periodic lateral boundaries (Amber uses them; the slab now
+  meets the box faces, measured in docs/VALIDATION.md), a membrane potential
+  (APBSmem's `memv`), non-polar terms that know the membrane.
 
 **4.18 Uncertainty and convergence over frames.** Block averaging, bootstrap
 confidence intervals and correlation-time estimates in `pbsolve mmpbsa`, so a
@@ -650,6 +662,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Bosy M, Scroggs MW, Betcke T, Burman E, Cooper CD. Coupling finite and boundary element methods to solve the Poisson–Boltzmann equation for electrostatics in molecular solvation. J. Comput. Chem. (2024).
 * Cai Q, Wang J, Zhao HK, Luo R. On removal of charge singularity in Poisson–Boltzmann equation. J. Chem. Phys. 130, 145101 (2009).
 * Cai Q, Ye X, Wang J, Luo R. Dielectric boundary forces in numerical Poisson–Boltzmann methods: theory and numerical strategies. Chem. Phys. Lett. 514, 368 (2011).
+* Callenberg KM, Choudhary OP, de Forest GL, Gohara DW, Baker NA, Grabe M. APBSmem: a graphical interface for electrostatic calculations at the membrane. PLoS ONE 5, e12722 (2010).
 * Chen D, Chen Z, Chen C, Geng W, Wei GW. MIBPB: a software package for electrostatic analysis. J. Comput. Chem. 32, 756 (2011).
 * Chen et al. Poisson–Boltzmann-based machine learning model for electrostatic analysis. Biophys. J. (2024).
 * Chen L, Holst MJ, Xu J. The finite element approximation of the nonlinear Poisson–Boltzmann equation. SIAM J. Numer. Anal. 45, 2298 (2007).
@@ -662,6 +675,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Duan L, Liu X, Zhang JZH. Interaction entropy: a new paradigm for highly efficient and reliable computation of protein–ligand binding free energy. J. Am. Chem. Soc. 138, 5722 (2016).
 * Dzubiella J, Swanson JMJ, McCammon JA. Coupling hydrophobicity, dispersion, and electrostatics in continuum solvent models. Phys. Rev. Lett. 96, 087802 (2006).
 * Ekberg V, Ryde U. On the use of interaction entropy and related methods to estimate binding entropies. J. Chem. Theory Comput. 17, 5379 (2021).
+* Fritsch FN, Carlson RE. Monotone piecewise cubic interpolation. SIAM J. Numer. Anal. 17, 238 (1980).
 * Geng W, Yu S, Wei GW. Treatment of charge singularities in implicit solvent models. J. Chem. Phys. 127, 114106 (2007).
 * Genheden S, Ryde U. The MM/PBSA and MM/GBSA methods to estimate ligand-binding affinities. Expert Opin. Drug Discov. 10, 449 (2015).
 * Gilson MK, Davis ME, Luty BA, McCammon JA. Computation of electrostatic forces on solvated molecules using the Poisson–Boltzmann equation. J. Phys. Chem. 97, 3591 (1993).
@@ -692,6 +706,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Notay Y. Flexible conjugate gradients. SIAM J. Sci. Comput. 22, 1444 (2000).
 * Qi R, Botello-Smith WM, Luo R. Acceleration of linear finite-difference Poisson–Boltzmann methods on graphics processing units. J. Chem. Theory Comput. 13, 3378 (2017).
 * Qi R, Luo R. Robustness and efficiency of Poisson–Boltzmann modeling on graphics processing units. J. Chem. Inf. Model. 59, 409 (2019).
+* Parsegian VA. Energy of an ion crossing a low dielectric membrane: solutions to four relevant electrostatic problems. Nature 221, 844 (1969).
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
 * Reis PBPS, Vila-Viçosa D, Rocchia W, Machuqueiro M. PypKa: a flexible Python module for Poisson–Boltzmann-based pKa calculations. J. Chem. Inf. Model. 60, 4442 (2020).
 * Rocchia W, Alexov E, Honig B. Extending the applicability of the nonlinear Poisson–Boltzmann equation: multiple dielectric constants and multivalent ions. J. Phys. Chem. B 105, 6507 (2001).

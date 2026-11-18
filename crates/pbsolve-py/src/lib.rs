@@ -6,6 +6,7 @@ use numpy::ndarray::ArrayView2;
 use numpy::{PyArray1, PyArray2, PyArray3, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArray3};
 use pbsolve_core::batch::{calculation_device_bytes, device_workers, polar_solvation_batch as core_batch, Job};
 use pbsolve_core::charge::spread_charges_with;
+use pbsolve_core::membrane::{Membrane, GREENE_2019};
 use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
 use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
 use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, kt_in_kj_per_mol};
@@ -614,6 +615,29 @@ impl PyPolarForces {
 /// ion_size : float
 ///     With ``equation="smpbe"``: edge of the lattice cell one ion fills, in
 ///     Å (APBS ``smpbe vol``); all ions have this size.
+/// zmem : float, optional
+///     Adds an implicit membrane to the solvated state (APBS ``draw_membrane2``,
+///     APBSmem; APBS itself has no keyword for it): a slab normal to z from
+///     ``zmem`` to ``zmem + lmem`` in Å without ions, where every grid face
+///     that is not solute gets ``mdie``. Default: no membrane.
+/// lmem : float
+///     Thickness of the membrane in Å (APBS ``Lmem``).
+/// mdie : float
+///     Dielectric of a uniform membrane.
+/// membrane_profile : str or sequence of (float, float), optional
+///     A dielectric that varies with depth instead of ``mdie``: points (depth
+///     below the nearer membrane surface in Å, ε), the first at depth 0,
+///     interpolated by PCHIP and constant beyond the last. "greene2019" is the
+///     profile of Greene et al. (2019), from 80 at the surface to 1 at 20 Å
+///     depth and below.
+/// membrane_exclusion : (float, float)
+///     Radii in Å, at the bottom and at the top of the membrane, of a cone
+///     around the vertical axis through the grid's centre (shifted by half a
+///     spacing in x and y, as ``draw_membrane2``) that the membrane leaves out,
+///     for channel pores (APBS ``R_bottom``, ``R_top``).
+/// membrane_fill : bool
+///     Leave the water and ions in every part of a membrane plane that is not
+///     connected to the sides of the box, such as a pore the solute encloses.
 ///
 /// Raises
 /// ------
@@ -802,7 +826,8 @@ impl PySolver {
         cfac = 1.7, fadd = 20.0, tol = 1e-8, max_iter = 20000, dime_policy = "pbsolve",
         preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid",
         equation = "lpbe", ion_size = 0.0, swin = 0.3, gauss_sigma = 0.93,
-        gauss_contour = 20.0
+        gauss_contour = 20.0, zmem = None, lmem = 40.0, mdie = 2.0, membrane_profile = None,
+        membrane_exclusion = (0.0, 0.0), membrane_fill = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -833,7 +858,30 @@ impl PySolver {
         swin: f64,
         gauss_sigma: f64,
         gauss_contour: f64,
+        zmem: Option<f64>,
+        lmem: f64,
+        mdie: f64,
+        membrane_profile: Option<Bound<'_, PyAny>>,
+        membrane_exclusion: (f64, f64),
+        membrane_fill: bool,
     ) -> PyResult<Self> {
+        let profile: Option<std::sync::Arc<[[f64; 2]]>> = match membrane_profile {
+            None => None,
+            Some(p) => match p.extract::<String>() {
+                Ok(name) if name.eq_ignore_ascii_case("greene2019") => Some(GREENE_2019.to_vec().into()),
+                Ok(name) => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown membrane_profile '{name}' (use 'greene2019' or (depth, ε) points)"
+                    )))
+                }
+                Err(_) => {
+                    let points: Vec<(f64, f64)> = p.extract().map_err(|_| {
+                        PyValueError::new_err("membrane_profile must be 'greene2019' or a sequence of (depth, ε)")
+                    })?;
+                    Some(points.into_iter().map(|(d, e)| [d, e]).collect::<Vec<_>>().into())
+                }
+            },
+        };
         let mut params = PbParams {
             pdie,
             sdie,
@@ -853,6 +901,14 @@ impl PySolver {
             tol,
             max_iter,
             preconditioner: Preconditioner::parse(preconditioner).map_err(to_py)?,
+            membrane: zmem.map(|bottom| Membrane {
+                bottom,
+                thickness: lmem,
+                dielectric: mdie,
+                profile,
+                exclusion: [membrane_exclusion.0, membrane_exclusion.1],
+                fill: membrane_fill,
+            }),
             ..PbParams::default()
         };
         params = match ions {
@@ -915,6 +971,19 @@ impl PySolver {
         d.set_item("cfac", self.cfac)?;
         d.set_item("fadd", self.fadd)?;
         d.set_item("dime_policy", self.dime_policy.as_str())?;
+        let m = p.membrane.as_ref();
+        d.set_item("zmem", m.map(|m| m.bottom))?;
+        d.set_item("lmem", m.map_or(40.0, |m| m.thickness))?;
+        d.set_item("mdie", m.map_or(2.0, |m| m.dielectric))?;
+        let profile: Option<Vec<(f64, f64)>> = m
+            .and_then(|m| m.profile.as_ref())
+            .map(|p| p.iter().map(|q| (q[0], q[1])).collect());
+        d.set_item("membrane_profile", profile)?;
+        d.set_item(
+            "membrane_exclusion",
+            m.map_or((0.0, 0.0), |m| (m.exclusion[0], m.exclusion[1])),
+        )?;
+        d.set_item("membrane_fill", m.is_some_and(|m| m.fill))?;
         Ok(d)
     }
 

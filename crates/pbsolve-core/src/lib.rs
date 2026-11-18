@@ -37,6 +37,7 @@ pub mod error;
 pub mod forces;
 pub mod gaussian;
 pub mod grid;
+pub mod membrane;
 pub mod molecule;
 pub mod multigrid;
 pub mod nonlinear;

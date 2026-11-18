@@ -56,6 +56,12 @@ Commands that solve take these options; they are the
 | `--dime-policy` | `pbsolve` | grid node counts: `pbsolve` (8k+1) or `apbs` (values APBS keeps) |
 | `--preconditioner` | `multigrid-f32` | `multigrid-f32`, `multigrid` or `jacobi` |
 | `--chgm` | `spl0` | charge assignment: `spl0` (trilinear), `spl2` or `spl4` (B-splines of order 3 and 5), as APBS `chgm` |
+| `--zmem` | none | add an implicit membrane: a slab from this z (Å) to z + `--lmem` without ions, where non-solute faces get `--mdie` (see [the model](model.md#implicit-membrane)) |
+| `--lmem` | 40 | membrane thickness (Å) |
+| `--mdie` | 2.0 | dielectric of a uniform membrane |
+| `--membrane-profile` | none | depth-dependent membrane dielectric: `greene2019` or `DEPTH:EPS,DEPTH:EPS,...` (depth below the nearer surface in Å from 0, PCHIP) |
+| `--membrane-exclusion` | 0 0 | radii (Å) at the bottom and the top of a cone around the grid's vertical axis left without membrane (channel pores) |
+| `--membrane-fill` | off | keep water and ions where a membrane plane is not connected to the sides of the box (pores the solute encloses) |
 
 ## `pbsolve info`
 

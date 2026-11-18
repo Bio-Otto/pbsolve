@@ -2,7 +2,7 @@
 //! (`pdie`, `sdie`, `srad`, `sdens`, `srfm`, `bcfl`, `ion`) so that an APBS
 //! input file can be translated one-to-one for validation.
 
-use crate::error::{invalid, Result};
+use crate::error::{invalid, PbError, Result};
 
 /// Preconditioner of the conjugate-gradient solver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,6 +354,9 @@ pub struct PbParams {
     /// and `pdie` is the dielectric outside the surface in the reference state.
     /// `None`: `pdie` everywhere inside.
     pub atom_pdie: Option<std::sync::Arc<[f64]>>,
+    /// Implicit membrane added to the solvated state (opt-in; APBS
+    /// `draw_membrane2`, [`crate::membrane`]). `None`: no membrane.
+    pub membrane: Option<crate::membrane::Membrane>,
 }
 
 impl Default for PbParams {
@@ -379,6 +382,7 @@ impl Default for PbParams {
             max_iter: 20_000,
             preconditioner: Preconditioner::DEFAULT,
             atom_pdie: None,
+            membrane: None,
         }
     }
 }
@@ -480,6 +484,15 @@ impl PbParams {
             }
             if self.coulomb == CoulombMethod::Analytic {
                 return invalid("atom dielectrics need coulomb 'grid': the decomposition assumes pdie inside");
+            }
+        }
+        if let Some(m) = &self.membrane {
+            m.validate().map_err(PbError::InvalidInput)?;
+            if self.surface == SurfaceMethod::Gaussian || self.atom_pdie.is_some() {
+                return invalid("a membrane needs one pdie and a surface other than 'gauss'");
+            }
+            if self.coulomb == CoulombMethod::Analytic {
+                return invalid("a membrane needs coulomb 'grid'");
             }
         }
         if self.equation != Equation::Linear && self.coulomb == CoulombMethod::Analytic {

@@ -275,6 +275,29 @@ class Solver:
     ion_size : float
         With ``equation="smpbe"``: edge of the lattice cell one ion fills, in
         Å (APBS ``smpbe vol``); all ions have this size.
+    zmem : float, optional
+        Adds an implicit membrane to the solvated state (APBS ``draw_membrane2``,
+        APBSmem; APBS itself has no keyword for it): a slab normal to z from
+        ``zmem`` to ``zmem + lmem`` in Å without ions, where every grid face
+        that is not solute gets ``mdie``. Default: no membrane.
+    lmem : float
+        Thickness of the membrane in Å (APBS ``Lmem``).
+    mdie : float
+        Dielectric of a uniform membrane.
+    membrane_profile : str or sequence of (float, float), optional
+        A dielectric that varies with depth instead of ``mdie``: points (depth
+        below the nearer membrane surface in Å, ε), the first at depth 0,
+        interpolated by PCHIP and constant beyond the last. "greene2019" is the
+        profile of Greene et al. (2019), from 80 at the surface to 1 at 20 Å
+        depth and below.
+    membrane_exclusion : (float, float)
+        Radii in Å, at the bottom and at the top of the membrane, of a cone
+        around the vertical axis through the grid's centre (shifted by half a
+        spacing in x and y, as ``draw_membrane2``) that the membrane leaves out,
+        for channel pores (APBS ``R_bottom``, ``R_top``).
+    membrane_fill : bool
+        Leave the water and ions in every part of a membrane plane that is not
+        connected to the sides of the box, such as a pore the solute encloses.
 
     Raises
     ------
@@ -320,6 +343,12 @@ class Solver:
         swin: float = 0.3,
         gauss_sigma: float = 0.93,
         gauss_contour: float = 20.0,
+        zmem: Optional[float] = None,
+        lmem: float = 40.0,
+        mdie: float = 2.0,
+        membrane_profile: Optional[str | Sequence[tuple[float, float]]] = None,
+        membrane_exclusion: tuple[float, float] = (0.0, 0.0),
+        membrane_fill: bool = False,
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:

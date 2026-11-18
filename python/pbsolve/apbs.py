@@ -201,6 +201,8 @@ def elec_from_solver(
         raise ValueError(f"interface={p['interface']!r} has no APBS equivalent; compare interface='sharp'")
     if p["coulomb"] != "grid":
         raise ValueError(f"coulomb={p['coulomb']!r} has no APBS equivalent; compare coulomb='grid'")
+    if p.get("zmem") is not None:
+        raise ValueError("APBS has no keyword for a membrane (draw_membrane2 edits its maps); compare without zmem")
     if p["equation"] == "smpbe":
         raise ValueError("equation='smpbe' cannot be compared: APBS 3.4.1 disables smpbe")
     srad = 0.0 if p["surface"] == "vdw" else p["srad"]

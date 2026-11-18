@@ -143,6 +143,36 @@ pub fn maps_on<B: Backend>(
         let [x, y, z] = exactly(be.mark_maps(grid, &[[0.0; 3]; 3], params.pdie, &[])?)?;
         return Ok([x, y, z, be.zeros(grid.len())?]);
     };
+    let maps = solvated_maps_on(be, grid, atoms, params, surf)?;
+    let Some(membrane) = &params.membrane else {
+        return Ok(maps);
+    };
+    // Not an APBS option inside APBS itself (draw_membrane2 edits its maps); on the host.
+    let mut host = [
+        be.download(&maps[0])?,
+        be.download(&maps[1])?,
+        be.download(&maps[2])?,
+        be.download(&maps[3])?,
+    ];
+    drop(maps);
+    membrane.apply(grid, params.pdie, &mut host);
+    let [x, y, z, k] = host;
+    Ok([
+        be.upload_owned(x)?,
+        be.upload_owned(y)?,
+        be.upload_owned(z)?,
+        be.upload_owned(k)?,
+    ])
+}
+
+/// The solvated state's maps of [`maps_on`] before any membrane.
+fn solvated_maps_on<B: Backend>(
+    be: &B,
+    grid: &Grid,
+    atoms: &[Atom],
+    params: &PbParams,
+    surf: &MolecularSurface,
+) -> Result<[B::Vector; 4]> {
     let kbar2 = kappa_bar_squared(&params.ions, params.temperature);
     if params.surface.is_smooth() {
         // Built on the host (spline surfaces: APBS `fillcoCoefSpline*`).

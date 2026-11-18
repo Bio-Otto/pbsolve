@@ -20,6 +20,7 @@ derived from the APBS 3.4.1 source code (https://github.com/Electrostatics/apbs)
 | `crates/pbsolve-core/src/spline.rs` | `src/mg/vpmg.c` (`fillcoCoefSpline`, `fillcoCoefSpline4`), `src/generic/vacc.c` (`Vacc_splineAccGradAtomNorm`, `Vacc_splineAccGradAtomNorm4`) |
 | `crates/pbsolve-core/src/forces.rs` | `src/mg/vpmg.c` (`qfForceSpline1`, `qfForceSpline2`, `qfForceSpline4`, `Vpmg_dbForce`, `Vpmg_ibForce`) |
 | `crates/pbsolve-core/src/apolar.rs` | `src/generic/vacc.c` (`Vacc_SASA`, `Vacc_atomSurf`, `Vacc_totalSAV`, `Vacc_wcaEnergyAtom`), `src/generic/vclist.c` (`Vclist_setupGrid`), `src/routines.c` (`initAPOL`) |
+| `crates/pbsolve-core/src/membrane.rs` | `examples/helix/draw_membrane2.c` (membrane slab, exclusion cone and axis of the dielectric and kappa maps) |
 
 `tests/data/apbs_alkanes/` holds the structures and the parameter file of APBS'
 `examples/alkanes` (Wagoner & Baker's alkane protocol), used as test data.

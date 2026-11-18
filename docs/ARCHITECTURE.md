@@ -64,6 +64,14 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   (cell-list search within the largest solute sphere + 2h); faces outside
   get `sdie`, and in the reference state, which rebuilds the surface,
   `pdie`. Batches carry them per job (`batch::Job::atom_pdie`).
+  The implicit membrane (`PbParams::membrane`, `membrane.rs`, host; APBS'
+  `draw_membrane2` rule) is drawn into the solvated state's finished maps
+  of every level: `maps_on` downloads them, `Membrane::apply` sets the
+  non-solute faces (ε > pdie + 0.05) and all nodes of the slab outside the
+  exclusion cone to the membrane's ε (uniform, or PCHIP in the depth below
+  the nearer surface) and κ̄² = 0, optionally only where a 4-connected path
+  in the z plane reaches the box sides (`fill`), and uploads them again. The
+  reference state has no membrane.
 * **Ions:** κ̄² is zero inside `r_i + r_ion` (largest listed ion radius) of
   every atom with `r_i > 0`, marked the same way.
 * **Nonlinear PB** (`nonlinear.rs`): with `equation="npbe"` the solvated

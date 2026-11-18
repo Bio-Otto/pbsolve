@@ -32,6 +32,9 @@ solution methods and integrations can be added.
   Gaussian densities instead of a surface (Li et al. 2013), with ions kept
   out by their Born energy; the reference state keeps the molecule's interior
   dielectric (Li et al. 2014), which makes the energies converge.
+* **Membranes** — `zmem`/`lmem` add an implicit membrane slab (APBS'
+  `draw_membrane2` rule, maps identical), uniform or with the depth profile
+  of Greene et al. (2019), with automatic pore filling.
 * **A dielectric per atom** — `dielectrics=` gives every atom (e.g. charged
   and other residues) its own interior dielectric, as DelPhi's multiple
   dielectrics; equal values reproduce one `pdie` bit for bit.

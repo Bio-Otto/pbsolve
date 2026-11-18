@@ -104,6 +104,44 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
         help="charge assignment to the grid, as APBS chgm (default spl0: trilinear; spl2, spl4: B-splines of "
         "order 3 and 5 over 3 and 5 nodes per axis)",
     )
+    p.add_argument(
+        "--zmem",
+        type=float,
+        help="add an implicit membrane to the solvated state: slab from this z (Å) to z + --lmem without ions, "
+        "non-solute faces get --mdie (APBS draw_membrane2); default: no membrane",
+    )
+    p.add_argument("--lmem", type=float, default=40.0, help="membrane thickness in Å")
+    p.add_argument("--mdie", type=float, default=2.0, help="dielectric of a uniform membrane")
+    p.add_argument(
+        "--membrane-profile",
+        help="depth-dependent membrane dielectric instead of --mdie: 'greene2019' or DEPTH:EPS,DEPTH:EPS,... "
+        "(depth below the nearer surface in Å, from 0; PCHIP)",
+    )
+    p.add_argument(
+        "--membrane-exclusion",
+        nargs=2,
+        type=float,
+        default=(0.0, 0.0),
+        metavar=("R_BOTTOM", "R_TOP"),
+        help="radii (Å) at the bottom and top of a cone around the grid's vertical axis left without membrane",
+    )
+    p.add_argument(
+        "--membrane-fill",
+        action="store_true",
+        help="keep water and ions where a membrane plane is not connected to the sides of the box (pores)",
+    )
+
+
+def _membrane_profile(text: Optional[str]) -> Optional[object]:
+    if text is None or text.lower() == "greene2019":
+        return text
+    try:
+        points = [tuple(float(v) for v in pair.split(":")) for pair in text.split(",")]
+    except ValueError:
+        points = []
+    if not points or any(len(p) != 2 for p in points):
+        raise ValueError(f"--membrane-profile: expected 'greene2019' or DEPTH:EPS,..., got {text!r}")
+    return points
 
 
 def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solver:
@@ -128,6 +166,12 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         dime_policy=dime_policy or args.dime_policy,
         preconditioner=args.preconditioner,
         chgm=args.chgm,
+        zmem=args.zmem,
+        lmem=args.lmem,
+        mdie=args.mdie,
+        membrane_profile=_membrane_profile(args.membrane_profile),
+        membrane_exclusion=tuple(args.membrane_exclusion),
+        membrane_fill=args.membrane_fill,
     )
 
 

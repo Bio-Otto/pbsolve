@@ -55,6 +55,7 @@ should update the status table below.
 | Per-atom and per-residue decomposition (0.0.3): `PolarResult.atom_energies`, `PBSAFrame.atom_terms`/`residue_terms`, `pbsolve mmpbsa --per-residue` | shares sum to ΔG_polar (1e-12; `spl0`, `spl2`, `spl4`, `coulomb="analytic"`, forces path identical); linear response: E_i of all charges = E_i alone + pair terms from single and pair solves (1e-8, focusing and `mdh`), pair terms symmetric with one level and `zero` (1e-8); APBS 3.4.1 `calcenergy comps` per atom ≤ 2.8e-6 of the largest share with `mdh`, 1e-9 (synthetic) and 3.2e-8 (1YCR) with `zero`; 9/9 mutations; energies bit-identical (CPU, CUDA), the shares add ≤ 50 ms to 5DK3; see *Per-atom and per-residue decomposition* |
 | Interaction entropy (0.0.4): `interaction_entropy`, `interaction_energy` | IE and C2 of two-level energy distributions = closed form (1e-12); normal energies: C2 = σ²/2kT, IE → C2, and the low bias of IE at large σ reproduces Ekberg & Ryde 2021 (σ = 3 kcal/mol: IE 7.0 ± 0.4 vs exact 7.60 with 10⁵ frames, C2 7.59 ± 0.03); no overflow at σ = 200 kcal/mol; E_int = OpenMM 8.6 (Reference platform, ff14SB peptides from tleap, bonds and 1-4 exceptions inside the molecules) to 1.7e-12, and = an explicit pair sum to 1e-12; 16/16 mutations; see *Interaction entropy* |
 | Atom dielectrics (0.0.5): `dielectrics=`, `residue_dielectrics`, `--residue-dielectric`, `PBSAFrame.delta_reference` | equal values reproduce `pdie` bit for bit (maps of `mol` and `vdw`, both states, `lpbe` and `npbe`, every Python method; fingerprint of the default path unchanged); every interior face owned by the atom of smallest power distance (brute force); a central charge sees only the outer boundary for any interior ε (0.25 Å: −1.50/−0.14/+0.64 % for ε 1/4/20); one sphere against Kirkwood with its own interior ≤ 0.92 % at 0.25 Å; two spheres with interiors 4 and 10 against the exact solution (`two_sphere_energy(sphere_pdie=)`) −0.32 % and −0.74 % at 0.25 Å (one `pdie`: −1.68 and −1.58 %); `delta_reference` = Coulomb/`pdie` exactly with `coulomb="analytic"`, to 0.03 % for 1YCR at 0.35 Å on the grid; CPU = CUDA ≤ 8e-14; 30/30 mutations; CPU +6 %, CUDA 2.2× (host maps); see *Atom dielectrics* |
+| Implicit membrane (0.0.6): `zmem`, `lmem`, `mdie`, `membrane_profile`, `membrane_exclusion`, `membrane_fill` | maps identical to APBS 3.4.1 `examples/helix/draw_membrane2.c` on its helix examples (`mol` and `spl2`, exclusion cone 3.1/5.3 Å and none, surfaces on node planes; 0 mismatches in all four maps); the membrane's effect on the solvated energy agrees with APBS solving those maps to 1.3e-4 (the DX route alone costs ~1e-5, with or without membrane); a charge in a uniform slab and in the Greene profile, with and without salt, against the exact layered solution (images, Hankel transform) within 0.02–0.17 %; PCHIP = SciPy to 1e-13; a membrane outside the grid is bit-identical to none; CPU = CUDA ≤ 3e-15; 25/26 mutations (one equivalent); CUDA 0.11 → 0.15 s on the helix example; see *Implicit membrane* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3352,6 +3353,104 @@ calculation. CUDA: 0.24 → 0.53 s. The maps are built on the host (map stage
 0.03 → 0.30 s), and the reference state rebuilds the molecular surface on
 every level (about 0.06 s each; a shortcut that sharing it with the solvated
 state would remove). The ownership search takes about 0.01 s per map.
+
+## Implicit membrane
+
+**Change.** `Solver(zmem=, lmem=, mdie=, membrane_profile=, membrane_exclusion=,
+membrane_fill=)`, core `PbParams::membrane`, `membrane.rs`. The rule of APBS'
+`draw_membrane2` [Callenberg et al. 2010]: in the slab zmem ≤ z ≤ zmem + lmem,
+every dielectric face whose value exceeds pdie + 0.05 gets the membrane's
+dielectric and every node loses its ions, except inside a cone around the
+vertical axis through the grid centre shifted by half a spacing. The
+profile option is the depth profile of Greene et al. (2019) or user points
+(PCHIP), and `membrane_fill` applies a 4-connected flood fill from the box
+sides in every z plane. The membrane is drawn into the solvated maps on the
+host. The reference state has no membrane.
+
+**APBS `draw_membrane2`** (compiled from APBS 3.4.1's examples; it edits the
+maps of APBS `mg-dummy`). The APBS helix examples on one level gave the
+following, with mismatches counted in dielx, diely, dielz and kappa:
+
+| helix, surface | zmem / lmem | cone (bottom, top) | grid | mismatches | faces/nodes changed |
+|---|---|---|---|---|---|
+| 0, mol | −19.87 / 39.6 | 3.1, 5.3 Å | 65³, 70 Å | 0 | 147 724–150 012 |
+| 8, mol | −20 / 40 | none | 65³, 70 Å | 0 | 150 789–155 009 |
+| 16, spl2 | −15.3 / 30.1 | 2.0, 7.5 Å | 97³, 100 Å | 0 | 270 550–270 785 |
+| 4, spl2 | −20 / 40, both surfaces on node planes (grid centre z = 0) | none | 33³, 64 Å | 0 | 21 620–22 721 |
+
+`draw_membrane2` takes the x spacing for the axis's y coordinate. pbsolve
+takes the y spacing. The two agree on APBS' cubic grids, and pbsolve's axis
+stays at the centre on others.
+
+**Energies against APBS.** APBS solves its edited maps (`usemap`, `bcfl
+zero`), pbsolve its own, on one 65³ level (helix 8, pdie 2, 0.1 M):
+
+| | APBS (kJ/mol) | pbsolve (APBS units) | rel. |
+|---|---|---|---|
+| solvated, water | 3979.283 | 3979.332 | 1.2e-5 |
+| solvated, membrane | 4251.097 | 4251.110 | 3.1e-6 |
+| membrane's effect | 271.814 | 271.778 | 1.3e-4 |
+
+The ~1e-5 differences also appear without the membrane: they come from
+passing maps and charges through DX files (7 digits). With `spl2` this route
+costs 2.6e-4 in both energies, and the membrane's effect still agrees to 1e-5
+(5.0302 vs 5.0301 kJ/mol).
+
+**Layered medium, exact.** A unit charge (radius 0, no solute) in the
+middle of the membrane, with pdie equal to the local ε so that the grid
+self-energy cancels. The reference is the reaction potential of a
+stratified medium by a Hankel transform in the plane: the log-derivative
+y = ε g'/g of the decaying solutions is carried through the layers, and
+g(z₀) = 2l_B/(y_below − y_above). For a uniform slab it equals the image
+series of Parsegian (1969) to 1e-15. The Greene profile is cut into
+0.01 Å layers. pbsolve used focusing from a 150 Å box to 24 Å:
+
+| membrane | salt | exact (kcal/mol) | 0.5 Å | 0.25 Å |
+|---|---|---|---|---|
+| uniform ε 2, 30 Å | none | −3.6970 | −0.02 % | +0.06 % |
+| uniform ε 2, 30 Å | 0.15 M | −3.7933 | +0.08 % | +0.14 % |
+| Greene profile, 50 Å | none | −11.0604 | −0.06 % | −0.04 % |
+| Greene profile, 50 Å | 0.15 M | −11.1421 | −0.02 % | +0.00 % |
+
+The slab meets the faces of the box, where `mdh` assumes water. The coarse
+box size shows how much that matters. With 300 Å the errors are at most
+0.41 %. With 600 Å the uniform slab is off by −2.3 % at 0.5 Å but only
+−0.17 % at 0.25 Å: the coarse level, at 12.5 Å spacing, no longer resolves
+a 30 Å slab. The profile, which is smooth, stays within 0.03 %. Periodic
+lateral boundaries (Amber) remain to be done.
+
+**Other checks.** A membrane outside the grid leaves energies bit-identical
+to no membrane. The reference energy is unchanged by a membrane. The profile
+equals SciPy's `PchipInterpolator` to 1e-13 on a non-monotone set of points
+with unequal steps that uses SciPy's end-slope limit. Flood fill reaches
+pockets open towards each of the four sides and keeps an enclosed pore. A
+cone keeps the axis and nothing more. CPU and CUDA agree to ≤ 3e-15 (uniform,
+profile + fill, npbe).
+
+**Application** (APBS helix example, pdie 10, 0.1 M, `spl2` charges, focusing
+from 300 to 100 Å). The insertion energy is ΔG_polar(membrane) − ΔG_polar(water)
+in kcal/mol for the helix at increasing height in a 40 Å membrane:
+
+| helix | 0 | 4 | 8 | 12 | 16 |
+|---|---|---|---|---|---|
+| uniform ε 2 | 30.34 | 30.36 | 28.63 | 20.47 | 14.04 |
+| Greene profile | 19.02 | 14.58 | 12.50 | 12.75 | 13.41 |
+
+**Mutations.** 25 of 26 seeded faults caught:
+* Rust (19): the slab's top and bottom, the cone's interpolation and axis,
+  the solute test, the node rule, the flood fill's neighbours, the z
+  shift of z faces, the depth, the PCHIP weights and end slope, validation,
+  the pdie passed to the rule, the refusal of forces and of atom
+  dielectrics, and the bindings' exclusion order, fill flag and profile
+  name.
+* Python (7): the CLI forwarding of every option and the APBS refusal.
+
+The survivor, `r >= R` for `r > R`, is equivalent: no face or node lies
+exactly at the radius, since the axis is half a spacing off the nodes.
+
+**Cost.** CUDA, shared GPU: the helix example went from 0.112 to 0.149 s (the
+maps travel to the host and back). On the CPU the extra pass over the slab is
+small.
 
 ## Size-modified PB (`equation="smpbe"`)
 

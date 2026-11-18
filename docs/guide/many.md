@@ -88,6 +88,23 @@ for xyz in pbsolve.io.frames(mol, "md.nc", step=10, atoms=solute):
 # ... and the last, shorter chunk
 ```
 
+### Membrane proteins
+
+For a membrane protein, give the solver an [implicit membrane](model.md#implicit-membrane)
+(`zmem`, `lmem`, and `membrane_profile="greene2019"` for the depth profile
+of Greene et al. 2019). Complex, receptor and ligand then all sit in the same
+membrane on the complex's grid. Align the protein with z and centre it, as
+the membrane is a slab normal to z, and pass the frames in that frame of
+reference. `membrane_fill=True` keeps the water in a channel the protein
+encloses. The non-polar term γ·SASA still counts the area buried in the
+membrane as water-exposed.
+
+```{code-block} python
+solver = pbsolve.Solver(ionic_strength=0.15, pdie=2.0, zmem=-20.0, lmem=40.0,
+                        membrane_profile="greene2019", membrane_fill=True)
+terms = pbsolve.pbsa_solvation_frame(solver, frame, charges, radii, ligand)
+```
+
 ### Residue-specific interior dielectrics
 
 `dielectrics` gives every complex atom its own interior dielectric (see

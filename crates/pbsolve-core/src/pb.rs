@@ -817,6 +817,9 @@ pub fn polar_forces<B: Backend>(be: &B, atoms: &[Atom], params: &PbParams, spec:
     if params.coulomb == CoulombMethod::Analytic {
         return invalid("forces need coulomb 'grid'");
     }
+    if params.membrane.is_some() {
+        return invalid("forces with a membrane are not available (its slab is not smooth in the atom positions)");
+    }
     if !params.surface.is_spline() {
         return invalid(format!(
             "forces need surface 'spl2' or 'spl4' (smooth in the atom positions, as APBS requires), not '{}'{}",
