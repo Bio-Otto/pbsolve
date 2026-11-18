@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.6 — 2026-11-18
+
 ### Added
 
 - Implicit membrane: `Solver(zmem=, lmem=, mdie=)` adds a slab normal to z
