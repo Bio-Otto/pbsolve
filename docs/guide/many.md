@@ -221,6 +221,48 @@ entropy = pbsolve.interaction_entropy(e_int)
 minus_t_ds = entropy.ie if entropy.reliable else entropy.c2
 ```
 
+## How many frames
+
+Consecutive frames are correlated, so the standard error of an average is
+larger than SD/√N. {py:func}`pbsolve.series_statistics` measures the
+statistical inefficiency g of a series, the number of frames per
+independent sample (Chodera et al. 2007, the estimator of pymbar, which
+pbsolve reproduces to rounding), and from it the correlation time
+τ = (g − 1)/2 frames, the effective number of frames N_eff = N/g, the
+standard error SD·√(g/N) with a Student-t interval, a block-averaging check
+(Flyvbjerg & Petersen 1989) and the frames a target error needs,
+g·(SD/target)² ({py:meth}`~pbsolve.timeseries.SeriesStatistics.frames_for`).
+`pbsolve.timeseries.block_bootstrap` gives intervals for other statistics.
+
+```{code-block} python
+total = [e + f.delta_solvation for e, f in zip(e_int, frames)]  # ΔE_MM + ΔG_solv per frame
+stats = pbsolve.series_statistics(total)
+print(f"{stats.mean:.2f} ± {stats.sem:.2f} kcal/mol, 95 % interval {stats.ci}")
+print(f"τ = {stats.tau:.1f} frames, {stats.n_eff:.0f} effective frames, "
+      f"{stats.frames_for(0.5)} frames for ± 0.5 kcal/mol")
+```
+
+Three lessons from a 5 ns implicit-solvent simulation of MDM2–p53 (1YCR,
+a frame every 5 ps; [validation](../VALIDATION)):
+
+* **Analyse the total.** The polar solvation term and the gas-phase
+  Coulomb interaction fluctuate by ±38 and ±40 kcal/mol but cancel
+  (correlation −0.98); their sum with the van der Waals term fluctuates by
+  ±7 kcal/mol. The error of the binding energy is that of the per-frame
+  total, not of its parts.
+* **Correlation matters.** For the total, g = 28 (τ = 67 ps): the 1000
+  frames are worth 36 independent ones, and the standard error is
+  1.2 kcal/mol instead of SD/√N = 0.23.
+* **A short run cannot see its slow motions.** The first 0.5 ns showed no
+  correlation (g = 1.1) and promised ± 0.5 kcal/mol from 149 frames; the
+  whole run needs 5700. A correlation time can only be measured from a run
+  much longer than it, so trust these numbers only with at least 20
+  effective frames (`enough`) and a blocking curve that levels off
+  (`pbsolve.timeseries.block_averages`), and prefer several independent
+  simulations: the standard deviation of their means over √k does not
+  depend on the correlation within each (Genheden & Ryde 2010; Grossfield
+  et al. 2018).
+
 ## From the command line
 
 `pbsolve mmpbsa` does all of this for a topology and a trajectory, and writes
@@ -232,7 +274,12 @@ pbsolve mmpbsa complex.prmtop md.nc --ligand "resname LIG" --step 10 \
 ```
 
 `--per-residue` writes every residue's share of the binding terms, averaged
-over the frames, with the standard error of its total.
+over the frames, with the standard error of its total (for independent and
+for correlated frames). The summary gives every term's standard error for
+correlated frames, its interval and correlation time, and how many frames
+`--target-sem` (default 0.5 kcal/mol) needs: for the solvation terms alone,
+which the gas-phase energy largely cancels, this is a pessimistic count;
+apply {py:func}`pbsolve.series_statistics` to your per-frame totals.
 
 See [the command line](cli.md#pbsolve-mmpbsa) for every option.
 

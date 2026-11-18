@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Added
+
+- Uncertainty over correlated frames: `pbsolve.series_statistics(values)`
+  gives the mean with the statistical inefficiency g (Chodera et al. 2007;
+  equal to pymbar's), the correlation time, the effective number of frames,
+  the corrected standard error SD·√(g/N), a Student-t interval, a
+  block-averaging check (Flyvbjerg & Petersen 1989), `enough` (at least 20
+  effective frames) and `frames_for(sem)`; `pbsolve.timeseries` adds
+  `statistical_inefficiency`, `block_averages` and a moving-block
+  `block_bootstrap`. `pbsolve mmpbsa` prints all of it for every term
+  (`--target-sem`, default 0.5 kcal/mol), warns below 20 effective frames,
+  and `--per-residue` gains `sem_solvation_correlated`; the existing
+  summary lines are unchanged. For the binding energy of a 5 ns MDM2–p53
+  simulation the corrected error is 5.3 times SD/√N.
+
 ## 0.0.7 — 2026-11-18
 
 ### Added

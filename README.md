@@ -40,6 +40,10 @@ solution methods and integrations can be added.
 * **A dielectric per atom** — `dielectrics=` gives every atom (e.g. charged
   and other residues) its own interior dielectric, as DelPhi's multiple
   dielectrics; equal values reproduce one `pdie` bit for bit.
+* **Honest error bars** — `series_statistics` corrects the standard error of
+  an average over correlated frames (statistical inefficiency, as pymbar),
+  gives intervals, the correlation time and how many frames a target error
+  needs; `pbsolve mmpbsa` prints them.
 * **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for
   complex/receptor/ligand, OpenMM bridge, OpenDX maps. Trajectory frames are
   solved several at a time; results do not depend on the number of workers.

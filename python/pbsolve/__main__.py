@@ -13,6 +13,7 @@ import numpy as np
 from . import Solver, __version__, available_platforms, cuda_info, estimate_error, write_dx
 from .io import Molecule, frames, load
 from .mmpbsa import nonpolar_energy, pbsa_solvation_frames, residue_dielectrics
+from .timeseries import series_statistics
 
 
 # ----------------------------------------------------------------- shared options
@@ -299,6 +300,22 @@ def _convert(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_correlated(rows: list[dict], keys: list[str], target: float) -> None:
+    """The uncertainty of each term's mean over correlated frames (`pbsolve.timeseries`)."""
+    print("correlated frames (statistical inefficiency g; Student-t 95 % interval; N_eff = frames / g):")
+    few = False
+    for k in keys:
+        st = series_statistics([r[k] for r in rows])
+        lo, hi = st.ci
+        print(
+            f"  {k:<16} SEM {st.sem:.4f}  95% CI [{lo:.4f}, {hi:.4f}]  τ {st.tau:.1f} frames  N_eff {st.n_eff:.1f}"
+            f"  blocking SEM {st.sem_blocking:.4f}  frames for SEM ≤ {target:g}: {st.frames_for(target)}"
+        )
+        few = few or not st.enough
+    if few:
+        print("  (fewer than 20 effective frames: the correlation time and these errors are themselves uncertain)")
+
+
 def _mmpbsa(args: argparse.Namespace) -> int:
     full = load(args.input, None, format=args.format, include_dirs=args.include or None)
     keep = np.ones(full.n_atoms, dtype=bool) if args.keep_solvent else ~full.solvent_mask()
@@ -314,6 +331,8 @@ def _mmpbsa(args: argparse.Namespace) -> int:
         raise ValueError(f"ligand selection '{args.ligand}' is empty")
     if args.workers is not None and args.workers < 1:
         raise ValueError("--workers must be at least 1")
+    if not args.target_sem > 0.0:
+        raise ValueError("--target-sem must be positive")
     solver = _solver(args)
     if args.per_residue and solver.params["equation"] != "lpbe" and solver.params["ionic_strength"] > 0:
         raise ValueError("--per-residue needs equation 'lpbe' (or no ions): the nonlinear energy is not a sum over atoms")
@@ -362,6 +381,9 @@ def _mmpbsa(args: argparse.Namespace) -> int:
         k = "delta_reference"
         print(f"  {k:<16} {mean[k]:10.4f} ± {sd[k] / math.sqrt(len(rows)):.4f} (SEM), SD {sd[k]:.4f}")
         print("  (receptor–ligand interaction with the atom dielectrics; it replaces the force field's Coulomb term)")
+    if len(rows) > 1:
+        _print_correlated(rows, ["delta_polar", "delta_nonpolar", "delta_solvation"]
+                          + (["delta_reference"] if eps is not None else []), args.target_sem)
     if args.csv:
         with open(args.csv, "w") as fh:
             fh.write(",".join(["frame", *keys]) + "\n")
@@ -370,12 +392,13 @@ def _mmpbsa(args: argparse.Namespace) -> int:
     if args.per_residue:
         # β belongs to no residue: the residues' non-polar shares sum to delta_nonpolar + β.
         with open(args.per_residue, "w") as fh:
-            fh.write("residue,delta_polar,delta_nonpolar,delta_solvation,sem_solvation\n")
+            fh.write("residue,delta_polar,delta_nonpolar,delta_solvation,sem_solvation,sem_solvation_correlated\n")
             for label, terms in residues.items():
                 t = np.array(terms)
                 total = t.sum(axis=1)
                 sem = float(np.std(total, ddof=1)) / math.sqrt(len(total)) if len(total) > 1 else 0.0
-                fh.write(f"{label},{t[:, 0].mean()},{t[:, 1].mean()},{total.mean()},{sem}\n")
+                corr = series_statistics(total).sem if len(total) > 1 else 0.0
+                fh.write(f"{label},{t[:, 0].mean()},{t[:, 1].mean()},{total.mean()},{sem},{corr}\n")
         print(f"per-residue shares of {len(residues)} residues written to {args.per_residue}")
     return 0
 
@@ -441,6 +464,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--per-residue",
         metavar="CSV",
         help="write every residue's share of the binding terms (mean over frames) to this CSV file",
+    )
+    m.add_argument(
+        "--target-sem",
+        type=float,
+        default=0.5,
+        help="report how many frames give this standard error (kcal/mol) at the measured correlation (default 0.5)",
     )
     m.add_argument(
         "--workers",

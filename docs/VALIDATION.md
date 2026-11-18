@@ -57,6 +57,7 @@ should update the status table below.
 | Atom dielectrics (0.0.5): `dielectrics=`, `residue_dielectrics`, `--residue-dielectric`, `PBSAFrame.delta_reference` | equal values reproduce `pdie` bit for bit (maps of `mol` and `vdw`, both states, `lpbe` and `npbe`, every Python method; fingerprint of the default path unchanged); every interior face owned by the atom of smallest power distance (brute force); a central charge sees only the outer boundary for any interior ε (0.25 Å: −1.50/−0.14/+0.64 % for ε 1/4/20); one sphere against Kirkwood with its own interior ≤ 0.92 % at 0.25 Å; two spheres with interiors 4 and 10 against the exact solution (`two_sphere_energy(sphere_pdie=)`) −0.32 % and −0.74 % at 0.25 Å (one `pdie`: −1.68 and −1.58 %); `delta_reference` = Coulomb/`pdie` exactly with `coulomb="analytic"`, to 0.03 % for 1YCR at 0.35 Å on the grid; CPU = CUDA ≤ 8e-14; 30/30 mutations; CPU +6 %, CUDA 2.2× (host maps); see *Atom dielectrics* |
 | Implicit membrane (0.0.6): `zmem`, `lmem`, `mdie`, `membrane_profile`, `membrane_exclusion`, `membrane_fill` | maps identical to APBS 3.4.1 `examples/helix/draw_membrane2.c` on its helix examples (`mol` and `spl2`, exclusion cone 3.1/5.3 Å and none, surfaces on node planes; 0 mismatches in all four maps); the membrane's effect on the solvated energy agrees with APBS solving those maps to 1.3e-4 (the DX route alone costs ~1e-5, with or without membrane); a charge in a uniform slab and in the Greene profile, with and without salt, against the exact layered solution (images, Hankel transform) within 0.02–0.17 %; PCHIP = SciPy to 1e-13; a membrane outside the grid is bit-identical to none; CPU = CUDA ≤ 3e-15; 25/26 mutations (one equivalent); CUDA 0.11 → 0.15 s on the helix example; see *Implicit membrane* |
 | Periodic lateral boundaries (0.0.7): `period` | periodic operator = the matrix with modular neighbours bit for bit; Galerkin = PᵀAP to 1e-12 with exact symmetry (axes of two unknowns included); z-face Fourier series = real-space image sum to 1e-11; a periodic cell = a plain supercell of copies on the same nodes to 4e-9 (water) and converging geometrically in a membrane; a charge in a slab with its images against the exact lattice sum: +3.4e-4 / −8.3e-5 (P = 30 / 60 Å; the coarse grid must resolve the slab in z, up to 13 % off with 3.1 Å); realistic periods add no placement error (sd 0.02–0.05 kcal/mol as without); APBS helix: automatic plain box 2 % off, periodic and plain agree from 100 Å; CUDA = CPU bit for bit in all kernels (f64, f32), whole calculations ≤ 5.3e-14; 56/56 mutations (Rust, CUDA, Python); default path bit-identical; see *Periodic lateral boundaries* |
+| Uncertainty over frames (0.0.8): `series_statistics`, `pbsolve.timeseries`, `pbsolve mmpbsa` | statistical inefficiency = pymbar 4.0.3 to 6e-16; on AR(1) series with exact answers g is unbiased and the t interval covers 94–98 % from ~20 effective frames (79 % at N_eff ≈ 3); block bootstrap and blocking calibrated alongside (lower coverage, blocking a check); a 5 ns MD of 1YCR: the per-frame total's error 5.3 × SD/√N (τ 67 ps), short prefixes underestimate τ 25×; 24/24 mutations; see *Uncertainty over frames* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3600,6 +3601,107 @@ periods (16 × 18 Å supercells) and a test of which levels are periodic for
 the y flag, the seam margin to ±0.1 Å, the larger exclusion radius, the
 memory estimate, and random operators on periodic grids whose seam rows
 decide the Gershgorin bound (assembly and Gershgorin face reads on CUDA).
+
+## Uncertainty over frames (`series_statistics`, `pbsolve mmpbsa`)
+
+`pbsolve.series_statistics` corrects the standard error of an average over
+correlated frames with the statistical inefficiency g of the series
+(Chodera et al. 2007): SEM = SD·√(g/N), N_eff = N/g, τ = (g − 1)/2, a
+Student-t interval with N_eff − 1 degrees of freedom (quantile from
+Abramowitz & Stegun 26.7.5, within 0.12 % of SciPy for ν ≥ 3), block
+averaging (Flyvbjerg & Petersen 1989; the largest standard error over the
+levels with at least 16 blocks) and, in `pbsolve.timeseries`, a
+moving-block bootstrap (Künsch 1989; blocks of 4 g).
+
+**The estimator.** g equals pymbar 4.0.3's `statistical_inefficiency` to
+5.8e-16 on 30 autoregressive series (10–5000 frames, φ = 0–0.995) and to
+the printed digits on the MD series below; a test compares it with the
+term-by-term sum to 1e-12.
+
+**Calibration** on AR(1) series x_i = φ x_{i−1} + noise, whose
+inefficiency g = (1 + φ)/(1 − φ) and standard error of the mean are known
+exactly; 300 series per cell. Estimated g (mean):
+
+| φ (exact g) | 200 frames | 1000 frames | 5000 frames |
+|---|---|---|---|
+| 0 (1) | 1.15 | 1.07 | 1.04 |
+| 0.5 (3) | 3.15 | 3.16 | 3.04 |
+| 0.9 (19) | 15.1 | 18.9 | 19.6 |
+| 0.97 (65.7) | 29.8 | 57.6 | 66.2 |
+
+Coverage of the true mean by 95 % intervals (t interval / block
+bootstrap):
+
+| φ | 200 frames | 1000 frames | 5000 frames |
+|---|---|---|---|
+| 0 | 0.96 / 0.94 | 0.97 / 0.96 | 0.94 / 0.93 |
+| 0.5 | 0.95 / 0.90 | 0.96 / 0.95 | 0.96 / 0.93 |
+| 0.9 | 0.90 / 0.66 | 0.93 / 0.88 | 0.98 / 0.94 |
+| 0.97 | 0.79 / 0.23 | 0.92 / 0.77 | 0.94 / 0.89 |
+
+The t interval holds its 95 % from about 15–20 effective frames on; with
+fewer, g itself is underestimated (φ = 0.97, 200 frames: N_eff ≈ 3) and no
+method recovers. Hence `enough` (N_eff ≥ 20) and the warning of `pbsolve
+mmpbsa`. The bootstrap needs more effective frames for the same coverage,
+so the t interval is the one reported for means. Blocking, against the
+exact error: +6 to +9 % without correlation, within 15 % from 1000 frames
+at φ ≤ 0.9, and −42 to −70 % where the run is short against the
+correlation (φ = 0.97 below 5000 frames): a check that agrees with the
+g-based error only when there are enough frames, which is how to use it.
+Rejected on the same series: blocks of g or 2 g for the bootstrap
+(coverage 0.84–0.90 at φ = 0.9) and an automated blocking test after
+Jonsson (2018) as reconstructed here (−15 % at φ = 0.9, 5000 frames).
+
+**A real trajectory.** MDM2–p53 (1YCR, 1670 atoms), amber14 + OBC2
+implicit solvent in OpenMM 8.6, 200 ps equilibration, 5 ns at 300 K, a
+frame every 5 ps (1000 frames); MM-PBSA solvation terms by pbsolve on CUDA
+(0.15 M, 0.53 s per frame for the three species), gas-phase interaction
+by `interaction_energy`.
+
+| series (kcal/mol) | mean | SD | SD/√N | SEM | g | τ (ps) | N_eff | blocking |
+|---|---|---|---|---|---|---|---|---|
+| E_int, Coulomb | −406.4 | 40.2 | 1.27 | 9.98 | 61.5 | 151 | 16 | 5.46 |
+| E_int, van der Waals | −68.8 | 5.5 | 0.17 | 0.81 | 21.5 | 51 | 47 | 0.42 |
+| ΔG_solv | 426.2 | 38.2 | 1.21 | 9.74 | 65.1 | 160 | 15 | 5.28 |
+| E_int + ΔG_solv | −49.0 | 7.2 | 0.23 | 1.20 | 27.9 | 67 | 36 | 0.65 |
+
+The Coulomb interaction and the polar solvation term cancel (correlation
+−0.98), so the total fluctuates five times less than its parts. Its
+standard error is 5.3 times SD/√N, close to the correlation times of a few
+tens of ps that Genheden & Ryde (2010) found for MM/GBSA energies plus
+slower motions of the peptide. Prefixes of the run show why a correlation
+time must be measured from a run much longer than it:
+
+| frames (ns) | mean | SEM | SD/√N | g | N_eff | frames for ± 0.5 |
+|---|---|---|---|---|---|---|
+| 100 (0.5) | −49.69 | 0.61 | 0.58 | 1.1 | 91 | 149 |
+| 200 (1.0) | −50.19 | 0.61 | 0.44 | 1.9 | 107 | 295 |
+| 500 (2.5) | −48.22 | 1.26 | 0.29 | 19.1 | 26 | 3180 |
+| 1000 (5.0) | −48.96 | 1.20 | 0.23 | 27.9 | 36 | 5737 |
+
+The two halves of the run (ΔG_solv 425.6 ± 15.3 and 426.8 ± 9.5) agree
+within their errors. The blocking curve of the total keeps rising (0.50,
+0.65, 0.84, 1.06 at 62, 31, 15 and 7 blocks) — the slow motions are only
+partly sampled — so these errors are lower bounds; independent runs settle
+it.
+
+**Command line.** `pbsolve mmpbsa` prints the corrected error, the
+interval, τ, N_eff, the blocking value and the frames for `--target-sem`
+for every term (equal to `series_statistics` of its `--csv` columns; test),
+warns below 20 effective frames, and adds `sem_solvation_correlated` to
+`--per-residue`. The previous lines (SD/√N) are unchanged.
+
+**Mutations.** 24 of 24 seeded faults caught: the estimator (the lag
+after which a non-positive correlation stops the sum, the (1 − t/N) weight,
+the FFT padding, the pair counts, g ≥ 1), blocking (N − 1, block lengths),
+the t quantile, the bootstrap's default block and resampling, the standard
+error, the degrees of freedom and their threshold, the interval's quantile,
+the blocking levels used, SD's N − 1, `frames_for`, `enough`, τ, and the
+command line's warning, terms, per-residue column and early check of
+`--target-sem`. Five needed stronger tests first: the default block, SD's
+N − 1 and the interval's quantile exactly, the per-residue column on a
+40-frame correlated trajectory (on three frames g = 1 and both columns
+agree) and the error message of `--target-sem`.
 
 ## Size-modified PB (`equation="smpbe"`)
 

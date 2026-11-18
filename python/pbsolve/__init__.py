@@ -104,7 +104,7 @@ from ._core import (  # noqa: E402
 # NVRTC is opened lazily (first CUDA query), so preloading after the import works.
 _preload_nvrtc(_CUDA_MAJOR)
 
-from . import io, prep, radii  # noqa: E402
+from . import io, prep, radii, timeseries  # noqa: E402
 from .apolar import ApolarEnergy, apolar_energy  # noqa: E402
 from .dx import read_dx, write_dx  # noqa: E402
 from .entropy import InteractionEntropy, interaction_energy, interaction_entropy  # noqa: E402
@@ -119,6 +119,7 @@ from .mmpbsa import (  # noqa: E402
     pbsa_solvation_frames,
     residue_dielectrics,
 )
+from .timeseries import SeriesStatistics, series_statistics  # noqa: E402
 
 __all__ = [
     "ApolarEnergy",
@@ -131,6 +132,7 @@ __all__ = [
     "PolarResult",
     "SITKOFF_BETA",
     "SITKOFF_GAMMA",
+    "SeriesStatistics",
     "SolvationTerms",
     "Solver",
     "TrajectoryReader",
@@ -156,5 +158,7 @@ __all__ = [
     "read_structure",
     "residue_dielectrics",
     "sasa",
+    "series_statistics",
+    "timeseries",
     "write_dx",
 ]

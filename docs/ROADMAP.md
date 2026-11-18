@@ -535,6 +535,21 @@ which correlates better with experiment than a uniform slab [Greene et al.
 **4.18 Uncertainty and convergence over frames.** Block averaging, bootstrap
 confidence intervals and correlation-time estimates in `pbsolve mmpbsa`, so a
 report states how many frames were enough.
+*Status: done (0.0.8).*
+* `pbsolve.series_statistics`: the statistical inefficiency g [Chodera et
+  al. 2007] (equal to pymbar), correlation time, effective frames, the
+  corrected standard error with a Student-t interval [Abramowitz & Stegun
+  1964], block averaging [Flyvbjerg & Petersen 1989] as a check and the
+  frames a target error needs; `pbsolve.timeseries.block_bootstrap`
+  [Künsch 1989] for other statistics. `pbsolve mmpbsa` reports all of it
+  (`--target-sem`). Calibrated on AR(1) series with exact answers (t
+  interval 94–98 % from ~20 effective frames; the bootstrap and an
+  automated blocking test after [Jonsson 2018] cover less) and shown on a
+  5 ns MD of 1YCR: the per-frame total's error is 5.3 × SD/√N, and short
+  prefixes underestimate the correlation time [Genheden & Ryde 2010;
+  Grossfield et al. 2018].
+* Remaining: equilibration detection (discarding a start), statistics over
+  independent runs as a function.
 
 **4.19 Public binding benchmark.** Follow the community guidelines for
 protein–ligand affinity benchmarks [Hahn et al. 2022] on openly licensed
@@ -663,6 +678,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 
 ## References
 
+* Abramowitz M, Stegun IA (eds.). Handbook of Mathematical Functions, eq. 26.7.5. National Bureau of Standards (1964).
 * Achondo MAP, Chaudhry JH, Cooper CD. An investigation of physics informed neural networks to solve the Poisson–Boltzmann equation in molecular electrostatics. arXiv:2410.12810 (2024).
 * AIQM-PBSA: integrating machine learning interatomic potentials with MMPBSA for protein–ligand binding free energies. ChemRxiv, doi:10.26434/chemrxiv-2026-h0kn1 (2026, preprint).
 * Adams M, Brezina M, Hu J, Tuminaro R. Parallel multigrid smoothing: polynomial versus Gauss–Seidel. J. Comput. Phys. 188, 593 (2003).
@@ -675,6 +691,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Cai Q, Wang J, Zhao HK, Luo R. On removal of charge singularity in Poisson–Boltzmann equation. J. Chem. Phys. 130, 145101 (2009).
 * Cai Q, Ye X, Wang J, Luo R. Dielectric boundary forces in numerical Poisson–Boltzmann methods: theory and numerical strategies. Chem. Phys. Lett. 514, 368 (2011).
 * Callenberg KM, Choudhary OP, de Forest GL, Gohara DW, Baker NA, Grabe M. APBSmem: a graphical interface for electrostatic calculations at the membrane. PLoS ONE 5, e12722 (2010).
+* Chodera JD, Swope WC, Pitera JW, Seok C, Dill KA. Use of the weighted histogram analysis method for the analysis of simulated and parallel tempering simulations. J. Chem. Theory Comput. 3, 26–41 (2007).
 * Chen D, Chen Z, Chen C, Geng W, Wei GW. MIBPB: a software package for electrostatic analysis. J. Comput. Chem. 32, 756 (2011).
 * Chen et al. Poisson–Boltzmann-based machine learning model for electrostatic analysis. Biophys. J. (2024).
 * Chen L, Holst MJ, Xu J. The finite element approximation of the nonlinear Poisson–Boltzmann equation. SIAM J. Numer. Anal. 45, 2298 (2007).
@@ -687,14 +704,17 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Duan L, Liu X, Zhang JZH. Interaction entropy: a new paradigm for highly efficient and reliable computation of protein–ligand binding free energy. J. Am. Chem. Soc. 138, 5722 (2016).
 * Dzubiella J, Swanson JMJ, McCammon JA. Coupling hydrophobicity, dispersion, and electrostatics in continuum solvent models. Phys. Rev. Lett. 96, 087802 (2006).
 * Ekberg V, Ryde U. On the use of interaction entropy and related methods to estimate binding entropies. J. Chem. Theory Comput. 17, 5379 (2021).
+* Flyvbjerg H, Petersen HG. Error estimates on averages of correlated data. J. Chem. Phys. 91, 461–466 (1989).
 * Fritsch FN, Carlson RE. Monotone piecewise cubic interpolation. SIAM J. Numer. Anal. 17, 238 (1980).
 * Geng W, Yu S, Wei GW. Treatment of charge singularities in implicit solvent models. J. Chem. Phys. 127, 114106 (2007).
+* Genheden S, Ryde U. How to obtain statistically converged MM/GBSA results. J. Comput. Chem. 31, 837–846 (2010).
 * Genheden S, Ryde U. The MM/PBSA and MM/GBSA methods to estimate ligand-binding affinities. Expert Opin. Drug Discov. 10, 449 (2015).
 * Gilson MK, Davis ME, Luty BA, McCammon JA. Computation of electrostatic forces on solvated molecules using the Poisson–Boltzmann equation. J. Phys. Chem. 97, 3591 (1993).
 * Gohlke H, Kiel C, Case DA. Insights into protein–protein binding by binding free energy calculation and free energy decomposition for the Ras–Raf and Ras–RalGDS complexes. J. Mol. Biol. 330, 891 (2003).
 * Golub GH, Ye Q. Inexact preconditioned conjugate gradient method with inner-outer iteration. SIAM J. Sci. Comput. 21, 1305 (1999).
 * Grant JA, Pickup BT, Nicholls A. A smooth permittivity function for Poisson–Boltzmann solvation methods. J. Comput. Chem. 22, 608 (2001).
 * Greene D, Qi R, Nguyen R, Qiu T, Luo R. Heterogeneous dielectric implicit membrane model for the calculation of MMPBSA binding free energies. J. Chem. Inf. Model. 59, 3041 (2019).
+* Grossfield A, Patrone PN, Roe DR, Schultz AJ, Siderius DW, Zuckerman DM. Best practices for quantification of uncertainty and sampling quality in molecular simulations. Living J. Comput. Mol. Sci. 1, 5067 (2018).
 * Hahn DF, et al. Best practices for constructing, preparing, and evaluating protein–ligand binding affinity benchmarks. Living J. Comp. Mol. Sci. 4, 1497 (2022).
 * Holst M, Kozack RE, Saied F, Subramaniam S. Protein electrostatics: rapid multigrid-based Newton algorithm for solution of the full nonlinear Poisson–Boltzmann equation. J. Biomol. Struct. Dyn. 11, 1437 (1994).
 * Holst M, McCammon JA, Yu Z, Zhou YC, Zhu Y. Adaptive finite element modeling techniques for the Poisson–Boltzmann equation. Commun. Comput. Phys. 11, 179 (2012).
@@ -705,9 +725,11 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Jha A, Nottoli M, Mikhalev A, Quan C, Stamm B. Linear scaling computation of forces for the domain-decomposition linear Poisson–Boltzmann method. J. Chem. Phys. 158, 104105 (2023).
 * Ji N, Liu T, Xu J, Shen LQ, Lu B. A finite element solution of lateral periodic Poisson–Boltzmann model for membrane channel proteins. Int. J. Mol. Sci. 19, 695 (2018).
 * Jia Z, Li L, Chakravorty A, Alexov E. Treating ion distribution with Gaussian-based smooth dielectric function in DelPhi. J. Comput. Chem. 38, 1974 (2017).
+* Jonsson M. Standard error estimation by an automated blocking method. Phys. Rev. E 98, 043304 (2018).
 * Katzberger P, Riniker S. Implicit solvent approach based on generalized Born and transferable graph neural networks for molecular dynamics simulations. J. Chem. Phys. 158, 204101 (2023); A general graph neural network based implicit solvation model for organic molecules in water. Chem. Sci. (2024).
 * Kilic MS, Bazant MZ, Ajdari A. Steric effects in the dynamics of electrolytes at large applied voltages. I. Double-layer charging. Phys. Rev. E 75, 021502 (2007).
 * Kirkwood JG. Theory of solutions of molecules containing widely separated charges with special application to zwitterions. J. Chem. Phys. 2, 351 (1934).
+* Künsch HR. The jackknife and the bootstrap for general stationary observations. Ann. Stat. 17, 1217–1241 (1989).
 * Li L, Li C, Alexov E. On the modeling of polar component of solvation energy using smooth Gaussian-based dielectric function. J. Theor. Comput. Chem. 13, 1440002 (2014).
 * Li L, Li C, Zhang Z, Alexov E. On the dielectric "constant" of proteins: smooth dielectric function for macromolecular modeling and its implementation in DelPhi. J. Chem. Theory Comput. 9, 2126 (2013).
 * Liu X, Peng L, Zhang JZH. Accurate and efficient calculation of protein–protein binding free energy—interaction entropy with residue type-specific dielectric constants. J. Chem. Inf. Model. 59, 272 (2019).

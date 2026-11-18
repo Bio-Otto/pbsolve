@@ -126,8 +126,12 @@ pbsolve mmpbsa TOPOLOGY TRAJECTORY --ligand SELECTION [options]
 MM-PBSA solvation terms of complex, receptor and ligand for every frame
 ([Trajectories and MM-PBSA](many.md)). The topology must carry charges (prmtop,
 psf, top, pqr, mol2, ...); the trajectory can be DCD, XTC, TRR, NetCDF, mdcrd
-or a multi-model PDB/GRO file. Takes the [solver options](#solver-options),
-and:
+or a multi-model PDB/GRO file. The summary gives each term's mean with its
+standard error for independent frames and, from the correlation between
+consecutive frames, the corrected standard error, a 95 % interval, the
+correlation time, the number of effective frames, a block-averaging check
+and the frames needed for `--target-sem`. Takes the
+[solver options](#solver-options), and:
 
 | Option | Meaning |
 |---|---|
@@ -139,7 +143,8 @@ and:
 | `-I`, `--include` | GROMACS include directory (repeatable) |
 | `--start`, `--stop`, `--step` | frames to use (0-based, as a Python slice) |
 | `--csv` | write the per-frame terms to this CSV file |
-| `--per-residue` | write every residue's share of ΔG_polar, ΔG_nonpolar and ΔG_solv of binding (mean over frames, and the standard error of the total) to this CSV file; residues are named `chain:resname:resid`; β belongs to no residue |
+| `--per-residue` | write every residue's share of ΔG_polar, ΔG_nonpolar and ΔG_solv of binding (mean over frames, and the standard error of the total, for independent and for correlated frames) to this CSV file; residues are named `chain:resname:resid`; β belongs to no residue |
+| `--target-sem` | the summary tells how many frames give this standard error (kcal/mol, default 0.5) at the measured correlation ([how many frames](many.md#how-many-frames)) |
 | `--workers` | calculations solved at once (default 2 on the CPU, 3 on CUDA, fewer if the GPU memory is short); results do not depend on it |
 | `--residue-dielectric` | two values, CHARGED and NEUTRAL: the interior dielectric of the atoms of charged residues (net charge at least 0.5 e) and of all other atoms, in place of `--pdie`, which then applies outside the surface in the reference state ([interior dielectric per atom](model.md#interior-dielectric-per-atom)); the summary then also gives `delta_reference`, the receptor–ligand interaction that replaces the force field's Coulomb term (always a column of `--csv`) |
 
