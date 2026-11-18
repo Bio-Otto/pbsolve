@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.8 — 2026-11-19
+
 ### Added
 
 - Uncertainty over correlated frames: `pbsolve.series_statistics(values)`
