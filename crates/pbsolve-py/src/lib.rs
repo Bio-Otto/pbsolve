@@ -638,6 +638,15 @@ impl PyPolarForces {
 /// membrane_fill : bool
 ///     Leave the water and ions in every part of a membrane plane that is not
 ///     connected to the sides of the box, such as a pore the solute encloses.
+/// period : (float, float), optional
+///     Lateral period in Å along x and y (not in APBS): the solvated state
+///     becomes a periodic array of the solute, as in a membrane simulation box.
+///     The outermost grid spans one period and is periodic in x and y; its z
+///     faces take the periodic Debye–Hückel sum of the charges (zero with
+///     ``bcfl="zero"``). Finer grids focus as usual, and the reference state
+///     stays a single molecule. Needs ions, ``equation="lpbe"``,
+///     ``coulomb="grid"`` and a surface other than "gauss"; every atom with its
+///     radius and probe must stay clear of the period's edges. Default: no period.
 ///
 /// Raises
 /// ------
@@ -803,13 +812,15 @@ impl PySolver {
         }
     }
 
+    /// The automatic grid; with a period its outermost level spans it.
     fn auto_grid(&self, atoms: &[Atom]) -> Result<GridSpec, PbError> {
         GridSpec::auto_with(atoms, self.spacing, self.cfac, self.fadd, self.dime_policy)
+            .map(|g| g.with_period(self.params.period))
     }
 
     fn spec_for(&self, atoms: &[Atom], grid: Option<PyGridSpec>) -> PyResult<GridSpec> {
         match grid {
-            Some(g) => Ok(g.inner),
+            Some(g) => Ok(g.inner.with_period(self.params.period)),
             None => self.auto_grid(atoms).map_err(to_py),
         }
     }
@@ -827,7 +838,7 @@ impl PySolver {
         preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid",
         equation = "lpbe", ion_size = 0.0, swin = 0.3, gauss_sigma = 0.93,
         gauss_contour = 20.0, zmem = None, lmem = 40.0, mdie = 2.0, membrane_profile = None,
-        membrane_exclusion = (0.0, 0.0), membrane_fill = false
+        membrane_exclusion = (0.0, 0.0), membrane_fill = false, period = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -864,6 +875,7 @@ impl PySolver {
         membrane_profile: Option<Bound<'_, PyAny>>,
         membrane_exclusion: (f64, f64),
         membrane_fill: bool,
+        period: Option<(f64, f64)>,
     ) -> PyResult<Self> {
         let profile: Option<std::sync::Arc<[[f64; 2]]>> = match membrane_profile {
             None => None,
@@ -909,6 +921,7 @@ impl PySolver {
                 exclusion: [membrane_exclusion.0, membrane_exclusion.1],
                 fill: membrane_fill,
             }),
+            period: period.map(|(x, y)| [x, y]),
             ..PbParams::default()
         };
         params = match ions {
@@ -984,6 +997,7 @@ impl PySolver {
             m.map_or((0.0, 0.0), |m| (m.exclusion[0], m.exclusion[1])),
         )?;
         d.set_item("membrane_fill", m.is_some_and(|m| m.fill))?;
+        d.set_item("period", p.period.map(|[x, y]| (x, y)))?;
         Ok(d)
     }
 

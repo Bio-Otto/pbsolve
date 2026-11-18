@@ -130,6 +130,14 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="keep water and ions where a membrane plane is not connected to the sides of the box (pores)",
     )
+    p.add_argument(
+        "--period",
+        nargs=2,
+        type=float,
+        metavar=("LX", "LY"),
+        help="lateral period in Å: the solvated state is a periodic array of the solute in x and y (membrane "
+        "boxes); needs ions; default: no period",
+    )
 
 
 def _membrane_profile(text: Optional[str]) -> Optional[object]:
@@ -172,6 +180,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         membrane_profile=_membrane_profile(args.membrane_profile),
         membrane_exclusion=tuple(args.membrane_exclusion),
         membrane_fill=args.membrane_fill,
+        period=tuple(args.period) if args.period else None,
     )
 
 

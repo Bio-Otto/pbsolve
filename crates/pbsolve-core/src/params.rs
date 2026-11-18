@@ -357,6 +357,12 @@ pub struct PbParams {
     /// Implicit membrane added to the solvated state (opt-in; APBS
     /// `draw_membrane2`, [`crate::membrane`]). `None`: no membrane.
     pub membrane: Option<crate::membrane::Membrane>,
+    /// Lateral period (Å along x and y) of the solvated state (opt-in, not
+    /// APBS): the outermost grid spans one period and is periodic in x and
+    /// y, its z faces take the laterally periodic Debye–Hückel sum
+    /// ([`crate::boundary`]); finer grids focus as usual. The reference
+    /// state stays a single molecule. `None`: no periodicity.
+    pub period: Option<[f64; 2]>,
 }
 
 impl Default for PbParams {
@@ -383,6 +389,7 @@ impl Default for PbParams {
             preconditioner: Preconditioner::DEFAULT,
             atom_pdie: None,
             membrane: None,
+            period: None,
         }
     }
 }
@@ -493,6 +500,29 @@ impl PbParams {
             }
             if self.coulomb == CoulombMethod::Analytic {
                 return invalid("a membrane needs coulomb 'grid'");
+            }
+        }
+        if let Some(p) = self.period {
+            if p.iter().any(|l| !l.is_finite() || *l <= 0.0) {
+                return invalid("the period must be positive and finite");
+            }
+            if self.ionic_strength() <= 0.0 {
+                return invalid(
+                    "periodic lateral boundaries need ions: without them the potential of a periodic array of \
+                     charged or polar solutes does not decay along z",
+                );
+            }
+            if self.equation != Equation::Linear || self.coulomb == CoulombMethod::Analytic {
+                return invalid("periodic lateral boundaries need equation 'lpbe' and coulomb 'grid'");
+            }
+            if self.surface == SurfaceMethod::Gaussian {
+                return invalid("periodic lateral boundaries need a surface other than 'gauss'");
+            }
+            if !matches!(self.bcfl, BoundaryCondition::Mdh | BoundaryCondition::MdhFast) {
+                return invalid(
+                    "periodic lateral boundaries need bcfl 'mdh' or 'mdh-fast': the reference state's box spans \
+                     only one period, so it needs the exact Coulomb boundary",
+                );
             }
         }
         if self.equation != Equation::Linear && self.coulomb == CoulombMethod::Analytic {

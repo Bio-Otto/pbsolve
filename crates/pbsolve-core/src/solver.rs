@@ -62,13 +62,20 @@ enum Precond<B: Backend> {
 }
 
 impl<B: Backend> Precond<B> {
-    /// `op` is the operator of a grid of `dims` on `be` and `inv_diag` its
-    /// inverse diagonal; the hierarchy is built on the backend.
-    fn build(be: &B, dims: [usize; 3], op: &B::Operator, inv_diag: B::Vector, kind: Preconditioner) -> Result<Self> {
+    /// `op` is the operator of a grid of `dims` (periodic axes `periodic`) on
+    /// `be` and `inv_diag` its inverse diagonal; the hierarchy is built on the backend.
+    fn build(
+        be: &B,
+        dims: [usize; 3],
+        periodic: [bool; 3],
+        op: &B::Operator,
+        inv_diag: B::Vector,
+        kind: Preconditioner,
+    ) -> Result<Self> {
         match kind {
             Preconditioner::Jacobi => {}
-            Preconditioner::Multigrid if hierarchy_fits(dims) => {
-                let l = Levels::build(be, dims, op, Chebyshev::default())?
+            Preconditioner::Multigrid if hierarchy_fits(dims, periodic) => {
+                let l = Levels::build(be, dims, periodic, op, Chebyshev::default())?
                     .ok_or_else(|| PbError::Backend(format!("multigrid: no hierarchy for {dims:?}")))?;
                 return Ok(Self::Multigrid(Box::new(MultigridPreconditioner::from_levels(
                     be, inv_diag, l,
@@ -76,13 +83,13 @@ impl<B: Backend> Precond<B> {
             }
             // The f32 copy of the inverse diagonal is made first, so the f64
             // one is freed before the hierarchy is built (lower peak memory).
-            Preconditioner::MultigridF32 if hierarchy_fits(dims) => {
+            Preconditioner::MultigridF32 if hierarchy_fits(dims, periodic) => {
                 let single = be.single()?;
                 let n = dims.iter().product();
                 let mut inv32 = single.zeros(n)?;
                 be.demote(&inv_diag, &mut inv32)?;
                 drop(inv_diag);
-                let l = Levels::build(be, dims, op, Chebyshev::default())?
+                let l = Levels::build(be, dims, periodic, op, Chebyshev::default())?
                     .ok_or_else(|| PbError::Backend(format!("multigrid: no hierarchy for {dims:?}")))?;
                 let l = l.demote(be, &single)?;
                 let mg = MultigridPreconditioner::from_levels(&single, inv32, l)?;
@@ -168,13 +175,13 @@ impl<B: Backend> Precond<B> {
 ///
 /// Fixed-size buffers (the reduction scratch, 16 KiB per precision) are not
 /// counted.
-pub fn solve_device_bytes(dims: [usize; 3], preconditioner: Preconditioner) -> u64 {
+pub fn solve_device_bytes(dims: [usize; 3], periodic: [bool; 3], preconditioner: Preconditioner) -> u64 {
     let nodes = |d: &[usize; 3]| d.iter().map(|&n| n as u64).product::<u64>();
     let n = nodes(&dims);
-    let coarse: u64 = coarse_dims(dims).iter().map(nodes).sum();
+    let coarse: u64 = coarse_dims(dims, periodic).iter().map(nodes).sum();
     let common = 9 * 8 * n;
     match preconditioner {
-        _ if !hierarchy_fits(dims) => common + 8 * n,
+        _ if !hierarchy_fits(dims, periodic) => common + 8 * n,
         Preconditioner::Jacobi => common + 8 * n,
         Preconditioner::Multigrid => common + 4 * 8 * n + 33 * 8 * coarse,
         Preconditioner::MultigridF32 => common + 10 * 4 * n + 33 * 4 * coarse,
@@ -191,12 +198,12 @@ pub fn pcg<B: Backend>(
 ) -> Result<(Vec<f64>, SolveStats)> {
     let start = Instant::now();
     let bv = be.upload(b)?;
-    let dims = op.dims;
+    let (dims, periodic) = (op.dims, op.periodic);
     let inv_diag = be.upload(&op.inv_diag)?;
     // The host operator is released once the backend holds its copy, not after the solve.
     let dop = be.prepare(op)?;
     let uploads = start.elapsed().as_secs_f64();
-    let (x, mut stats) = pcg_on(be, dims, &dop, inv_diag, bv, opts)?;
+    let (x, mut stats) = pcg_on(be, dims, periodic, &dop, inv_diag, bv, opts)?;
     let t = Instant::now();
     let x = be.download(&x)?;
     stats.setup_seconds += uploads;
@@ -204,13 +211,14 @@ pub fn pcg<B: Backend>(
     Ok((x, stats))
 }
 
-/// Solves A x = b on the backend: `op` is the operator of a grid of `dims`,
-/// `inv_diag` its inverse diagonal (0 on boundary nodes); x is zero on the
-/// boundary. `setup_seconds` covers the preconditioner, `solve_seconds` the
-/// iterations.
+/// Solves A x = b on the backend: `op` is the operator of a grid of `dims`
+/// (periodic axes `periodic`), `inv_diag` its inverse diagonal (0 on boundary
+/// nodes); x is zero on the boundary. `setup_seconds` covers the
+/// preconditioner, `solve_seconds` the iterations.
 pub fn pcg_on<B: Backend>(
     be: &B,
     dims: [usize; 3],
+    periodic: [bool; 3],
     op: &B::Operator,
     inv_diag: B::Vector,
     b: B::Vector,
@@ -221,7 +229,7 @@ pub fn pcg_on<B: Backend>(
     if bnorm == 0.0 {
         return zero_solution(be, dims, opts, start);
     }
-    let mut prepared = pcg_setup(be, dims, op, inv_diag, opts)?;
+    let mut prepared = pcg_setup(be, dims, periodic, op, inv_diag, opts)?;
     prepared.setup_seconds = start.elapsed().as_secs_f64();
     prepared.iterate(be, op, b, bnorm)
 }
@@ -236,17 +244,18 @@ pub(crate) struct PreparedPcg<B: Backend> {
     setup_seconds: f64,
 }
 
-/// Sets up the preconditioner of `op` (a grid of `dims`, inverse diagonal
-/// `inv_diag`) for [`PreparedPcg::solve`].
+/// Sets up the preconditioner of `op` (a grid of `dims`, periodic axes
+/// `periodic`, inverse diagonal `inv_diag`) for [`PreparedPcg::solve`].
 pub(crate) fn pcg_setup<B: Backend>(
     be: &B,
     dims: [usize; 3],
+    periodic: [bool; 3],
     op: &B::Operator,
     inv_diag: B::Vector,
     opts: SolverOptions,
 ) -> Result<PreparedPcg<B>> {
     let start = Instant::now();
-    let pre = Precond::build(be, dims, op, inv_diag, opts.preconditioner)?;
+    let pre = Precond::build(be, dims, periodic, op, inv_diag, opts.preconditioner)?;
     // Queued setup work (f32 copies) belongs to the setup time.
     be.synchronize()?;
     Ok(PreparedPcg {
@@ -605,13 +614,16 @@ mod tests {
             ),
         ];
         for (dims, pc, peak) in cases {
-            assert_eq!(solve_device_bytes(dims, pc), peak, "{dims:?} {pc:?}");
+            assert_eq!(solve_device_bytes(dims, [false; 3], pc), peak, "{dims:?} {pc:?}");
         }
         // Jacobi holds 10 f64 per node; coarse levels add about 1/7 of the
         // fine grid to the multigrid preconditioners.
         let n = 193 * 313 * 321;
-        assert_eq!(solve_device_bytes([193, 313, 321], Preconditioner::Jacobi), 80 * n);
-        let per_node = |pc| solve_device_bytes([193, 313, 321], pc) as f64 / n as f64;
+        assert_eq!(
+            solve_device_bytes([193, 313, 321], [false; 3], Preconditioner::Jacobi),
+            80 * n
+        );
+        let per_node = |pc| solve_device_bytes([193, 313, 321], [false; 3], pc) as f64 / n as f64;
         assert!((131.0..132.0).contains(&per_node(Preconditioner::MultigridF32)));
         assert!((142.0..143.0).contains(&per_node(Preconditioner::Multigrid)));
     }
@@ -648,15 +660,16 @@ mod tests {
         );
         let dop = be.prepare(op.clone()).unwrap();
         let inv = || be.upload(&op.inv_diag).unwrap();
-        let fused = pcg_on(be, op.dims, &dop, inv(), be.upload(b).unwrap(), opts);
+        let fused = pcg_on(be, op.dims, op.periodic, &dop, inv(), be.upload(b).unwrap(), opts);
         let bv = be.upload(b).unwrap();
         let bnorm = be.dot(&bv, &bv).unwrap().sqrt();
-        let prepared = pcg_setup(be, op.dims, &dop, inv(), opts).unwrap();
+        let prepared = pcg_setup(be, op.dims, op.periodic, &dop, inv(), opts).unwrap();
         let old = prepared.iterate_by_steps(be, &dop, bv, bnorm);
         let sop = stepwise.prepare(op.clone()).unwrap();
         let reference = pcg_on(
             stepwise,
             op.dims,
+            op.periodic,
             &sop,
             stepwise.upload(&op.inv_diag).unwrap(),
             stepwise.upload(b).unwrap(),
@@ -700,6 +713,7 @@ mod tests {
         let positive = |s: u64, scale: f64| pseudo_random(n, s).iter().map(|v| scale * (v + 0.5) + 0.05).collect();
         Arc::new(StencilOperator::from_parts(
             dims,
+            [false; 3],
             [0.83, 1.21, 0.64],
             positive(seed, 79.0),
             positive(seed + 1, 79.0),
@@ -813,13 +827,14 @@ mod tests {
                 let direct = pcg_on(
                     &be,
                     dims,
+                    [false; 3],
                     &dop,
                     be.upload(&op.inv_diag).unwrap(),
                     be.upload(&b).unwrap(),
                     opts,
                 );
                 let (x, s) = direct.unwrap();
-                let prepared = pcg_setup(&be, dims, &dop, be.upload(&op.inv_diag).unwrap(), opts).unwrap();
+                let prepared = pcg_setup(&be, dims, [false; 3], &dop, be.upload(&op.inv_diag).unwrap(), opts).unwrap();
                 let (y, t) = prepared.solve(&be, &dop, be.upload(&b).unwrap()).unwrap();
                 let (x, y) = (be.download(&x).unwrap(), be.download(&y).unwrap());
                 assert!(x.iter().zip(&y).all(|(a, b)| a.to_bits() == b.to_bits()), "{pc:?}");

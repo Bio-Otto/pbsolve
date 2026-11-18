@@ -34,7 +34,9 @@ solution methods and integrations can be added.
   dielectric (Li et al. 2014), which makes the energies converge.
 * **Membranes** — `zmem`/`lmem` add an implicit membrane slab (APBS'
   `draw_membrane2` rule, maps identical), uniform or with the depth profile
-  of Greene et al. (2019), with automatic pore filling.
+  of Greene et al. (2019), with automatic pore filling, and periodic
+  lateral boundaries (`period=(Lx, Ly)`): the solute repeats in x and y as
+  in the simulation box, so the slab does not end at the box faces.
 * **A dielectric per atom** — `dielectrics=` gives every atom (e.g. charged
   and other residues) its own interior dielectric, as DelPhi's multiple
   dielectrics; equal values reproduce one `pdie` bit for bit.

@@ -92,7 +92,11 @@ fn device_memory_of_calculations_matches_the_estimate() {
             } else {
                 SCRATCH
             };
-            assert_eq!(peak.used, solve_device_bytes(dims, pc) + scratch, "{dims:?} {pc:?}");
+            assert_eq!(
+                peak.used,
+                solve_device_bytes(dims, [false; 3], pc) + scratch,
+                "{dims:?} {pc:?}"
+            );
             assert!(peak.reserved >= peak.used);
             assert!(
                 peak.reserved <= worker_device_bytes([dims], pc),
@@ -113,6 +117,7 @@ fn device_memory_of_calculations_matches_the_estimate() {
         .map(|_| Job {
             atoms: &atoms,
             spec: &spec,
+            atom_pdie: None,
         })
         .collect();
     let per_worker = worker_device_bytes([dims], pc);
@@ -126,7 +131,7 @@ fn device_memory_of_calculations_matches_the_estimate() {
         r.unwrap();
     }
     let peak = gpu.pool_peak().unwrap();
-    assert!(peak.used <= 3 * (solve_device_bytes(dims, pc) + 2 * SCRATCH) + SCRATCH);
+    assert!(peak.used <= 3 * (solve_device_bytes(dims, [false; 3], pc) + 2 * SCRATCH) + SCRATCH);
     assert!(
         peak.reserved <= 3 * per_worker,
         "reserved {} MiB > {} MiB",
@@ -156,7 +161,7 @@ fn nonlinear_device_memory(gpu: &CudaBackend) {
             } else {
                 SCRATCH
             };
-            let want = solve_device_bytes(dims, pc) + scratch + NONLINEAR_VECTORS * 8 * n;
+            let want = solve_device_bytes(dims, [false; 3], pc) + scratch + NONLINEAR_VECTORS * 8 * n;
             assert_eq!(peak.used, want, "{dims:?} {pc:?}");
             let budget = calculation_device_bytes([dims], &p);
             assert!(

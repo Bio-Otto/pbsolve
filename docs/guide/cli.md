@@ -62,6 +62,7 @@ Commands that solve take these options; they are the
 | `--membrane-profile` | none | depth-dependent membrane dielectric: `greene2019` or `DEPTH:EPS,DEPTH:EPS,...` (depth below the nearer surface in Å from 0, PCHIP) |
 | `--membrane-exclusion` | 0 0 | radii (Å) at the bottom and the top of a cone around the grid's vertical axis left without membrane (channel pores) |
 | `--membrane-fill` | off | keep water and ions where a membrane plane is not connected to the sides of the box (pores the solute encloses) |
+| `--period` | none | lateral period `LX LY` (Å): the solvated state is a periodic array of the solute in x and y, as in a membrane simulation box; needs ions (see [the model](model.md#periodic-lateral-boundaries)) |
 
 ## `pbsolve info`
 

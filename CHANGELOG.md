@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Added
+
+- Periodic lateral boundaries: `Solver(period=(Lx, Ly))` makes the solvated
+  state a periodic array of the solute in x and y, as in the box of a
+  membrane simulation (not in APBS). The outermost grid spans one period
+  and is periodic in x and y; its z faces take the `mdh` terms of all
+  lateral images, summed as a Fourier series; finer grids focus as usual and
+  the reference state stays one molecule. Operator, multigrid and the CUDA
+  kernels wrap around the seam (CUDA equals the CPU bit for bit). A cell
+  equals the limit of explicit supercells and the exact lattice sum of a
+  charge in a membrane slab. Needs ions, `equation="lpbe"`,
+  `coulomb="grid"`, `bcfl` `mdh` or `mdh-fast` and a surface other than
+  `gauss`; atoms must stay clear of the cell's edges; no forces;
+  `pbsolve.apbs` refuses it. Command line: `--period LX LY`. Results without
+  a period are unchanged bit for bit.
+
+### Fixed
+
+- The GPU memory and retention tests (`pbsolve-cuda` `tests/memory.rs`,
+  `tests/retention.rs`) compile again (`Job::atom_pdie`, added in 0.0.5).
+
+### Documentation
+
+- The membrane guide measures the edge effect of the automatic grid (2 % of
+  ΔG_polar for the APBS helix example) and recommends a coarse box of about
+  100 Å in x and y or a period.
+
 ## 0.0.6 — 2026-11-18
 
 ### Added

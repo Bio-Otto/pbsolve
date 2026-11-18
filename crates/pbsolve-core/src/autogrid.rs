@@ -156,6 +156,20 @@ impl GridSpec {
         }
     }
 
+    /// This spec with a lateral period (Å along x and y): the outermost grid
+    /// spans exactly one period in x and y, and finer grids no more than one.
+    /// Applying it twice changes nothing; `None` returns the spec unchanged.
+    pub fn with_period(&self, period: Option<[f64; 2]>) -> Self {
+        let mut spec = self.clone();
+        if let Some(p) = period {
+            for (a, &l) in p.iter().enumerate() {
+                spec.coarse_length[a] = l;
+                spec.fine_length[a] = spec.fine_length[a].min(l);
+            }
+        }
+        spec
+    }
+
     pub fn is_focused(&self) -> bool {
         (0..3).any(|a| (self.coarse_length[a] - self.fine_length[a]).abs() > 1e-9)
     }

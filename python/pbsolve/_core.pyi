@@ -298,6 +298,15 @@ class Solver:
     membrane_fill : bool
         Leave the water and ions in every part of a membrane plane that is not
         connected to the sides of the box, such as a pore the solute encloses.
+    period : (float, float), optional
+        Lateral period in Å along x and y (not in APBS): the solvated state
+        becomes a periodic array of the solute, as in a membrane simulation box.
+        The outermost grid spans one period and is periodic in x and y; its z
+        faces take the periodic Debye–Hückel sum of the charges (zero with
+        ``bcfl="zero"``). Finer grids focus as usual, and the reference state
+        stays a single molecule. Needs ions, ``equation="lpbe"``,
+        ``coulomb="grid"`` and a surface other than "gauss"; every atom with its
+        radius and probe must stay clear of the period's edges. Default: no period.
 
     Raises
     ------
@@ -349,6 +358,7 @@ class Solver:
         membrane_profile: Optional[str | Sequence[tuple[float, float]]] = None,
         membrane_exclusion: tuple[float, float] = (0.0, 0.0),
         membrane_fill: bool = False,
+        period: Optional[tuple[float, float]] = None,
     ) -> None: ...
     @property
     def params(self) -> dict[str, object]:

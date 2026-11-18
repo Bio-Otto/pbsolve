@@ -81,14 +81,34 @@ impl CpuReal for f64 {
         op.apply(x, y)
     }
     fn apply_with<F: Fn(f64, usize, f64) -> f64 + Sync>(op: &Self::Op, x: &[f64], out: &mut [f64], f: F) {
-        apply7_with(op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, out, f)
+        apply7_with(
+            op.dims,
+            op.periodic,
+            op.coef,
+            &op.eps_x,
+            &op.eps_y,
+            &op.eps_z,
+            &op.kvol,
+            x,
+            out,
+            f,
+        )
     }
     fn apply_coarse_with<F: Fn(f64, usize, f64) -> f64 + Sync>(op: &Self::Coarse, x: &[f64], out: &mut [f64], f: F) {
-        multigrid::apply27_with(op.dims, &op.coef, x, out, f)
+        multigrid::apply27_with(op.dims, op.periodic, &op.coef, x, out, f)
     }
     fn apply_into(op: &Self::Op, x: &[f64], first: usize, out: &mut [f64]) {
         apply7_into(
-            op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, first, out,
+            op.dims,
+            op.periodic,
+            op.coef,
+            &op.eps_x,
+            &op.eps_y,
+            &op.eps_z,
+            &op.kvol,
+            x,
+            first,
+            out,
         )
     }
     fn fine_matrix(op: &Self::Op) -> Option<&StencilOperator> {
@@ -127,14 +147,34 @@ impl CpuReal for f32 {
         op.apply(x, y)
     }
     fn apply_with<F: Fn(f32, usize, f32) -> f32 + Sync>(op: &Self::Op, x: &[f32], out: &mut [f32], f: F) {
-        apply7_with(op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, out, f)
+        apply7_with(
+            op.dims,
+            op.periodic,
+            op.coef,
+            &op.eps_x,
+            &op.eps_y,
+            &op.eps_z,
+            &op.kvol,
+            x,
+            out,
+            f,
+        )
     }
     fn apply_coarse_with<F: Fn(f32, usize, f32) -> f32 + Sync>(op: &Self::Coarse, x: &[f32], out: &mut [f32], f: F) {
-        multigrid::apply27_with(op.dims, &op.coef, x, out, f)
+        multigrid::apply27_with(op.dims, op.periodic, &op.coef, x, out, f)
     }
     fn apply_into(op: &Self::Op, x: &[f32], first: usize, out: &mut [f32]) {
         apply7_into(
-            op.dims, op.coef, &op.eps_x, &op.eps_y, &op.eps_z, &op.kvol, x, first, out,
+            op.dims,
+            op.periodic,
+            op.coef,
+            &op.eps_x,
+            &op.eps_y,
+            &op.eps_z,
+            &op.kvol,
+            x,
+            first,
+            out,
         )
     }
     fn fine_matrix(_: &Self::Op) -> Option<&StencilOperator> {

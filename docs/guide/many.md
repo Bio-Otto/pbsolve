@@ -99,9 +99,20 @@ reference. `membrane_fill=True` keeps the water in a channel the protein
 encloses. The non-polar term γ·SASA still counts the area buried in the
 membrane as water-exposed.
 
+The automatic grid is too narrow in x and y for a membrane: the slab ends
+at its faces (2 % of ΔG_polar for the APBS helix example). Either pass a
+grid whose coarse box is about 100 Å wide or more, or give the solver the
+lateral size of the simulation box as `period=(Lx, Ly)` ([periodic lateral
+boundaries](model.md#periodic-lateral-boundaries), needs ions): the complex,
+receptor and ligand then each sit in a periodic array, as in the
+simulation. With an NPT trajectory the box changes from frame to frame;
+one period (for example the mean box) keeps the grids and the images the
+same for every frame.
+
 ```{code-block} python
 solver = pbsolve.Solver(ionic_strength=0.15, pdie=2.0, zmem=-20.0, lmem=40.0,
-                        membrane_profile="greene2019", membrane_fill=True)
+                        membrane_profile="greene2019", membrane_fill=True,
+                        period=(92.0, 92.0))
 terms = pbsolve.pbsa_solvation_frame(solver, frame, charges, radii, ligand)
 ```
 

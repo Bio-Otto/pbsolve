@@ -65,7 +65,11 @@ pub const POOL_SLACK_BYTES: u64 = 64 << 20;
 /// buffers of the largest calculation on grids of `dims`
 /// ([`solve_device_bytes`]) plus 1/8 and [`POOL_SLACK_BYTES`]. 0 without grids.
 pub fn worker_device_bytes(dims: impl IntoIterator<Item = [usize; 3]>, preconditioner: Preconditioner) -> u64 {
-    padded(dims.into_iter().map(|d| solve_device_bytes(d, preconditioner)).max())
+    padded(
+        dims.into_iter()
+            .map(|d| solve_device_bytes(d, [false; 3], preconditioner))
+            .max(),
+    )
 }
 
 /// Device vectors the nonlinear equation keeps beside a linear solve's
@@ -74,14 +78,20 @@ pub const NONLINEAR_VECTORS: u64 = 4;
 
 /// [`worker_device_bytes`] for the calculations of `params`: with a
 /// nonlinear equation (`npbe`, `smpbe`) and ions, [`NONLINEAR_VECTORS`] more
-/// f64 vectors.
+/// f64 vectors; with a lateral period, the larger of the periodic and the
+/// plain hierarchy (periodic axes coarsen differently).
 pub fn calculation_device_bytes(dims: impl IntoIterator<Item = [usize; 3]>, params: &PbParams) -> u64 {
     let nonlinear = IonTerms::new(params).is_some();
+    let lateral = [true, true, false];
     padded(
         dims.into_iter()
             .map(|d| {
                 let n = d.iter().map(|&v| v as u64).product::<u64>();
-                solve_device_bytes(d, params.preconditioner) + if nonlinear { NONLINEAR_VECTORS * 8 * n } else { 0 }
+                let mut bytes = solve_device_bytes(d, [false; 3], params.preconditioner);
+                if params.period.is_some() {
+                    bytes = bytes.max(solve_device_bytes(d, lateral, params.preconditioner));
+                }
+                bytes + if nonlinear { NONLINEAR_VECTORS * 8 * n } else { 0 }
             })
             .max(),
     )
@@ -303,6 +313,19 @@ mod tests {
         let mixed = worker_device_bytes([[121, 121, 105], [193, 313, 321], [33, 33, 33]], pc);
         assert_eq!(mixed, one([193, 313, 321]));
         assert_eq!(worker_device_bytes([], pc), 0);
+        // With a period the larger hierarchy counts: periodic axes of even
+        // node counts stop coarsening (6 × 6 × 41 instead of 4 × 4 × 41).
+        let plain = PbParams::default().with_salt(0.15, 2.0);
+        let periodic = PbParams {
+            period: Some([30.0, 30.0]),
+            ..plain.clone()
+        };
+        let d = [11, 11, 161];
+        assert!(calculation_device_bytes([d], &periodic) > calculation_device_bytes([d], &plain));
+        assert_eq!(
+            calculation_device_bytes([d], &periodic),
+            padded(Some(solve_device_bytes(d, [true, true, false], plain.preconditioner)))
+        );
         assert_eq!(device_workers(3, 0, 0, total), 1);
         assert_eq!(device_workers(3, 0, free, total), 3);
     }

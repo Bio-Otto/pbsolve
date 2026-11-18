@@ -310,6 +310,119 @@ pub fn analytic_boundary_values(grid: &Grid, atoms: &[Atom], bc: BoundaryConditi
     }
 }
 
+// ------------------------------------------------------------------ periodic
+
+/// Cut-off of the lattice sum of [`periodic_boundary_values`]: reciprocal
+/// vectors with s·d ≤ this are kept (e^{−36} ≈ 2e-16), d the smallest
+/// distance of a charge to the face.
+const PERIODIC_DECAY: f64 = 36.0;
+
+/// Dirichlet values on the z faces of a grid periodic in x and y (periods =
+/// its x and y lengths), in [`Grid::boundary_indices`] order: APBS' `mdh`
+/// terms of the charges and all their lateral images,
+///
+/// ```text
+/// u(r) = Σ_i w_i Σ_R e^{−κ|r − r_i − R|} / |r − r_i − R|,   w_i = l_B0 q_i e^{κ a_i} / (ε (1 + κ a_i)),
+///      = Σ_i w_i (2π/A) Σ_G cos(G·(ρ − ρ_i)) e^{−s |z − z_i|} / s,   s = √(G² + κ²),
+/// ```
+///
+/// R on the lattice (m P_x, n P_y), G on its reciprocal lattice, A = P_x P_y
+/// (the two-dimensional Fourier transform of e^{−κr}/r is 2π e^{−s|z|}/s).
+/// The series is used: at a face its terms fall off as e^{−|G| d}, and it is
+/// cut where s·d exceeds [`PERIODIC_DECAY`]. Needs κ > 0 (without ions the
+/// image sum diverges for a net charge) and charges strictly between the faces.
+pub fn periodic_boundary_values(grid: &Grid, atoms: &[Atom], m: &BoundaryMedium) -> Vec<f64> {
+    assert!(
+        grid.periodic[0] && grid.periodic[1],
+        "the grid must be periodic in x and y"
+    );
+    assert!(m.kappa > 0.0, "the periodic boundary needs ions");
+    let [nx, ny, nz] = grid.dims;
+    let [px, py, _] = grid.lengths();
+    let kappa = m.kappa;
+    let charged: Vec<&Atom> = atoms.iter().filter(|a| a.charge != 0.0).collect();
+    let weight: Vec<f64> = charged
+        .iter()
+        .map(|a| m.lb0 * a.charge / m.eps * (kappa * a.radius).exp() / (1.0 + kappa * a.radius))
+        .collect();
+    let prefactor = 2.0 * std::f64::consts::PI / (px * py);
+    let gx = 2.0 * std::f64::consts::PI / px;
+    let gy = 2.0 * std::f64::consts::PI / py;
+    let mut out = Vec::with_capacity(2 * nx * ny);
+    for k in [0, nz - 1] {
+        let z = grid.origin[2] + k as f64 * grid.spacing[2];
+        let dist: Vec<f64> = charged.iter().map(|a| (z - a.position[2]).abs()).collect();
+        let dmin = dist.iter().copied().fold(f64::INFINITY, f64::min);
+        if !dmin.is_finite() {
+            out.resize(out.len() + nx * ny, 0.0);
+            continue;
+        }
+        // |G| ≤ gmax keeps every term with s·d_min ≤ PERIODIC_DECAY.
+        let gmax = ((PERIODIC_DECAY / dmin).powi(2) - kappa * kappa).max(0.0).sqrt();
+        let (mmax, nmax) = ((gmax / gx) as i64, (gmax / gy) as i64);
+        let vectors: Vec<(i64, i64, f64)> = (-mmax..=mmax)
+            .flat_map(|a| (-nmax..=nmax).map(move |b| (a, b)))
+            .filter_map(|(a, b)| {
+                let g2 = (a as f64 * gx).powi(2) + (b as f64 * gy).powi(2);
+                (g2 <= gmax * gmax).then(|| (a, b, (g2 + kappa * kappa).sqrt()))
+            })
+            .collect();
+        // S(G)/s = Σ_i w_i e^{−iG·ρ_i} e^{−s d_i} / s, each in atom order.
+        let factors: Vec<(f64, f64)> = vectors
+            .par_iter()
+            .map(|&(a, b, s)| {
+                let (qx, qy) = (a as f64 * gx, b as f64 * gy);
+                let (mut re, mut im) = (0.0, 0.0);
+                for ((atom, w), d) in charged.iter().zip(&weight).zip(&dist) {
+                    let amp = w * (-s * d).exp();
+                    let (sin, cos) = (qx * atom.position[0] + qy * atom.position[1]).sin_cos();
+                    re += amp * cos;
+                    im -= amp * sin;
+                }
+                (re / s, im / s)
+            })
+            .collect();
+        // u(x, y) = (2π/A) Re Σ_G (S/s) e^{iG·ρ}, summed along y first (T), then x.
+        let xs: Vec<f64> = (0..nx).map(|i| grid.origin[0] + i as f64 * grid.spacing[0]).collect();
+        let ys: Vec<f64> = (0..ny).map(|j| grid.origin[1] + j as f64 * grid.spacing[1]).collect();
+        let rows: Vec<i64> = (-mmax..=mmax).collect();
+        // T[m][j] = Σ_n (S_mn / s) e^{i G_y y_j}.
+        let t: Vec<Vec<(f64, f64)>> = rows
+            .par_iter()
+            .map(|&a| {
+                let mut row = vec![(0.0, 0.0); ny];
+                for ((&(va, b, _), &(fr, fi)), _) in vectors.iter().zip(&factors).zip(0..) {
+                    if va != a {
+                        continue;
+                    }
+                    let qy = b as f64 * gy;
+                    for (r, &y) in row.iter_mut().zip(&ys) {
+                        let (sin, cos) = (qy * y).sin_cos();
+                        r.0 += fr * cos - fi * sin;
+                        r.1 += fr * sin + fi * cos;
+                    }
+                }
+                row
+            })
+            .collect();
+        let face: Vec<f64> = (0..nx * ny)
+            .into_par_iter()
+            .map(|c| {
+                let (i, j) = (c % nx, c / nx);
+                let mut acc = 0.0;
+                for (&a, row) in rows.iter().zip(&t) {
+                    let (sin, cos) = (a as f64 * gx * xs[i]).sin_cos();
+                    let (tr, ti) = row[j];
+                    acc += tr * cos - ti * sin;
+                }
+                prefactor * acc
+            })
+            .collect();
+        out.extend(face);
+    }
+    out
+}
+
 // ------------------------------------------------------------------ mdh-fast
 
 /// Accuracy of `mdh-fast`: on every interpolated patch the error is at most
@@ -935,5 +1048,62 @@ mod tests {
         let want = m.lb0 * 2.0 * q * s * (30.0 / r) / (r * r);
         let got = mp.potential(p, &m);
         assert!((got - want).abs() < 1e-3 * want.abs(), "{got} vs {want}");
+    }
+
+    /// The Fourier series of the periodic boundary equals the image sum of
+    /// the `mdh` terms in real space, on both z faces, seams included.
+    #[test]
+    fn periodic_boundary_equals_the_image_sum() {
+        let atoms = [
+            Atom {
+                position: [0.4, -1.1, 0.7],
+                charge: 1.0,
+                radius: 2.0,
+            },
+            Atom {
+                position: [-2.5, 1.9, -1.2],
+                charge: -0.6,
+                radius: 1.5,
+            },
+            Atom {
+                position: [1.7, 2.2, 3.0],
+                charge: 0.25,
+                radius: 0.0,
+            },
+        ];
+        for (kappa, len, dims) in [
+            (0.3, [18.0, 14.0, 16.0], [19, 15, 9]),
+            (0.126, [22.0, 22.0, 12.0], [12, 9, 7]),
+        ] {
+            let m = medium(78.54, 2.0, kappa);
+            let grid = Grid::centered([0.2, 0.1, 0.0], len, dims)
+                .unwrap()
+                .with_periodic([true, true, false]);
+            let got = periodic_boundary_values(&grid, &atoms, &m);
+            let bidx = grid.boundary_indices();
+            assert_eq!(got.len(), bidx.len());
+            // Images while e^{−κ r} > 1e-17.
+            let reach = (39.0 / kappa / len[0].min(len[1])).ceil() as i64 + 1;
+            let mut worst: f64 = 0.0;
+            for (&c, &v) in bidx.iter().zip(&got) {
+                let (i, j, k) = grid.ijk(c);
+                let p = grid.position(i, j, k);
+                let mut want = 0.0;
+                for a in &atoms {
+                    for mx in -reach..=reach {
+                        for my in -reach..=reach {
+                            let r = [
+                                a.position[0] + mx as f64 * len[0],
+                                a.position[1] + my as f64 * len[1],
+                                a.position[2],
+                            ];
+                            want += dh(a.charge, a.radius, dist2(p, r).sqrt(), &m);
+                        }
+                    }
+                }
+                worst = worst.max((v - want).abs() / want.abs().max(1e-3));
+            }
+            assert!(worst < 1e-11, "κ = {kappa}: relative error {worst:e}");
+        }
     }
 }

@@ -9,33 +9,86 @@
 
 #define BLOCK 256
 
+// Periodic axes `per` (bit 0: x, bit 1: y; grid.rs `Grid::periodic`): on such
+// an axis of n nodes node n - 1 is the image of node 0, so nodes 0 .. n - 2
+// are unknowns and the neighbours across the seam wrap around (axis_unknown,
+// axis_prev, axis_next in grid.rs). With per = 0 the indices are the plain ones.
+__device__ __forceinline__ bool axis_unknown(const int i, const int n, const int p)
+{
+    return i + 1 < n && (i > 0 || p);
+}
+
+__device__ __forceinline__ int axis_prev(const int i, const int n, const int p)
+{
+    return (p && i == 0) ? n - 2 : i - 1;
+}
+
+__device__ __forceinline__ int axis_next(const int i, const int n, const int p)
+{
+    return (p && i + 2 == n) ? 0 : i + 1;
+}
+
+__device__ __forceinline__ int axis_step(const int i, const int d, const int n, const int p)
+{
+    return d < 0 ? axis_prev(i, n, p) : (d > 0 ? axis_next(i, n, p) : i);
+}
+
+__device__ __forceinline__ bool unknown3(const int i, const int j, const int k, const int nx, const int ny,
+                                         const int nz, const int per)
+{
+    return axis_unknown(i, nx, per & 1) && axis_unknown(j, ny, (per >> 1) & 1) && axis_unknown(k, nz, 0);
+}
+
+// Interior node of a grid without periodic axes (the nonlinear kernels).
+__device__ __forceinline__ bool interior3(const int i, const int j, const int k, const int nx, const int ny, const int nz)
+{
+    return i > 0 && j > 0 && k > 0 && i + 1 < nx && j + 1 < ny && k + 1 < nz;
+}
+
+// The node of unwrapped coordinate f on an axis of n nodes if it is an
+// unknown, else -1 (multigrid.rs `wrapped`).
+__device__ __forceinline__ int wrapped(const int f, const int n, const int p)
+{
+    if (p) {
+        const int u = n - 1;
+        return ((f % u) + u) % u;
+    }
+    return (f > 0 && f + 1 < n) ? f : -1;
+}
+
 // (A x)_c of the 7-point operator, 0 on boundary nodes: the value pb_apply
-// writes, also used by the fused residuals.
+// writes, also used by the fused residuals. The -a neighbour m of c is also
+// the index of the -a face (operator.rs neighbours7, stencil7_at).
 template <typename T>
 __device__ __forceinline__ T stencil7_at(
-    const long long c, const int nx, const int ny, const int nz,
+    const long long c, const int nx, const int ny, const int nz, const int per,
     const T cx, const T cy, const T cz,
     const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,
     const T* __restrict__ kvol, const T* __restrict__ x)
 {
-    const long long sy = nx;
     const long long sz = (long long)nx * ny;
     const int i = (int)(c % nx);
     const int j = (int)((c / nx) % ny);
     const int k = (int)(c / sz);
-    if (i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1) {
+    if (!unknown3(i, j, k, nx, ny, nz, per)) {
         return T(0);
     }
+    const long long row = c - i;
+    const long long plane = row - (long long)j * nx;
+    const long long xm = row + axis_prev(i, nx, per & 1);
+    const long long xp = row + axis_next(i, nx, per & 1);
+    const long long ym = plane + (long long)axis_prev(j, ny, (per >> 1) & 1) * nx + i;
+    const long long yp = plane + (long long)axis_next(j, ny, (per >> 1) & 1) * nx + i;
     const T xc = x[c];
-    return cx * (ex[c - 1] * (xc - x[c - 1]) + ex[c] * (xc - x[c + 1]))
-         + cy * (ey[c - sy] * (xc - x[c - sy]) + ey[c] * (xc - x[c + sy]))
+    return cx * (ex[xm] * (xc - x[xm]) + ex[c] * (xc - x[xp]))
+         + cy * (ey[ym] * (xc - x[ym]) + ey[c] * (xc - x[yp]))
          + cz * (ez[c - sz] * (xc - x[c - sz]) + ez[c] * (xc - x[c + sz]))
          + kvol[c] * xc;
 }
 
 template <typename T>
 __device__ void apply_impl(
-    const int nx, const int ny, const int nz,
+    const int nx, const int ny, const int nz, const int per,
     const T cx, const T cy, const T cz,
     const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,
     const T* __restrict__ kvol, const T* __restrict__ x, T* __restrict__ y)
@@ -43,7 +96,7 @@ __device__ void apply_impl(
     const long long n = (long long)nx * ny * nz;
     const long long stride = (long long)blockDim.x * gridDim.x;
     for (long long c = (long long)blockIdx.x * blockDim.x + threadIdx.x; c < n; c += stride) {
-        y[c] = stencil7_at<T>(c, nx, ny, nz, cx, cy, cz, ex, ey, ez, kvol, x);
+        y[c] = stencil7_at<T>(c, nx, ny, nz, per, cx, cy, cz, ex, ey, ez, kvol, x);
     }
 }
 
@@ -52,7 +105,7 @@ __device__ void apply_impl(
 // o = (dx+1) + 3*(dy+1) + 9*(dz+1). Same summation order as apply27 on the CPU.
 template <typename T>
 __device__ __forceinline__ T stencil27_at(
-    const long long c, const int nx, const int ny, const int nz,
+    const long long c, const int nx, const int ny, const int nz, const int per,
     const T* __restrict__ coef, const T* __restrict__ x)
 {
     const long long n = (long long)nx * ny * nz;
@@ -61,15 +114,21 @@ __device__ __forceinline__ T stencil27_at(
     const int i = (int)(c % nx);
     const int j = (int)((c / nx) % ny);
     const int k = (int)(c / sz);
-    if (i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1) {
+    if (!unknown3(i, j, k, nx, ny, nz, per)) {
         return T(0);
     }
+    const int px = per & 1, py = (per >> 1) & 1;
+    // Next to a seam the neighbours wrap (multigrid.rs on_seam, neighbour27).
+    const bool seam = (px && (i == 0 || i + 2 == nx)) || (py && (j == 0 || j + 2 == ny));
     T acc = T(0);
     int o = 0;
     for (int dz = -1; dz <= 1; ++dz) {
         for (int dy = -1; dy <= 1; ++dy) {
             for (int dx = -1; dx <= 1; ++dx) {
-                acc += coef[o * n + c] * x[c + dx + dy * sy + dz * sz];
+                const long long q = seam ? axis_step(i, dx, nx, px) +
+                                               (long long)nx * (axis_step(j, dy, ny, py) + (long long)ny * (k + dz))
+                                         : c + dx + dy * sy + dz * sz;
+                acc += coef[o * n + c] * x[q];
                 ++o;
             }
         }
@@ -79,30 +138,38 @@ __device__ __forceinline__ T stencil27_at(
 
 template <typename T>
 __device__ void apply27_impl(
-    const int nx, const int ny, const int nz,
+    const int nx, const int ny, const int nz, const int per,
     const T* __restrict__ coef, const T* __restrict__ x, T* __restrict__ y)
 {
     const long long n = (long long)nx * ny * nz;
     const long long stride = (long long)blockDim.x * gridDim.x;
     for (long long c = (long long)blockIdx.x * blockDim.x + threadIdx.x; c < n; c += stride) {
-        y[c] = stencil27_at<T>(c, nx, ny, nz, coef, x);
+        y[c] = stencil27_at<T>(c, nx, ny, nz, per, coef, x);
     }
 }
 
-// Multigrid transfer weights along one axis (see multigrid.rs).
+// Multigrid transfer weights along one axis (see multigrid.rs): the fine
+// unknowns of coarse unknown c, their weights and unwrapped coordinates.
 template <typename T>
-__device__ int restrict_axis(const int c, const int coarsen, const int n, int* idx, T* w)
+__device__ int restrict_axis(const int c, const int coarsen, const int n, const int p, int* idx, T* w, int* at)
 {
     if (!coarsen) {
         idx[0] = c;
         w[0] = T(1);
+        at[0] = c;
         return 1;
     }
     int m = 0;
-    const int f0 = 2 * c - 1, f1 = 2 * c, f2 = 2 * c + 1;
-    if (f0 > 0 && f0 + 1 < n) { idx[m] = f0; w[m] = T(0.5); ++m; }
-    if (f1 > 0 && f1 + 1 < n) { idx[m] = f1; w[m] = T(1); ++m; }
-    if (f2 > 0 && f2 + 1 < n) { idx[m] = f2; w[m] = T(0.5); ++m; }
+    for (int s = -1; s <= 1; ++s) {
+        const int f = 2 * c + s;
+        const int g = wrapped(f, n, p);
+        if (g >= 0) {
+            idx[m] = g;
+            w[m] = s == 0 ? T(1) : T(0.5);
+            at[m] = f;
+            ++m;
+        }
+    }
     return m;
 }
 
@@ -126,12 +193,12 @@ __device__ int prolong_axis(const int f, const int coarsen, int* idx, T* w)
     return 2;
 }
 
-// coarse = P^T fine (interior coarse nodes; 0 on the coarse boundary)
+// coarse = P^T fine (coarse unknowns; 0 on the other coarse nodes)
 template <typename T>
 __device__ void restrict_impl(
     const int nx, const int ny, const int nz,
     const int mx, const int my, const int mz,
-    const int cx, const int cy, const int cz,
+    const int cx, const int cy, const int cz, const int per,
     const T* __restrict__ fine, T* __restrict__ coarse)
 {
     const long long n = (long long)mx * my * mz;
@@ -140,15 +207,15 @@ __device__ void restrict_impl(
         const int ic = (int)(c % mx);
         const int jc = (int)((c / mx) % my);
         const int kc = (int)(c / ((long long)mx * my));
-        if (ic == 0 || jc == 0 || kc == 0 || ic == mx - 1 || jc == my - 1 || kc == mz - 1) {
+        if (!unknown3(ic, jc, kc, mx, my, mz, per)) {
             coarse[c] = T(0);
             continue;
         }
-        int fx[3], fy[3], fz[3];
+        int fx[3], fy[3], fz[3], ux[3], uy[3], uz[3];
         T wx[3], wy[3], wz[3];
-        const int ax = restrict_axis<T>(ic, cx, nx, fx, wx);
-        const int ay = restrict_axis<T>(jc, cy, ny, fy, wy);
-        const int az = restrict_axis<T>(kc, cz, nz, fz, wz);
+        const int ax = restrict_axis<T>(ic, cx, nx, per & 1, fx, wx, ux);
+        const int ay = restrict_axis<T>(jc, cy, ny, (per >> 1) & 1, fy, wy, uy);
+        const int az = restrict_axis<T>(kc, cz, nz, 0, fz, wz, uz);
         T acc = T(0);
         for (int q = 0; q < az; ++q) {
             for (int b = 0; b < ay; ++b) {
@@ -162,12 +229,13 @@ __device__ void restrict_impl(
     }
 }
 
-// fine += P coarse (interior fine nodes)
+// fine += P coarse (fine unknowns); the last coarse node of a periodic axis
+// is read as its image 0
 template <typename T>
 __device__ void prolong_add_impl(
     const int nx, const int ny, const int nz,
     const int mx, const int my, const int mz,
-    const int cx, const int cy, const int cz,
+    const int cx, const int cy, const int cz, const int per,
     const T* __restrict__ coarse, T* __restrict__ fine)
 {
     const long long n = (long long)nx * ny * nz;
@@ -176,7 +244,7 @@ __device__ void prolong_add_impl(
         const int i = (int)(c % nx);
         const int j = (int)((c / nx) % ny);
         const int k = (int)(c / ((long long)nx * ny));
-        if (i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1) {
+        if (!unknown3(i, j, k, nx, ny, nz, per)) {
             continue;
         }
         int gx[2], gy[2], gz[2];
@@ -184,6 +252,12 @@ __device__ void prolong_add_impl(
         const int ax = prolong_axis<T>(i, cx, gx, wx);
         const int ay = prolong_axis<T>(j, cy, gy, wy);
         const int az = prolong_axis<T>(k, cz, gz, wz);
+        for (int a = 0; a < ax; ++a) {
+            if ((per & 1) && gx[a] == mx - 1) { gx[a] = 0; }
+        }
+        for (int b = 0; b < ay; ++b) {
+            if (((per >> 1) & 1) && gy[b] == my - 1) { gy[b] = 0; }
+        }
         T acc = T(0);
         for (int q = 0; q < az; ++q) {
             for (int b = 0; b < ay; ++b) {
@@ -268,14 +342,14 @@ __device__ void dot2_partial_impl(
 
 #define PB_KERNELS(T, S)                                                                                  \
     extern "C" __global__ void pb_apply_##S(                                                             \
-        const int nx, const int ny, const int nz, const T cx, const T cy, const T cz,                    \
+        const int nx, const int ny, const int nz, const int per, const T cx, const T cy, const T cz,     \
         const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,                    \
         const T* __restrict__ kvol, const T* __restrict__ x, T* __restrict__ y)                          \
-    { apply_impl<T>(nx, ny, nz, cx, cy, cz, ex, ey, ez, kvol, x, y); }                                   \
+    { apply_impl<T>(nx, ny, nz, per, cx, cy, cz, ex, ey, ez, kvol, x, y); }                              \
     extern "C" __global__ void pb_apply27_##S(                                                           \
-        const int nx, const int ny, const int nz,                                                        \
+        const int nx, const int ny, const int nz, const int per,                                         \
         const T* __restrict__ coef, const T* __restrict__ x, T* __restrict__ y)                          \
-    { apply27_impl<T>(nx, ny, nz, coef, x, y); }                                                         \
+    { apply27_impl<T>(nx, ny, nz, per, coef, x, y); }                                                    \
     /* y = (alpha * d) * x   (Jacobi preconditioner, smoother scaling) */                                \
     extern "C" __global__ void pb_scale_##S(const long long n, const T alpha,                            \
         const T* __restrict__ d, const T* __restrict__ x, T* __restrict__ y)                             \
@@ -300,41 +374,43 @@ __device__ void dot2_partial_impl(
     { dot2_partial_impl<T>(n, a, b, c, partial); }                                                       \
     extern "C" __global__ void pb_restrict_##S(                                                          \
         const int nx, const int ny, const int nz, const int mx, const int my, const int mz,              \
-        const int cx, const int cy, const int cz, const T* __restrict__ fine, T* __restrict__ coarse)    \
-    { restrict_impl<T>(nx, ny, nz, mx, my, mz, cx, cy, cz, fine, coarse); }                              \
+        const int cx, const int cy, const int cz, const int per,                                         \
+        const T* __restrict__ fine, T* __restrict__ coarse)                                              \
+    { restrict_impl<T>(nx, ny, nz, mx, my, mz, cx, cy, cz, per, fine, coarse); }                         \
     extern "C" __global__ void pb_prolong_add_##S(                                                       \
         const int nx, const int ny, const int nz, const int mx, const int my, const int mz,              \
-        const int cx, const int cy, const int cz, const T* __restrict__ coarse, T* __restrict__ fine)    \
-    { prolong_add_impl<T>(nx, ny, nz, mx, my, mz, cx, cy, cz, coarse, fine); }                          \
+        const int cx, const int cy, const int cz, const int per,                                         \
+        const T* __restrict__ coarse, T* __restrict__ fine)                                              \
+    { prolong_add_impl<T>(nx, ny, nz, mx, my, mz, cx, cy, cz, per, coarse, fine); }                     \
     /* Fused multigrid smoother steps (Backend::residual, chebyshev_first,                             \
        chebyshev_next): each element as the separate kernels compute it.                                \
        r = b + (-1) * (A x)   (apply, copy, axpy) */                                                       \
     extern "C" __global__ void pb_residual_##S(                                                          \
-        const int nx, const int ny, const int nz, const T cx, const T cy, const T cz,                    \
+        const int nx, const int ny, const int nz, const int per, const T cx, const T cy, const T cz,     \
         const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,                    \
         const T* __restrict__ kvol, const T* __restrict__ x, const T* __restrict__ b,                    \
         T* __restrict__ r)                                                                               \
     { const long long n = (long long)nx * ny * nz;                                                       \
       GRID_STRIDE_LOOP(c, n) {                                                                           \
-          r[c] = b[c] + T(-1) * stencil7_at<T>(c, nx, ny, nz, cx, cy, cz, ex, ey, ez, kvol, x); } }      \
+          r[c] = b[c] + T(-1) * stencil7_at<T>(c, nx, ny, nz, per, cx, cy, cz, ex, ey, ez, kvol, x); } } \
     /* r = r + (-1) * (A x)   (apply, axpy) */                                                             \
     extern "C" __global__ void pb_residual_update_##S(                                                   \
-        const int nx, const int ny, const int nz, const T cx, const T cy, const T cz,                    \
+        const int nx, const int ny, const int nz, const int per, const T cx, const T cy, const T cz,     \
         const T* __restrict__ ex, const T* __restrict__ ey, const T* __restrict__ ez,                    \
         const T* __restrict__ kvol, const T* __restrict__ x, T* __restrict__ r)                          \
     { const long long n = (long long)nx * ny * nz;                                                       \
       GRID_STRIDE_LOOP(c, n) {                                                                           \
-          r[c] = r[c] + T(-1) * stencil7_at<T>(c, nx, ny, nz, cx, cy, cz, ex, ey, ez, kvol, x); } }      \
+          r[c] = r[c] + T(-1) * stencil7_at<T>(c, nx, ny, nz, per, cx, cy, cz, ex, ey, ez, kvol, x); } } \
     extern "C" __global__ void pb_residual27_##S(                                                        \
-        const int nx, const int ny, const int nz, const T* __restrict__ coef,                            \
+        const int nx, const int ny, const int nz, const int per, const T* __restrict__ coef,             \
         const T* __restrict__ x, const T* __restrict__ b, T* __restrict__ r)                             \
     { const long long n = (long long)nx * ny * nz;                                                       \
-      GRID_STRIDE_LOOP(c, n) { r[c] = b[c] + T(-1) * stencil27_at<T>(c, nx, ny, nz, coef, x); } }         \
+      GRID_STRIDE_LOOP(c, n) { r[c] = b[c] + T(-1) * stencil27_at<T>(c, nx, ny, nz, per, coef, x); } }    \
     extern "C" __global__ void pb_residual27_update_##S(                                                 \
-        const int nx, const int ny, const int nz, const T* __restrict__ coef,                            \
+        const int nx, const int ny, const int nz, const int per, const T* __restrict__ coef,             \
         const T* __restrict__ x, T* __restrict__ r)                                                      \
     { const long long n = (long long)nx * ny * nz;                                                       \
-      GRID_STRIDE_LOOP(c, n) { r[c] = r[c] + T(-1) * stencil27_at<T>(c, nx, ny, nz, coef, x); } }         \
+      GRID_STRIDE_LOOP(c, n) { r[c] = r[c] + T(-1) * stencil27_at<T>(c, nx, ny, nz, per, coef, x); } }    \
     /* d = (s * w) * r; x = d (overwrite) or x = x + 1 * d   (scale, copy or axpy) */                      \
     extern "C" __global__ void pb_cheb_first_##S(const long long n, const T s,                          \
         const T* __restrict__ w, const T* __restrict__ r, T* __restrict__ d, T* __restrict__ x,          \
@@ -404,27 +480,26 @@ PB_CONVERT(float, float, f32, f32)
 // compute them. Each coarse row is accumulated by one thread in exactly the
 // CPU's loop order (fine rows, then stencil entries, then interpolation
 // targets), so with --fmad=false the operators are bit-identical to the host.
-// Coarsening flags are kx, ky, kz; the 7-point coefficients are cx, cy, cz.
+// Coarsening flags are kx, ky, kz; the 7-point coefficients are cx, cy, cz;
+// per are the periodic axes. Coordinates are followed unwrapped and wrapped
+// only to address nodes, as `galerkin` does.
 
-__device__ __forceinline__ bool interior3(const int i, const int j, const int k, const int nx, const int ny, const int nz)
-{
-    return i > 0 && j > 0 && k > 0 && i + 1 < nx && j + 1 < ny && k + 1 < nz;
-}
-
-// Adds fine-matrix entry `val` (offset dx, dy, dz of fine row fi, fj, fk,
-// restriction weight wf) to coarse row (ic, jc, kc). The coarse offsets are
-// in {-1, 0, 1}³ by construction.
+// Adds fine-matrix entry `val` (offset dx, dy, dz of the fine row at
+// unwrapped coordinates fi, fj, fk, restriction weight wf) to coarse row
+// (ic, jc, kc). The coarse offsets are in {-1, 0, 1}³ by construction
+// (prolong_axis gives the floor halves of negative coordinates too).
 __device__ __forceinline__ void galerkin_entry(
     double* acc, const double wf, const double val, const int dx, const int dy, const int dz,
     const int fi, const int fj, const int fk, const int nx, const int ny, const int nz,
     const int mx, const int my, const int mz, const int kx, const int ky, const int kz,
-    const int ic, const int jc, const int kc)
+    const int ic, const int jc, const int kc, const int per)
 {
     if (val == 0.0) {
         return;
     }
+    const int pxa = per & 1, pya = (per >> 1) & 1;
     const int gi = fi + dx, gj = fj + dy, gk = fk + dz;
-    if (!interior3(gi, gj, gk, nx, ny, nz)) {
+    if (wrapped(gi, nx, pxa) < 0 || wrapped(gj, ny, pya) < 0 || wrapped(gk, nz, 0) < 0) {
         return;
     }
     int px[2], py[2], pz[2];
@@ -435,7 +510,7 @@ __device__ __forceinline__ void galerkin_entry(
     for (int r = 0; r < az; ++r) {
         for (int q = 0; q < ay; ++q) {
             for (int p = 0; p < ax; ++p) {
-                if (!interior3(px[p], py[q], pz[r], mx, my, mz)) {
+                if (wrapped(px[p], mx, pxa) < 0 || wrapped(py[q], my, pya) < 0 || wrapped(pz[r], mz, 0) < 0) {
                     continue;
                 }
                 const double w = wx[p] * wy[q] * wz[r];
@@ -449,13 +524,13 @@ __device__ __forceinline__ void galerkin_entry(
 // Unsymmetrised Galerkin rows of a 7-point fine operator: rows[o*n_c + c].
 extern "C" __global__ void pb_galerkin7(
     const int nx, const int ny, const int nz, const int mx, const int my, const int mz,
-    const int kx, const int ky, const int kz, const double cx, const double cy, const double cz,
+    const int kx, const int ky, const int kz, const int per, const double cx, const double cy, const double cz,
     const double* __restrict__ ex, const double* __restrict__ ey, const double* __restrict__ ez,
     const double* __restrict__ kvol, double* __restrict__ rows)
 {
     const long long nc = (long long)mx * my * mz;
-    const long long sy = nx;
     const long long sz = (long long)nx * ny;
+    const int pxa = per & 1, pya = (per >> 1) & 1;
     GRID_STRIDE_LOOP(c, nc) {
         const int ic = (int)(c % mx);
         const int jc = (int)((c / mx) % my);
@@ -464,30 +539,33 @@ extern "C" __global__ void pb_galerkin7(
         for (int o = 0; o < 27; ++o) {
             acc[o] = 0.0;
         }
-        if (interior3(ic, jc, kc, mx, my, mz)) {
-            int fx[3], fy[3], fz[3];
+        if (unknown3(ic, jc, kc, mx, my, mz, per)) {
+            int fx[3], fy[3], fz[3], ux[3], uy[3], uz[3];
             double wx[3], wy[3], wz[3];
-            const int ax = restrict_axis<double>(ic, kx, nx, fx, wx);
-            const int ay = restrict_axis<double>(jc, ky, ny, fy, wy);
-            const int az = restrict_axis<double>(kc, kz, nz, fz, wz);
+            const int ax = restrict_axis<double>(ic, kx, nx, pxa, fx, wx, ux);
+            const int ay = restrict_axis<double>(jc, ky, ny, pya, fy, wy, uy);
+            const int az = restrict_axis<double>(kc, kz, nz, 0, fz, wz, uz);
             for (int q = 0; q < az; ++q) {
                 for (int b = 0; b < ay; ++b) {
                     for (int a = 0; a < ax; ++a) {
                         const double wf = wx[a] * wy[b] * wz[q];
-                        const int fi = fx[a], fj = fy[b], fk = fz[q];
-                        const long long f = fi + (long long)nx * (fj + (long long)ny * fk);
-                        const double exm = ex[f - 1], exp = ex[f];
-                        const double eym = ey[f - sy], eyp = ey[f];
+                        const int fi = ux[a], fj = uy[b], fk = uz[q];
+                        const long long row = (long long)nx * (fy[b] + (long long)ny * fz[q]);
+                        const long long f = fx[a] + row;
+                        const long long plane = (long long)nx * ny * fz[q];
+                        // The -a faces of node f: those of its -a neighbours.
+                        const double exm = ex[row + axis_prev(fx[a], nx, pxa)], exp = ex[f];
+                        const double eym = ey[plane + (long long)axis_prev(fy[b], ny, pya) * nx + fx[a]], eyp = ey[f];
                         const double ezm = ez[f - sz], ezp = ez[f];
                         const double diag = cx * (exm + exp) + cy * (eym + eyp) + cz * (ezm + ezp) + kvol[f];
                         // Entry order of LevelMatrix::for_each_entry (Seven).
-                        galerkin_entry(acc, wf, -cz * ezm, 0, 0, -1, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
-                        galerkin_entry(acc, wf, -cy * eym, 0, -1, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
-                        galerkin_entry(acc, wf, -cx * exm, -1, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
-                        galerkin_entry(acc, wf, diag, 0, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
-                        galerkin_entry(acc, wf, -cx * exp, 1, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
-                        galerkin_entry(acc, wf, -cy * eyp, 0, 1, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
-                        galerkin_entry(acc, wf, -cz * ezp, 0, 0, 1, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                        galerkin_entry(acc, wf, -cz * ezm, 0, 0, -1, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
+                        galerkin_entry(acc, wf, -cy * eym, 0, -1, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
+                        galerkin_entry(acc, wf, -cx * exm, -1, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
+                        galerkin_entry(acc, wf, diag, 0, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
+                        galerkin_entry(acc, wf, -cx * exp, 1, 0, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
+                        galerkin_entry(acc, wf, -cy * eyp, 0, 1, 0, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
+                        galerkin_entry(acc, wf, -cz * ezp, 0, 0, 1, fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
                     }
                 }
             }
@@ -501,7 +579,8 @@ extern "C" __global__ void pb_galerkin7(
 // Unsymmetrised Galerkin rows of a 27-point fine operator (coef[o*n_f + f]).
 extern "C" __global__ void pb_galerkin27(
     const int nx, const int ny, const int nz, const int mx, const int my, const int mz,
-    const int kx, const int ky, const int kz, const double* __restrict__ fine, double* __restrict__ rows)
+    const int kx, const int ky, const int kz, const int per, const double* __restrict__ fine,
+    double* __restrict__ rows)
 {
     const long long nc = (long long)mx * my * mz;
     const long long nf = (long long)nx * ny * nz;
@@ -513,21 +592,20 @@ extern "C" __global__ void pb_galerkin27(
         for (int o = 0; o < 27; ++o) {
             acc[o] = 0.0;
         }
-        if (interior3(ic, jc, kc, mx, my, mz)) {
-            int fx[3], fy[3], fz[3];
+        if (unknown3(ic, jc, kc, mx, my, mz, per)) {
+            int fx[3], fy[3], fz[3], ux[3], uy[3], uz[3];
             double wx[3], wy[3], wz[3];
-            const int ax = restrict_axis<double>(ic, kx, nx, fx, wx);
-            const int ay = restrict_axis<double>(jc, ky, ny, fy, wy);
-            const int az = restrict_axis<double>(kc, kz, nz, fz, wz);
+            const int ax = restrict_axis<double>(ic, kx, nx, per & 1, fx, wx, ux);
+            const int ay = restrict_axis<double>(jc, ky, ny, (per >> 1) & 1, fy, wy, uy);
+            const int az = restrict_axis<double>(kc, kz, nz, 0, fz, wz, uz);
             for (int q = 0; q < az; ++q) {
                 for (int b = 0; b < ay; ++b) {
                     for (int a = 0; a < ax; ++a) {
                         const double wf = wx[a] * wy[b] * wz[q];
-                        const int fi = fx[a], fj = fy[b], fk = fz[q];
-                        const long long f = fi + (long long)nx * (fj + (long long)ny * fk);
+                        const long long f = fx[a] + (long long)nx * (fy[b] + (long long)ny * fz[q]);
                         for (int o = 0; o < 27; ++o) {
                             galerkin_entry(acc, wf, fine[o * nf + f], o % 3 - 1, (o / 3) % 3 - 1, o / 9 - 1,
-                                           fi, fj, fk, nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc);
+                                           ux[a], uy[b], uz[q], nx, ny, nz, mx, my, mz, kx, ky, kz, ic, jc, kc, per);
                         }
                     }
                 }
@@ -543,7 +621,8 @@ extern "C" __global__ void pb_galerkin27(
 // (c + offset(o), 26 - o) both become 0.5 (a + b), and rows whose diagonal is
 // 0 (boundary rows) become 0, as on the CPU. One thread per pair (o < 13);
 // a pair whose row c lies on the grid boundary is already exactly 0.
-extern "C" __global__ void pb_symmetrise27(const int mx, const int my, const int mz, double* __restrict__ coef)
+extern "C" __global__ void pb_symmetrise27(const int mx, const int my, const int mz, const int per,
+                                           double* __restrict__ coef)
 {
     const long long n = (long long)mx * my * mz;
     const long long sy = mx;
@@ -554,11 +633,15 @@ extern "C" __global__ void pb_symmetrise27(const int mx, const int my, const int
         const int i = (int)(c % mx);
         const int j = (int)((c / mx) % my);
         const int k = (int)(c / sz);
-        if (!interior3(i, j, k, mx, my, mz)) {
+        if (!unknown3(i, j, k, mx, my, mz, per)) {
             coef[o * n + c] = 0.0;
             continue;
         }
-        const long long p = c + (o % 3 - 1) + ((o / 3) % 3 - 1) * sy + (o / 9 - 1) * sz;
+        // The partner of entry o of c (multigrid.rs neighbour27 with periodic axes).
+        const int dx = o % 3 - 1, dy = (o / 3) % 3 - 1, dz = o / 9 - 1;
+        const long long p = per ? axis_step(i, dx, mx, per & 1) +
+                                      sy * (axis_step(j, dy, my, (per >> 1) & 1) + (long long)my * (k + dz))
+                                : c + dx + dy * sy + dz * sz;
         const double v = 0.5 * (coef[o * n + c] + coef[(26 - o) * n + p]);
         coef[o * n + c] = coef[13 * n + c] != 0.0 ? v : 0.0;
         coef[(26 - o) * n + p] = coef[13 * n + p] != 0.0 ? v : 0.0;
@@ -603,23 +686,23 @@ __device__ __forceinline__ void block_max(double v, double* __restrict__ partial
 }
 
 extern "C" __global__ void pb_gershgorin7(
-    const int nx, const int ny, const int nz, const double cx, const double cy, const double cz,
+    const int nx, const int ny, const int nz, const int per, const double cx, const double cy, const double cz,
     const double* __restrict__ ex, const double* __restrict__ ey, const double* __restrict__ ez,
     const double* __restrict__ kvol, double* __restrict__ partial)
 {
     const long long n = (long long)nx * ny * nz;
-    const long long sy = nx;
     const long long sz = (long long)nx * ny;
     double m = 0.0;
     GRID_STRIDE_LOOP(c, n) {
         const int i = (int)(c % nx);
         const int j = (int)((c / nx) % ny);
         const int k = (int)(c / sz);
-        if (!interior3(i, j, k, nx, ny, nz)) {
+        if (!unknown3(i, j, k, nx, ny, nz, per)) {
             continue;
         }
-        const double exm = ex[c - 1], exp = ex[c];
-        const double eym = ey[c - sy], eyp = ey[c];
+        const long long row = c - i;
+        const double exm = ex[row + axis_prev(i, nx, per & 1)], exp = ex[c];
+        const double eym = ey[row - (long long)j * nx + (long long)axis_prev(j, ny, (per >> 1) & 1) * nx + i], eyp = ey[c];
         const double ezm = ez[c - sz], ezp = ez[c];
         const double diag = cx * (exm + exp) + cy * (eym + eyp) + cz * (ezm + ezp) + kvol[c];
         double sum = 0.0;
@@ -636,7 +719,8 @@ extern "C" __global__ void pb_gershgorin7(
 }
 
 extern "C" __global__ void pb_gershgorin27(
-    const int nx, const int ny, const int nz, const double* __restrict__ coef, double* __restrict__ partial)
+    const int nx, const int ny, const int nz, const int per, const double* __restrict__ coef,
+    double* __restrict__ partial)
 {
     const long long n = (long long)nx * ny * nz;
     double m = 0.0;
@@ -644,7 +728,7 @@ extern "C" __global__ void pb_gershgorin27(
         const int i = (int)(c % nx);
         const int j = (int)((c / nx) % ny);
         const int k = (int)(c / ((long long)nx * ny));
-        if (!interior3(i, j, k, nx, ny, nz)) {
+        if (!unknown3(i, j, k, nx, ny, nz, per)) {
             continue;
         }
         double sum = 0.0;
@@ -779,12 +863,11 @@ extern "C" __global__ void pb_mark_spheres(
 
 // kvol = kappa_sq * vol (in place) and the inverse diagonal (0 on boundary nodes).
 extern "C" __global__ void pb_operator7(
-    const int nx, const int ny, const int nz, const double cx, const double cy, const double cz, const double vol,
-    const double* __restrict__ ex, const double* __restrict__ ey, const double* __restrict__ ez,
-    double* __restrict__ kvol, double* __restrict__ inv)
+    const int nx, const int ny, const int nz, const int per, const double cx, const double cy, const double cz,
+    const double vol, const double* __restrict__ ex, const double* __restrict__ ey,
+    const double* __restrict__ ez, double* __restrict__ kvol, double* __restrict__ inv)
 {
     const long long n = (long long)nx * ny * nz;
-    const long long sy = nx;
     const long long sz = (long long)nx * ny;
     GRID_STRIDE_LOOP(c, n) {
         const double kv = kvol[c] * vol;
@@ -792,11 +875,14 @@ extern "C" __global__ void pb_operator7(
         const int i = (int)(c % nx);
         const int j = (int)((c / nx) % ny);
         const int k = (int)(c / sz);
-        if (!interior3(i, j, k, nx, ny, nz)) {
+        if (!unknown3(i, j, k, nx, ny, nz, per)) {
             inv[c] = 0.0;
             continue;
         }
-        const double diag = cx * (ex[c - 1] + ex[c]) + cy * (ey[c - sy] + ey[c]) + cz * (ez[c - sz] + ez[c]) + kv;
+        const long long row = c - i;
+        const long long xm = row + axis_prev(i, nx, per & 1);
+        const long long ym = row - (long long)j * nx + (long long)axis_prev(j, ny, (per >> 1) & 1) * nx + i;
+        const double diag = cx * (ex[xm] + ex[c]) + cy * (ey[ym] + ey[c]) + cz * (ez[c - sz] + ez[c]) + kv;
         inv[c] = 1.0 / diag;
     }
 }

@@ -247,9 +247,21 @@ pub type CudaBackend = Dev<f64>;
 /// Its f32 twin (mixed-precision multigrid); same context, stream and module.
 pub type CudaSingle = Dev<f32>;
 
+/// Periodic axes as the kernels take them: bit 0 x, bit 1 y.
+fn periodic_mask(p: [bool; 3]) -> i32 {
+    i32::from(p[0]) | (i32::from(p[1]) << 1)
+}
+
+/// The periodic axes of a kernel mask.
+fn periodic_axes(mask: i32) -> [bool; 3] {
+    [mask & 1 != 0, mask & 2 != 0, false]
+}
+
 /// Device copy of the fine-grid 7-point operator.
 pub struct CudaOperator<T> {
     dims: [i32; 3],
+    /// Periodic axes ([`periodic_mask`]).
+    periodic: i32,
     coef: [T; 3],
     n: usize,
     eps_x: CudaSlice<T>,
@@ -261,6 +273,7 @@ pub struct CudaOperator<T> {
 /// Device copy of a multigrid coarse-level (27-point) operator.
 pub struct CudaCoarse<T> {
     dims: [i32; 3],
+    periodic: i32,
     n: usize,
     coef: CudaSlice<T>,
 }
@@ -513,7 +526,7 @@ impl<T: CudaReal> Dev<T> {
         }
     }
 
-    fn transfer_args(t: &Transfer) -> [i32; 9] {
+    fn transfer_args(t: &Transfer) -> [i32; 10] {
         [
             t.fine[0] as i32,
             t.fine[1] as i32,
@@ -524,6 +537,7 @@ impl<T: CudaReal> Dev<T> {
             t.coarsen[0] as i32,
             t.coarsen[1] as i32,
             t.coarsen[2] as i32,
+            periodic_mask(t.periodic),
         ]
     }
 
@@ -617,6 +631,7 @@ impl<T: CudaReal> Backend for Dev<T> {
         let up = |v: &[f64]| T::upload(self.stream(), v);
         Ok(CudaOperator {
             dims: op.dims.map(|d| d as i32),
+            periodic: periodic_mask(op.periodic),
             coef: op.coef.map(T::from_f64),
             n: op.len(),
             eps_x: up(&op.eps_x)?,
@@ -629,6 +644,7 @@ impl<T: CudaReal> Backend for Dev<T> {
     fn prepare_coarse(&self, op: Arc<Stencil27>) -> Result<Self::Coarse> {
         Ok(CudaCoarse {
             dims: op.dims.map(|d| d as i32),
+            periodic: periodic_mask(op.periodic),
             n: op.len(),
             coef: T::upload(self.stream(), &op.coef)?,
         })
@@ -660,7 +676,13 @@ impl<T: CudaReal> Backend for Dev<T> {
         let [nx, ny, nz] = op.dims;
         let [cx, cy, cz] = op.coef;
         let mut b = self.stream().launch_builder(&self.k.apply);
-        b.arg(&nx).arg(&ny).arg(&nz).arg(&cx).arg(&cy).arg(&cz);
+        b.arg(&nx)
+            .arg(&ny)
+            .arg(&nz)
+            .arg(&op.periodic)
+            .arg(&cx)
+            .arg(&cy)
+            .arg(&cz);
         b.arg(&op.eps_x)
             .arg(&op.eps_y)
             .arg(&op.eps_z)
@@ -675,7 +697,13 @@ impl<T: CudaReal> Backend for Dev<T> {
     fn apply_coarse(&self, op: &Self::Coarse, x: &Self::Vector, y: &mut Self::Vector) -> Result<()> {
         let [nx, ny, nz] = op.dims;
         let mut b = self.stream().launch_builder(&self.k.apply27);
-        b.arg(&nx).arg(&ny).arg(&nz).arg(&op.coef).arg(x).arg(y);
+        b.arg(&nx)
+            .arg(&ny)
+            .arg(&nz)
+            .arg(&op.periodic)
+            .arg(&op.coef)
+            .arg(x)
+            .arg(y);
         // SAFETY: argument list matches the kernel signature; coef has 27 n values.
         unsafe { b.launch(Self::grid_for(op.n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_apply27"))?;
         Ok(())
@@ -806,7 +834,13 @@ impl<T: CudaReal> Backend for Dev<T> {
                     &self.k.residual_update
                 };
                 let mut l = self.stream().launch_builder(f);
-                l.arg(&nx).arg(&ny).arg(&nz).arg(&cx).arg(&cy).arg(&cz);
+                l.arg(&nx)
+                    .arg(&ny)
+                    .arg(&nz)
+                    .arg(&op.periodic)
+                    .arg(&cx)
+                    .arg(&cy)
+                    .arg(&cz);
                 l.arg(&op.eps_x).arg(&op.eps_y).arg(&op.eps_z).arg(&op.kvol).arg(x);
                 if let Some(b) = b {
                     l.arg(b);
@@ -824,7 +858,7 @@ impl<T: CudaReal> Backend for Dev<T> {
                     &self.k.residual27_update
                 };
                 let mut l = self.stream().launch_builder(f);
-                l.arg(&nx).arg(&ny).arg(&nz).arg(&op.coef).arg(x);
+                l.arg(&nx).arg(&ny).arg(&nz).arg(&op.periodic).arg(&op.coef).arg(x);
                 if let Some(b) = b {
                     l.arg(b);
                 }
@@ -991,10 +1025,10 @@ impl<T: CudaReal> Backend for Dev<T> {
                 unsafe { b.launch(cfg) }.map_err(cuda_err("pb_galerkin27"))?;
             }
         }
-        let [mx, my, mz] = [a[3], a[4], a[5]];
+        let [mx, my, mz, per] = [a[3], a[4], a[5], a[9]];
         {
             let mut b = self.stream().launch_builder(&setup.symmetrise);
-            b.arg(&mx).arg(&my).arg(&mz).arg(&mut coef);
+            b.arg(&mx).arg(&my).arg(&mz).arg(&per).arg(&mut coef);
             // SAFETY: argument list matches pb_symmetrise27 (13 n pairs).
             unsafe { b.launch(Self::grid_for(13 * n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_symmetrise27"))?;
         }
@@ -1011,6 +1045,7 @@ impl<T: CudaReal> Backend for Dev<T> {
         self.stream().synchronize().map_err(cuda_err("synchronize"))?;
         let coarse = CudaCoarse {
             dims: t.coarse.map(|d| d as i32),
+            periodic: per,
             n,
             coef,
         };
@@ -1039,7 +1074,13 @@ impl<T: CudaReal> Backend for Dev<T> {
                 let [nx, ny, nz] = op.dims;
                 let [cx, cy, cz] = op.coef;
                 let mut b = self.stream().launch_builder(&setup.gershgorin7);
-                b.arg(&nx).arg(&ny).arg(&nz).arg(&cx).arg(&cy).arg(&cz);
+                b.arg(&nx)
+                    .arg(&ny)
+                    .arg(&nz)
+                    .arg(&op.periodic)
+                    .arg(&cx)
+                    .arg(&cy)
+                    .arg(&cz);
                 b.arg(&op.eps_x)
                     .arg(&op.eps_y)
                     .arg(&op.eps_z)
@@ -1051,7 +1092,12 @@ impl<T: CudaReal> Backend for Dev<T> {
             LevelOp::Coarse(op) => {
                 let [nx, ny, nz] = op.dims;
                 let mut b = self.stream().launch_builder(&setup.gershgorin27);
-                b.arg(&nx).arg(&ny).arg(&nz).arg(&op.coef).arg(&mut *partials);
+                b.arg(&nx)
+                    .arg(&ny)
+                    .arg(&nz)
+                    .arg(&op.periodic)
+                    .arg(&op.coef)
+                    .arg(&mut *partials);
                 // SAFETY: argument list matches pb_gershgorin27; partials holds MAX_REDUCTION_BLOCKS values.
                 unsafe { b.launch(cfg) }.map_err(cuda_err("pb_gershgorin27"))?;
             }
@@ -1065,12 +1111,13 @@ impl<T: CudaReal> Backend for Dev<T> {
     fn coarse_to_host(&self, op: &Self::Coarse) -> Result<Stencil27> {
         let mut coef = vec![0.0; op.coef.len()];
         T::read(self.stream(), &op.coef, &mut coef)?;
-        Stencil27::from_coef(op.dims.map(|d| d as usize), coef)
+        Stencil27::from_coef(op.dims.map(|d| d as usize), periodic_axes(op.periodic), coef)
     }
 
     fn demote_operator(&self, op: &Self::Operator) -> Result<CudaOperator<f32>> {
         Ok(CudaOperator {
             dims: op.dims,
+            periodic: op.periodic,
             coef: op.coef.map(|c| f32::from_f64(c.to_f64())),
             n: op.n,
             eps_x: self.to_f32(&op.eps_x)?,
@@ -1083,6 +1130,7 @@ impl<T: CudaReal> Backend for Dev<T> {
     fn demote_coarse(&self, op: &Self::Coarse) -> Result<CudaCoarse<f32>> {
         Ok(CudaCoarse {
             dims: op.dims,
+            periodic: op.periodic,
             n: op.n,
             coef: self.to_f32(&op.coef)?,
         })
@@ -1176,18 +1224,27 @@ impl<T: CudaReal> Backend for Dev<T> {
         let coef = StencilOperator::face_coefficients(grid);
         let vol = grid.cell_volume();
         let dims = grid.dims.map(|d| d as i32);
+        let periodic = periodic_mask(grid.periodic);
         let mut inv_diag = self.uninit(n)?;
         {
             let [nx, ny, nz] = dims;
             let [cx, cy, cz] = coef;
             let mut b = self.stream().launch_builder(&k.operator7);
-            b.arg(&nx).arg(&ny).arg(&nz).arg(&cx).arg(&cy).arg(&cz).arg(&vol);
+            b.arg(&nx)
+                .arg(&ny)
+                .arg(&nz)
+                .arg(&periodic)
+                .arg(&cx)
+                .arg(&cy)
+                .arg(&cz)
+                .arg(&vol);
             b.arg(&eps_x).arg(&eps_y).arg(&eps_z).arg(&mut kvol).arg(&mut inv_diag);
             // SAFETY: argument list matches pb_operator7; every buffer holds n values.
             unsafe { b.launch(Self::grid_for(n, MAX_GRID_BLOCKS)) }.map_err(cuda_err("pb_operator7"))?;
         }
         let op = CudaOperator {
             dims,
+            periodic,
             coef: coef.map(T::from_f64),
             n,
             eps_x,
@@ -1261,6 +1318,7 @@ impl<T: CudaReal> Backend for Dev<T> {
         };
         Ok(StencilOperator::from_parts(
             op.dims.map(|d| d as usize),
+            periodic_axes(op.periodic),
             op.coef.map(|c| c.to_f64()),
             read(&op.eps_x)?,
             read(&op.eps_y)?,

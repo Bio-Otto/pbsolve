@@ -202,6 +202,7 @@ fn calculations_keep_freed_memory_until_they_end() {
         .map(|_| Job {
             atoms: &atoms,
             spec: &spec,
+            atom_pdie: None,
         })
         .collect();
     let per_worker = worker_device_bytes([dims], pc);

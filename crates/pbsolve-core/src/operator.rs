@@ -7,9 +7,12 @@
 //! ```
 //!
 //! Only interior nodes are unknowns; boundary rows are identically zero and
-//! Dirichlet values enter through the right-hand side.
+//! Dirichlet values enter through the right-hand side. On a periodic axis
+//! (x, y) node 0 is an unknown too and its neighbour `i − 1` is node `n − 2`;
+//! node `n − 1` is node 0's image and its row is zero like a boundary row
+//! ([`crate::grid::axis_unknown`]).
 
-use crate::grid::Grid;
+use crate::grid::{axis_next, axis_prev, axis_unknown, Grid};
 use crate::real::{convert, Real};
 use crate::surface::CoefficientMaps;
 use rayon::prelude::*;
@@ -18,6 +21,8 @@ use std::f64::consts::PI;
 #[derive(Clone, Debug)]
 pub struct StencilOperator {
     pub dims: [usize; 3],
+    /// Periodic axes ([`Grid::periodic`]).
+    pub periodic: [bool; 3],
     /// Face coefficients c_x, c_y, c_z.
     pub coef: [f64; 3],
     pub eps_x: Vec<f64>,
@@ -34,7 +39,7 @@ impl StencilOperator {
         let coef = Self::face_coefficients(grid);
         let vol = grid.cell_volume();
         let kvol: Vec<f64> = maps.kappa_sq.par_iter().map(|k| k * vol).collect();
-        Self::from_parts(grid.dims, coef, maps.eps_x, maps.eps_y, maps.eps_z, kvol)
+        Self::from_parts(grid.dims, grid.periodic, coef, maps.eps_x, maps.eps_y, maps.eps_z, kvol)
     }
 
     /// The face coefficients c_x = h_y h_z / h_x, c_y, c_z of `grid`.
@@ -47,6 +52,7 @@ impl StencilOperator {
     /// inverse diagonal as [`new`](Self::new) does.
     pub fn from_parts(
         dims: [usize; 3],
+        periodic: [bool; 3],
         coef: [f64; 3],
         eps_x: Vec<f64>,
         eps_y: Vec<f64>,
@@ -54,21 +60,22 @@ impl StencilOperator {
         kvol: Vec<f64>,
     ) -> Self {
         let [nx, ny, nz] = dims;
-        let (sx, sy, sz) = (1usize, nx, nx * ny);
         let mut inv_diag = vec![0.0; nx * ny * nz];
         inv_diag.par_iter_mut().enumerate().for_each(|(c, d)| {
             let (i, j, k) = (c % nx, (c / nx) % ny, c / (nx * ny));
-            if i == 0 || j == 0 || k == 0 || i == nx - 1 || j == ny - 1 || k == nz - 1 {
+            if !(axis_unknown(i, nx, periodic[0]) && axis_unknown(j, ny, periodic[1]) && axis_unknown(k, nz, false)) {
                 return;
             }
-            let diag = coef[0] * (eps_x[c - sx] + eps_x[c])
-                + coef[1] * (eps_y[c - sy] + eps_y[c])
-                + coef[2] * (eps_z[c - sz] + eps_z[c])
+            let [xm, _, ym, _, zm, _] = neighbours7(c, i, j, dims, periodic);
+            let diag = coef[0] * (eps_x[xm] + eps_x[c])
+                + coef[1] * (eps_y[ym] + eps_y[c])
+                + coef[2] * (eps_z[zm] + eps_z[c])
                 + kvol[c];
             *d = 1.0 / diag;
         });
         Self {
             dims,
+            periodic,
             coef,
             eps_x,
             eps_y,
@@ -93,6 +100,7 @@ impl StencilOperator {
     pub fn apply(&self, x: &[f64], y: &mut [f64]) {
         apply7(
             self.dims,
+            self.periodic,
             self.coef,
             &self.eps_x,
             &self.eps_y,
@@ -108,6 +116,7 @@ impl StencilOperator {
 #[derive(Clone, Debug)]
 pub struct Stencil7<T: Real> {
     pub dims: [usize; 3],
+    pub periodic: [bool; 3],
     pub coef: [T; 3],
     pub eps_x: Vec<T>,
     pub eps_y: Vec<T>,
@@ -120,6 +129,7 @@ impl<T: Real> Stencil7<T> {
     pub fn from_operator(op: &StencilOperator) -> Self {
         Self {
             dims: op.dims,
+            periodic: op.periodic,
             coef: op.coef.map(T::from_f64),
             eps_x: convert(&op.eps_x),
             eps_y: convert(&op.eps_y),
@@ -131,6 +141,7 @@ impl<T: Real> Stencil7<T> {
     pub fn apply(&self, x: &[T], y: &mut [T]) {
         apply7(
             self.dims,
+            self.periodic,
             self.coef,
             &self.eps_x,
             &self.eps_y,
@@ -147,6 +158,7 @@ impl<T: Real> Stencil7<T> {
 #[allow(clippy::too_many_arguments)]
 pub fn apply7<T: Real>(
     dims: [usize; 3],
+    periodic: [bool; 3],
     coef: [T; 3],
     eps_x: &[T],
     eps_y: &[T],
@@ -155,7 +167,7 @@ pub fn apply7<T: Real>(
     x: &[T],
     y: &mut [T],
 ) {
-    apply7_with(dims, coef, eps_x, eps_y, eps_z, kvol, x, y, |_, _, v| v);
+    apply7_with(dims, periodic, coef, eps_x, eps_y, eps_z, kvol, x, y, |_, _, v| v);
 }
 
 /// `out[c] ← combine(out[c], c, v_c)` for every node c, where v_c is the value
@@ -165,6 +177,7 @@ pub fn apply7<T: Real>(
 #[allow(clippy::too_many_arguments)]
 pub fn apply7_with<T: Real, F>(
     dims: [usize; 3],
+    periodic: [bool; 3],
     coef: [T; 3],
     eps_x: &[T],
     eps_y: &[T],
@@ -176,6 +189,27 @@ pub fn apply7_with<T: Real, F>(
 ) where
     F: Fn(T, usize, T) -> T + Sync,
 {
+    if periodic.iter().any(|&p| p) {
+        let [nx, ny, nz] = dims;
+        out.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
+            let base = k * nx * ny;
+            for (m, o) in plane.iter_mut().enumerate() {
+                let (i, j) = (m % nx, m / nx);
+                let c = base + m;
+                let v = if axis_unknown(i, nx, periodic[0])
+                    && axis_unknown(j, ny, periodic[1])
+                    && axis_unknown(k, nz, false)
+                {
+                    let nb = neighbours7(c, i, j, dims, periodic);
+                    stencil7_at(c, nb, coef, eps_x, eps_y, eps_z, kvol, x)
+                } else {
+                    T::ZERO
+                };
+                *o = combine(*o, c, v);
+            }
+        });
+        return;
+    }
     let [nx, ny, nz] = dims;
     let (sy, sz) = (nx, nx * ny);
     out.par_chunks_mut(nx * ny).enumerate().for_each(|(k, plane)| {
@@ -204,6 +238,48 @@ pub fn apply7_with<T: Real, F>(
             }
         }
     });
+}
+
+/// The neighbours (−x, +x, −y, +y, −z, +z) of unknown node `c` = (i, j, k);
+/// periodic axes wrap ([`axis_prev`], [`axis_next`]). The face towards the
+/// −a neighbour m is `eps_a[m]`, the one towards +a is `eps_a[c]`. CUDA:
+/// `neighbours7` in the kernels.
+#[inline(always)]
+pub fn neighbours7(c: usize, i: usize, j: usize, dims: [usize; 3], periodic: [bool; 3]) -> [usize; 6] {
+    let [nx, ny, _] = dims;
+    let row = c - i;
+    let plane = row - j * nx;
+    [
+        row + axis_prev(i, nx, periodic[0]),
+        row + axis_next(i, nx, periodic[0]),
+        plane + axis_prev(j, ny, periodic[1]) * nx + i,
+        plane + axis_next(j, ny, periodic[1]) * nx + i,
+        c - nx * ny,
+        c + nx * ny,
+    ]
+}
+
+/// (A x)_c of an unknown node c with neighbours `nb` ([`neighbours7`]): the
+/// expression of [`stencil7_interior`] with general neighbour indices
+/// (CUDA: `stencil7_at` with periodic axes).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn stencil7_at<T: Real>(
+    c: usize,
+    nb: [usize; 6],
+    coef: [T; 3],
+    eps_x: &[T],
+    eps_y: &[T],
+    eps_z: &[T],
+    kvol: &[T],
+    x: &[T],
+) -> T {
+    let [cx, cy, cz] = coef;
+    let xc = x[c];
+    cx * (eps_x[nb[0]] * (xc - x[nb[0]]) + eps_x[c] * (xc - x[nb[1]]))
+        + cy * (eps_y[nb[2]] * (xc - x[nb[2]]) + eps_y[c] * (xc - x[nb[3]]))
+        + cz * (eps_z[nb[4]] * (xc - x[nb[4]]) + eps_z[c] * (xc - x[nb[5]]))
+        + kvol[c] * xc
 }
 
 /// (A x)_c of an interior node c (strides 1, `sy`, `sz`): the expression of
@@ -237,6 +313,7 @@ fn stencil7_interior<T: Real>(
 #[allow(clippy::too_many_arguments)]
 pub fn apply7_into<T: Real>(
     dims: [usize; 3],
+    periodic: [bool; 3],
     coef: [T; 3],
     eps_x: &[T],
     eps_y: &[T],
@@ -247,6 +324,26 @@ pub fn apply7_into<T: Real>(
     out: &mut [T],
 ) {
     let [nx, ny, nz] = dims;
+    if periodic.iter().any(|&p| p) {
+        for (o, c) in out.iter_mut().zip(first..) {
+            let (i, j, k) = (c % nx, (c / nx) % ny, c / (nx * ny));
+            *o = if axis_unknown(i, nx, periodic[0]) && axis_unknown(j, ny, periodic[1]) && axis_unknown(k, nz, false) {
+                stencil7_at(
+                    c,
+                    neighbours7(c, i, j, dims, periodic),
+                    coef,
+                    eps_x,
+                    eps_y,
+                    eps_z,
+                    kvol,
+                    x,
+                )
+            } else {
+                T::ZERO
+            };
+        }
+        return;
+    }
     let (sy, sz) = (nx, nx * ny);
     let end = first + out.len();
     let mut c = first;

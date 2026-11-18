@@ -128,6 +128,24 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   `h_fine/h_coarse < 0.25` (`ρ = (h_f/h_c)^{1/(n−1)}` per level); every level
   takes its boundary from the previous one by trilinear interpolation. Node
   coordinates use APBS' formula (`xmin = c − (n−1)h/2`).
+* **Periodic lateral boundaries** (`PbParams::period`, not APBS):
+  `GridSpec::with_period` makes the outermost grid span one period in x
+  and y; `pb::state_levels` marks the solvated levels that span it
+  `Grid::periodic` (the reference state stays plain). On a periodic axis
+  node n − 1 is the image of node 0: `grid::axis_unknown` admits node 0 as
+  an unknown, `axis_prev`/`axis_next` wrap, `boundary_indices` lists only the
+  faces of the other axes, and `Grid::canonical` maps the image node to node
+  0 wherever a solution is read (`LevelSolution::values_at`, `potential`).
+  The flags travel with the operators (`StencilOperator`, `Stencil7`,
+  `Stencil27`, `Coarse27`, `Transfer`) into every kernel: the 7- and
+  27-point stencils, the fused residuals, `restrict`/`prolong_add`,
+  `galerkin` (formed in unwrapped coordinates, so the offsets of a periodic
+  axis of two unknowns stay distinct; a separate plain path keeps the CPU
+  setup as fast as before), Gershgorin bounds, the banded Cholesky (wider
+  band) and, on CUDA, the same kernels with a bit mask `per` (bit-identical
+  to the CPU in both precisions). The z faces of the outermost level take
+  `boundary::periodic_boundary_values`, the `mdh` image sum as a Fourier
+  series. `pb::check_seams` refuses atoms whose maps would cross the seam.
 * **Energy:** ΔG_polar = ½ Σ q_i [u_solv(r_i) − u_ref(r_i)], with the reference
   state (ε = pdie everywhere, no ions) solved on the *same* grids so the grid
   self-energy cancels exactly. Each atom's term (`charge::atom_energies`,

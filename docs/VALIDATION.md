@@ -56,6 +56,7 @@ should update the status table below.
 | Interaction entropy (0.0.4): `interaction_entropy`, `interaction_energy` | IE and C2 of two-level energy distributions = closed form (1e-12); normal energies: C2 = σ²/2kT, IE → C2, and the low bias of IE at large σ reproduces Ekberg & Ryde 2021 (σ = 3 kcal/mol: IE 7.0 ± 0.4 vs exact 7.60 with 10⁵ frames, C2 7.59 ± 0.03); no overflow at σ = 200 kcal/mol; E_int = OpenMM 8.6 (Reference platform, ff14SB peptides from tleap, bonds and 1-4 exceptions inside the molecules) to 1.7e-12, and = an explicit pair sum to 1e-12; 16/16 mutations; see *Interaction entropy* |
 | Atom dielectrics (0.0.5): `dielectrics=`, `residue_dielectrics`, `--residue-dielectric`, `PBSAFrame.delta_reference` | equal values reproduce `pdie` bit for bit (maps of `mol` and `vdw`, both states, `lpbe` and `npbe`, every Python method; fingerprint of the default path unchanged); every interior face owned by the atom of smallest power distance (brute force); a central charge sees only the outer boundary for any interior ε (0.25 Å: −1.50/−0.14/+0.64 % for ε 1/4/20); one sphere against Kirkwood with its own interior ≤ 0.92 % at 0.25 Å; two spheres with interiors 4 and 10 against the exact solution (`two_sphere_energy(sphere_pdie=)`) −0.32 % and −0.74 % at 0.25 Å (one `pdie`: −1.68 and −1.58 %); `delta_reference` = Coulomb/`pdie` exactly with `coulomb="analytic"`, to 0.03 % for 1YCR at 0.35 Å on the grid; CPU = CUDA ≤ 8e-14; 30/30 mutations; CPU +6 %, CUDA 2.2× (host maps); see *Atom dielectrics* |
 | Implicit membrane (0.0.6): `zmem`, `lmem`, `mdie`, `membrane_profile`, `membrane_exclusion`, `membrane_fill` | maps identical to APBS 3.4.1 `examples/helix/draw_membrane2.c` on its helix examples (`mol` and `spl2`, exclusion cone 3.1/5.3 Å and none, surfaces on node planes; 0 mismatches in all four maps); the membrane's effect on the solvated energy agrees with APBS solving those maps to 1.3e-4 (the DX route alone costs ~1e-5, with or without membrane); a charge in a uniform slab and in the Greene profile, with and without salt, against the exact layered solution (images, Hankel transform) within 0.02–0.17 %; PCHIP = SciPy to 1e-13; a membrane outside the grid is bit-identical to none; CPU = CUDA ≤ 3e-15; 25/26 mutations (one equivalent); CUDA 0.11 → 0.15 s on the helix example; see *Implicit membrane* |
+| Periodic lateral boundaries (0.0.7): `period` | periodic operator = the matrix with modular neighbours bit for bit; Galerkin = PᵀAP to 1e-12 with exact symmetry (axes of two unknowns included); z-face Fourier series = real-space image sum to 1e-11; a periodic cell = a plain supercell of copies on the same nodes to 4e-9 (water) and converging geometrically in a membrane; a charge in a slab with its images against the exact lattice sum: +3.4e-4 / −8.3e-5 (P = 30 / 60 Å; the coarse grid must resolve the slab in z, up to 13 % off with 3.1 Å); realistic periods add no placement error (sd 0.02–0.05 kcal/mol as without); APBS helix: automatic plain box 2 % off, periodic and plain agree from 100 Å; CUDA = CPU bit for bit in all kernels (f64, f32), whole calculations ≤ 5.3e-14; 56/56 mutations (Rust, CUDA, Python); default path bit-identical; see *Periodic lateral boundaries* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3416,8 +3417,9 @@ The slab meets the faces of the box, where `mdh` assumes water. The coarse
 box size shows how much that matters. With 300 Å the errors are at most
 0.41 %. With 600 Å the uniform slab is off by −2.3 % at 0.5 Å but only
 −0.17 % at 0.25 Å: the coarse level, at 12.5 Å spacing, no longer resolves
-a 30 Å slab. The profile, which is smooth, stays within 0.03 %. Periodic
-lateral boundaries (Amber) remain to be done.
+a 30 Å slab. The profile, which is smooth, stays within 0.03 %. With
+periodic lateral boundaries the slab no longer ends (see *Periodic lateral
+boundaries*).
 
 **Other checks.** A membrane outside the grid leaves energies bit-identical
 to no membrane. The reference energy is unchanged by a membrane. The profile
@@ -3451,6 +3453,153 @@ exactly at the radius, since the axis is half a spacing off the nodes.
 **Cost.** CUDA, shared GPU: the helix example went from 0.112 to 0.149 s (the
 maps travel to the host and back). On the CPU the extra pass over the slab is
 small.
+
+## Periodic lateral boundaries (`period`)
+
+`period=(Lx, Ly)` makes the solvated state a periodic array in x and y: the
+outermost grid spans one period and is periodic there (node n − 1 is the
+image of node 0), its z faces take the `mdh` terms of all lateral images as
+a Fourier series, finer grids focus as usual, and the reference state stays
+one molecule (model: docs/guide/model.md).
+
+**Operator and multigrid** (Rust unit tests, CPU). The periodic 7-point
+operator equals the operator written with modular neighbours bit for bit
+(periodic x, y or both; grids down to 5 nodes per axis); image nodes are
+never read (they hold NaN in the test) and their rows are zero; the operator
+is symmetric to 1e-12. Restriction is the transpose of prolongation to
+1e-13, and prolongation keeps fields that depend on z only, across the
+seams. The Galerkin operators equal Pᵀ A P to 1e-12 on the first and second
+coarse levels, including periodic axes of two unknowns (both neighbours the
+same node); they are exactly symmetric with the wrapped partners, and the
+rows of a Laplacian sum to zero at the seams too. The banded Cholesky solves
+periodic 7- and 27-point operators to 1e-11. The V-cycle is symmetric
+positive definite; on the 41³ molecule test it contracts the residual by
+0.230 per cycle, periodic or not. Levels built through the CPU backend
+equal the host hierarchy, and the fused smoother the step-by-step one, bit
+for bit.
+
+**z faces.** The Fourier series equals the image sum of the `mdh` terms in
+real space within 1e-11 (κ = 0.3 and 0.126 Å⁻¹, seams included).
+
+**Supercells.** A periodic cell against a plain box holding copies of the
+solute on the same nodes. In water (1 M, P = 16 Å, 5 × 5 copies) the
+potentials over the whole central cell differ by at most 2.1e-6 of
+513 kT/e (4e-9): only the copies beyond the supercell are missing, screened
+by e^{−κ·2P}. In a 30 Å slab (ε 2, 0.15 M, P = 24 Å) the images decay more
+slowly, over about L/π ≈ 10 Å inside the slab: the potentials at the central
+atoms differ by 2.58 and 0.24 kT/e with 3 × 3 and 5 × 5 copies (another
+solute: 1.25, 0.114 and 0.0098 kT with 3 × 3, 5 × 5 and 7 × 7, a factor
+≈ e^{P/λ} per ring).
+
+**Exact lattice sum.** For a unit charge in the middle of a uniform slab
+(ε 2, 30 Å, pdie 2 so the grid self-energy cancels, 0.15 M) the reaction
+potential of the charge and its lateral images follows from Poisson
+summation of the layered kernel ĝ(k) of the isolated case (the Hankel
+transform of *Implicit membrane*): u_rf = (2π/A) Σ_G [ĝ(|G|) − ĝ_μ(|G|)] +
+Σ_{R≠0} l_B e^{−μR}/(εR) − l_B μ/ε, with the screened free kernel
+ĝ_μ = l_B/(ε√(k² + μ²)) split off so that both sums converge. Changing μ and
+the cut-off changes the result by ≤ 1e-5 kT/e, and a 200 Å period gives the
+isolated charge to 1e-6. Focusing from [P, P, 80] Å to 24 Å with 97³ nodes:
+
+| period | images' share of ΔG_polar (exact) | ΔG_polar error |
+|---|---|---|
+| 30 Å | +1.768 kcal/mol | +3.4e-4 |
+| 60 Å | +0.048 kcal/mol | −8.3e-5 |
+
+The coarse grid has to resolve the slab in z. The net charge of the array
+acts like a charged sheet inside the slab (π l_B σ L/ε_m ≈ 30 kT/e here),
+which follows the slab's thickness on the coarsest grid, and a sharp
+interface is represented to within a cell, alternating in sign with the
+spacing as for the Born ion. Relative error with P = 30 / 60 Å:
+
+| coarse z length | nodes | P = 30 Å | P = 60 Å |
+|---|---|---|---|
+| 150 Å | 49³ (h_z 3.1 Å) | +1.3e-1 | +1.2e-2 |
+| 150 Å | 97³ (h_z 1.6 Å) | +1.3e-1 | +1.2e-2 |
+| 80 Å | 49³ | +2.4e-3 | −8.8e-5 |
+| 80 Å | 97³ | +3.4e-4 | −8.3e-5 |
+| 80 Å | 161³ | +5.9e-5 | +8.7e-7 |
+
+With a 150 Å coarse box the error with 49 / 65 / 97 / 129 nodes was +0.13 /
+−0.18 / +0.13 / +0.05 (P = 30, also with fine boxes that cover the slab:
+the slab's potential reaches them through their lateral faces). Single
+periodic grids show the cause: the potential 12 Å above the charge is 11.03
+/ 10.90 / 9.08 kT/e at 3.1 / 1.6 / 0.8 Å z spacing and 9.40 at 0.5 Å; a
+single 0.5 Å grid is within 7.8e-4 of the exact sum once it reaches 120 Å
+in z. The case is extreme (one charge per 900 Å² of a 30 Å slab). For a unit
+charge 10 Å below the top of a 40 Å slab, six random grid placements
+(coarse 150 Å with 129³ nodes, fine 40 × 40 × 60 Å) give errors of
+
+| period | mean ± sd (kcal/mol) | largest |
+|---|---|---|
+| none (plain box) | +0.008 ± 0.051 | 0.083 |
+| 60 Å | +0.027 ± 0.051 | 0.070 |
+| 80 Å | +0.001 ± 0.024 | 0.042 |
+| 100 Å | +0.002 ± 0.035 | 0.056 |
+
+against exact values of −4.252 (isolated), −4.149, −4.235 and −4.249
+kcal/mol: a period adds no error of its own at realistic sizes.
+
+**Application: the APBS helix example** (317 atoms, net +1 e, 30 Å slab of ε
+2, pdie 2, 0.15 M, 0.5 Å). The automatic grid's coarse box is only 34 × 36 Å
+in x and y and gives −48.850 kcal/mol. Widening the coarse box (same nodes,
+same fine box) and making it periodic:
+
+| coarse box in x, y | plain | periodic (period = box) |
+|---|---|---|
+| 36 Å | −48.724 | −47.061 |
+| 60 Å | −47.941 | −47.835 |
+| 100 Å | −47.885 | −47.883 |
+| 150 Å | −47.878 | −47.878 |
+| 200 Å | −47.876 | −47.876 |
+| 300 Å | −47.874 | −47.874 |
+
+The plain box approaches the isolated helix from below (the slab ends at
+its faces), the periodic cell from above (the images repel). The automatic
+plain grid is 2 % off; cells of 40 and 60 Å (automatic fine grid) hold
++0.49 and +0.04 kcal/mol of image energy (−47.383 and −47.835). Cost: the same iterations, 0.52–0.54 s on the CPU and
+0.10 s on the GPU, periodic or not.
+
+**Platforms.** On the GPU (RTX 2080 SUPER, CUDA 13) the multigrid setup
+(Galerkin operators, inverse diagonals, Gershgorin bounds), the operator,
+the fused residuals, restriction, the coarse operators, prolongation, a
+whole V-cycle and the assembly of a periodic grid's operator equal the CPU
+bit for bit in f64 and f32 (four grids, periodic in x, y or both, down to
+axes of two unknowns). Whole calculations agree to ≤ 5.3e-14 with the same
+iterations (no membrane, a uniform slab, the Greene profile with fill).
+
+**Default path.** Energies, maps and potentials bit-identical on the CPU and
+the GPU (1YCR in eleven settings, 1TII, 5DK3); Born table unchanged. Timing
+against 0.0.6 in alternation on the CPU, 1TII: solve 9.06 / 9.07 s (0.0.6)
+and 9.12 / 9.10 s, setup 1.11 / 1.10 and 1.11 / 1.15 s (noise). The host
+Galerkin product keeps a separate path without periodic axes: the
+generalised one had made the 5DK3 setup 17 % slower.
+
+**Mutations.** 56 of 56 seeded faults caught (one more was equivalent: a
+variable used only where its two values agree; the code now has one):
+* Rust core (41): the unknown/neighbour rules and node count of periodic
+  axes, the boundary list's layout and image mapping, the 7-point
+  neighbours and masks (operator, fused A p), the modular wrap, image
+  reads in prolongation, odd-only coarsening, the seam test of the 27-point
+  stencil, the symmetrisation partners, the banded factor's band, first
+  unknowns and wraps, every factor of the z-face series (2π/A, s, the signs
+  of both phases, the cut-off, the ion-size factor), the image reads of
+  focusing and of the potential, which levels are periodic, the periodic
+  boundary's use, the seam margin and the exclusion check, the validation
+  (ions, `gauss`, `bcfl`), the spec's clamping and the memory estimate.
+* CUDA (13): the 7-point neighbours, the unknown test, the wrap of
+  `axis_prev`, the 27-point seam test, the transfer's wrap and image reads,
+  the Galerkin face reads and periodic restriction, the symmetrisation
+  partners, the Gershgorin and assembly face reads, and the bit mask of the
+  launches.
+* Python (2): the command line's `--period` and the APBS refusal.
+
+Six of the first eight survivors needed stronger tests (one was caught by
+a test outside the first filter, one was the equivalent one): unequal
+periods (16 × 18 Å supercells) and a test of which levels are periodic for
+the y flag, the seam margin to ±0.1 Å, the larger exclusion radius, the
+memory estimate, and random operators on periodic grids whose seam rows
+decide the Gershgorin bound (assembly and Gershgorin face reads on CUDA).
 
 ## Size-modified PB (`equation="smpbe"`)
 

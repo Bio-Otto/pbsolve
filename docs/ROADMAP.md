@@ -412,7 +412,10 @@ others. Releases are vX.Y.0 tags that pass CI (decision 5, section 8).
 (done, 2026-11-15), and Read the Docs builds the site from every push and tag
 (https://pbsolve.readthedocs.io, `latest` and `stable`). With v0.1.0: link
 it from the README, add install instructions and versioned documentation;
-tag the release and archive it with a DOI.
+switch the site's theme from Furo to the Wagtail theme
+(`sphinx-wagtail-theme`, MIT; sample site
+https://sphinx-themes.org/sample-sites/sphinx-wagtail-theme/), pinned like
+the other documentation tools; tag the release and archive it with a DOI.
 *Evidence:* the site builds from the tag with `-W`, and every guide example
 runs.
 
@@ -507,7 +510,7 @@ or residue-dependent interior dielectric as an option, not a default.
 which correlates better with experiment than a uniform slab [Greene et al.
 2019], and periodic lateral boundaries to avoid edge effects. Benchmarks in
 [Wang et al. 2022] show that membrane dielectric parameters must be tuned per system.
-*Status: membrane maps done (0.0.6); periodic lateral boundaries remain.*
+*Status: membrane maps (0.0.6) and periodic lateral boundaries (0.0.7) done.*
 * `zmem`, `lmem`, `mdie`: the slab of APBS' `draw_membrane2` [Callenberg et
   al. 2010] (non-solute faces get the membrane's ε, nodes lose their ions,
   optional exclusion cone `membrane_exclusion`); the maps are identical to
@@ -516,9 +519,18 @@ which correlates better with experiment than a uniform slab [Greene et al.
   enclosed by the protein as water. A charge in the membrane agrees with the
   exact layered solution (images [Parsegian 1969] and a Hankel-transform
   reference for the profile) to 0.2 %.
-* Remaining: periodic lateral boundaries (Amber uses them; the slab now
-  meets the box faces, measured in docs/VALIDATION.md), a membrane potential
-  (APBSmem's `memv`), non-polar terms that know the membrane.
+* `period=(Lx, Ly)`: the solvated state is a periodic array in x and y
+  (as Amber recommends for membranes [Xiao et al. 2017]; lateral periodic
+  model [Ji et al. 2018]). The outermost grid spans one period and is
+  periodic, its z faces take the periodic Debye–Hückel sum (Fourier
+  series), finer grids focus, the reference state stays one molecule.
+  Operator, multigrid (Galerkin in unwrapped coordinates) and CUDA kernels
+  wrap around the seam; CUDA equals the CPU bit for bit, the default path
+  is unchanged. A periodic cell equals the limit of explicit supercells
+  (4e-9 in water) and the exact lattice sum of a charge in a slab (3e-4);
+  the automatic plain box was 2 % off for the APBS helix (edge effect).
+* Remaining: a membrane potential (APBSmem's `memv`), non-polar terms that
+  know the membrane.
 
 **4.18 Uncertainty and convergence over frames.** Block averaging, bootstrap
 confidence intervals and correlation-time estimates in `pbsolve mmpbsa`, so a
@@ -691,6 +703,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Huang et al. Neural network Poisson–Boltzmann electrostatics for biomolecular interactions. J. Comput. Phys. (2025); preprint HKU IMR2025-01.
 * Im W, Beglov D, Roux B. Continuum solvation model: computation of electrostatic forces from numerical solutions to the Poisson–Boltzmann equation. Comput. Phys. Commun. 111, 59 (1998).
 * Jha A, Nottoli M, Mikhalev A, Quan C, Stamm B. Linear scaling computation of forces for the domain-decomposition linear Poisson–Boltzmann method. J. Chem. Phys. 158, 104105 (2023).
+* Ji N, Liu T, Xu J, Shen LQ, Lu B. A finite element solution of lateral periodic Poisson–Boltzmann model for membrane channel proteins. Int. J. Mol. Sci. 19, 695 (2018).
 * Jia Z, Li L, Chakravorty A, Alexov E. Treating ion distribution with Gaussian-based smooth dielectric function in DelPhi. J. Comput. Chem. 38, 1974 (2017).
 * Katzberger P, Riniker S. Implicit solvent approach based on generalized Born and transferable graph neural networks for molecular dynamics simulations. J. Chem. Phys. 158, 204101 (2023); A general graph neural network based implicit solvation model for organic molecules in water. Chem. Sci. (2024).
 * Kilic MS, Bazant MZ, Ajdari A. Steric effects in the dynamics of electrolytes at large applied voltages. I. Double-layer charging. Phys. Rev. E 75, 021502 (2007).
@@ -733,6 +746,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Wei W, Hogues H, Sulea T. Comparative performance of high-throughput methods for protein pKa predictions. J. Chem. Inf. Model. (2023), doi:10.1021/acs.jcim.3c00165.
 * Wilson L, Geng W, Krasny R. TABI-PB 2.0: an improved version of the treecode-accelerated boundary integral Poisson–Boltzmann solver. J. Phys. Chem. B 126, 7104 (2022).
 * Wu et al. End-to-end reaction field energy modeling via deep learning based voxel-to-voxel transform (PBNeF). arXiv:2410.03927 (2024).
+* Xiao L, Diao J, Greene D, Wang J, Luo R. A continuum Poisson–Boltzmann model for membrane channel proteins. J. Chem. Theory Comput. 13, 3398–3412 (2017).
 * Zhou YC, Feig M, Wei GW. Highly accurate biomolecular electrostatics in continuum dielectric environments. J. Comput. Chem. 29, 87 (2008).
 * Zhou Z, Payne P, Vasquez M, Kuhn N, Levitt M. Finite-difference solution of the Poisson–Boltzmann equation: complete elimination of self-energy. J. Comput. Chem. 17, 1344 (1996).
 * Achieving all-atom molecular dynamics accuracy from the Poisson–Boltzmann method through machine learning. J. Chem. Phys. 164, 054107 (2026).

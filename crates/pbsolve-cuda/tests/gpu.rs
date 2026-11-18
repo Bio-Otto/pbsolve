@@ -251,7 +251,7 @@ fn single_precision_kernels_match_the_cpu_bit_for_bit() {
     gpu.scale(0.3, &xg, &yg, &mut sg).unwrap();
     cpu.scale(0.3, &xc, &yc, &mut sc).unwrap();
     assert_eq!(gpu.download(&sg).unwrap(), cpu.download(&sc).unwrap());
-    let t = pbsolve_core::multigrid::Transfer::new(op.dims).unwrap();
+    let t = pbsolve_core::multigrid::Transfer::new(op.dims, op.periodic).unwrap();
     let nc: usize = t.coarse.iter().product();
     let (mut cg, mut cc) = (gpu.zeros(nc).unwrap(), cpu.zeros(nc).unwrap());
     gpu.restrict(&t, &yg, &mut cg).unwrap();
@@ -318,7 +318,7 @@ fn device_multigrid_setup_equals_the_host_bit_for_bit() {
     for (op, what) in cases {
         let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
         let dev = gpu.prepare(op.clone()).unwrap();
-        let l = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
+        let l = Levels::build(&gpu, op.dims, op.periodic, &dev, Chebyshev::default())
             .unwrap()
             .unwrap();
         assert_eq!(l.levels(), h.levels(), "{what}");
@@ -377,7 +377,7 @@ fn vcycle_of_device_levels_equals_the_host_vcycle() {
     let r = gpu.upload(&b).unwrap();
     let mut host =
         MultigridPreconditioner::new(&gpu, &op, Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap()).unwrap();
-    let levels = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
+    let levels = Levels::build(&gpu, op.dims, op.periodic, &dev, Chebyshev::default())
         .unwrap()
         .unwrap();
     let mut device = MultigridPreconditioner::from_levels(&gpu, gpu.upload(&op.inv_diag).unwrap(), levels).unwrap();
@@ -391,7 +391,7 @@ fn vcycle_of_device_levels_equals_the_host_vcycle() {
     let r32 = single.upload(&b).unwrap();
     let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
     let mut host = MultigridPreconditioner::new(&single, &op, h).unwrap();
-    let levels = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
+    let levels = Levels::build(&gpu, op.dims, op.periodic, &dev, Chebyshev::default())
         .unwrap()
         .unwrap();
     let inv32 = single.upload(&op.inv_diag).unwrap();
@@ -422,7 +422,7 @@ fn device_setup_reports_a_negative_diagonal_like_the_host() {
     let host = Hierarchy::build(&op, Chebyshev::default()).unwrap_err().to_string();
     let gpu = CudaBackend::new(0).unwrap();
     let dev = gpu.prepare(op.clone()).unwrap();
-    let device = Levels::build(&gpu, op.dims, &dev, Chebyshev::default())
+    let device = Levels::build(&gpu, op.dims, op.periodic, &dev, Chebyshev::default())
         .err()
         .unwrap()
         .to_string();
@@ -431,7 +431,7 @@ fn device_setup_reports_a_negative_diagonal_like_the_host() {
     // The f32 twin does not build hierarchies.
     let single = gpu.single().unwrap();
     let d32 = single.prepare(op.clone()).unwrap();
-    let t = Transfer::new(op.dims).unwrap();
+    let t = Transfer::new(op.dims, op.periodic).unwrap();
     assert!(single.galerkin(&t, LevelOp::Fine(&d32)).is_err());
     assert!(single.gershgorin_lmax(LevelOp::Fine(&d32)).is_err());
 }
@@ -764,31 +764,65 @@ fn device_sphere_marking_follows_the_host_arithmetic_at_the_boundary() {
 /// the diagonal shows) assembled on the GPU equals `StencilOperator::new`.
 #[test]
 fn device_operator_of_random_maps_equals_the_host() {
+    use pbsolve_core::multigrid::{Chebyshev, Hierarchy, LevelMatrix, LevelOp, Levels};
     if !gpu_present("device_operator_of_random_maps_equals_the_host") {
         return;
     }
     let gpu = CudaBackend::new(0).unwrap();
-    let grid = Grid::centered([0.1, 0.0, -0.2], [13.0, 17.0, 11.0], [33, 41, 29]).unwrap();
-    let mut rnd = rng(41);
-    let mut map = |lo: f64, hi: f64| -> Vec<f64> { (0..grid.len()).map(|_| lo + (hi - lo) * rnd()).collect() };
-    let maps = CoefficientMaps {
-        eps_x: map(1.0, 80.0),
-        eps_y: map(1.0, 80.0),
-        eps_z: map(1.0, 80.0),
-        kappa_sq: map(0.0, 0.3),
-    };
-    let host = StencilOperator::new(&grid, maps.clone());
-    let up = [&maps.eps_x, &maps.eps_y, &maps.eps_z, &maps.kappa_sq].map(|m| gpu.upload(m).unwrap());
-    let (dev, inv) = gpu.assemble_operator(&grid, up).unwrap();
-    let back = gpu.operator_to_host(&dev).unwrap();
-    assert_eq!(bits(&host.kvol), bits(&back.kvol));
-    assert_eq!(bits(&host.inv_diag), bits(&gpu.download(&inv).unwrap()));
-    let x = gpu.upload(&system_like(grid.len())).unwrap();
-    let mut y = gpu.zeros(grid.len()).unwrap();
-    gpu.apply(&dev, &x, &mut y).unwrap();
-    let mut yh = vec![0.0; grid.len()];
-    host.apply(&system_like(grid.len()), &mut yh);
-    assert_eq!(bits(&yh), bits(&gpu.download(&y).unwrap()));
+    // Random coefficients everywhere, the seams of periodic axes included.
+    for periodic in [
+        [false; 3],
+        [true, false, false],
+        [false, true, false],
+        [true, true, false],
+    ] {
+        let grid = Grid::centered([0.1, 0.0, -0.2], [13.0, 17.0, 11.0], [33, 41, 29])
+            .unwrap()
+            .with_periodic(periodic);
+        let mut rnd = rng(41);
+        let mut map = |lo: f64, hi: f64| -> Vec<f64> { (0..grid.len()).map(|_| lo + (hi - lo) * rnd()).collect() };
+        let mut maps = CoefficientMaps {
+            eps_x: map(1.0, 80.0),
+            eps_y: map(1.0, 80.0),
+            eps_z: map(1.0, 80.0),
+            kappa_sq: map(0.0, 0.3),
+        };
+        // Strong ions away from the x = 0 and y = 0 planes, so the rows of the
+        // seams decide the Gershgorin bound (max of (2S + κ̄²V)/(S + κ̄²V)).
+        for (c, k) in maps.kappa_sq.iter_mut().enumerate() {
+            let (i, j, _) = grid.ijk(c);
+            if i != 0 && j != 0 {
+                *k += 30.0;
+            }
+        }
+        let host = StencilOperator::new(&grid, maps.clone());
+        let up = [&maps.eps_x, &maps.eps_y, &maps.eps_z, &maps.kappa_sq].map(|m| gpu.upload(m).unwrap());
+        let (dev, inv) = gpu.assemble_operator(&grid, up).unwrap();
+        let back = gpu.operator_to_host(&dev).unwrap();
+        assert_eq!(bits(&host.kvol), bits(&back.kvol), "{periodic:?}");
+        assert_eq!(bits(&host.inv_diag), bits(&gpu.download(&inv).unwrap()), "{periodic:?}");
+        let x = gpu.upload(&system_like(grid.len())).unwrap();
+        let mut y = gpu.zeros(grid.len()).unwrap();
+        gpu.apply(&dev, &x, &mut y).unwrap();
+        let mut yh = vec![0.0; grid.len()];
+        host.apply(&system_like(grid.len()), &mut yh);
+        assert_eq!(bits(&yh), bits(&gpu.download(&y).unwrap()), "{periodic:?}");
+        // Gershgorin bound and Galerkin hierarchy of the random operator.
+        assert_eq!(
+            gpu.gershgorin_lmax(LevelOp::Fine(&dev)).unwrap().to_bits(),
+            LevelMatrix::Seven(&host).gershgorin_lmax().to_bits(),
+            "{periodic:?}"
+        );
+        let h = Hierarchy::build(&host, Chebyshev::default()).unwrap().unwrap();
+        let l = Levels::build(&gpu, grid.dims, periodic, &dev, Chebyshev::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(bits(&l.lmax), bits(&h.lmax), "{periodic:?}");
+        for (lev, c) in h.coarse.iter().enumerate() {
+            let d = gpu.coarse_to_host(&l.coarse[lev]).unwrap();
+            assert_eq!(bits(&d.coef), bits(&c.coef), "{periodic:?} level {}", lev + 1);
+        }
+    }
 }
 
 /// `gather` reads the requested values of a device vector exactly, in the
@@ -1272,4 +1306,121 @@ fn nonlinear_pb_matches_the_cpu() {
         let e = field.energy_kt.expect("the nonlinear functional");
         assert!((e - r.solvated_kt).abs() < 1e-10 * e.abs(), "{e} vs {}", r.solvated_kt);
     }
+}
+
+/// `op` with periodic axes (its maps are uniform solvent at the seams).
+fn with_periodic(op: &StencilOperator, periodic: [bool; 3]) -> Arc<StencilOperator> {
+    let op = op.clone();
+    Arc::new(StencilOperator::from_parts(
+        op.dims, periodic, op.coef, op.eps_x, op.eps_y, op.eps_z, op.kvol,
+    ))
+}
+
+/// Periodic x and y axes: the multigrid setup on the device equals the host
+/// hierarchy, and the operator, the fused residuals, the transfers, the
+/// coarse operators and a whole V-cycle give the CPU's bits on the GPU in
+/// both precisions; the device assembly equals the host operator.
+#[test]
+fn periodic_kernels_equal_the_cpu_bit_for_bit() {
+    use pbsolve_core::multigrid::{Chebyshev, Hierarchy, LevelOp, Levels, MultigridPreconditioner};
+    use pbsolve_core::surface::maps_on;
+    if !gpu_present("periodic_kernels_equal_the_cpu_bit_for_bit") {
+        return;
+    }
+    let gpu = CudaBackend::new(0).unwrap();
+    let cpu = CpuBackend::new();
+    let lateral = [true, true, false];
+    // [5, 5, 129] coarsens to periodic axes of two unknowns (3 nodes), where
+    // both neighbours of a node are the same node.
+    let cases = [
+        (operator([49, 49, 33], 0.35, 0.15), lateral),
+        (operator([41, 33, 17], 0.35, 0.15), [true, false, false]),
+        (operator([33, 41, 17], 0.35, 1.0), [false, true, false]),
+        (operator([5, 5, 129], 0.5, 0.15), lateral),
+    ];
+    /// The bits of A x, the fused residual, restriction, the coarse operator
+    /// and its residual, prolongation and one V-cycle on `be`.
+    fn steps<B: Backend>(be: &B, op: &Arc<StencilOperator>, h: &Hierarchy, b: &[f64]) -> Vec<Vec<u64>> {
+        let fine = be.prepare(op.clone()).unwrap();
+        let down = |v: &B::Vector| bits(&be.download(v).unwrap());
+        let n = b.len();
+        let x = be.upload(b).unwrap();
+        let mut out = Vec::new();
+        let mut y = be.zeros(n).unwrap();
+        be.apply(&fine, &x, &mut y).unwrap();
+        out.push(down(&y));
+        let (mut t, mut r) = (be.zeros(n).unwrap(), be.upload(&system_like(n + 5)[5..]).unwrap());
+        be.residual(LevelOp::Fine(&fine), &x, Some(&y), &mut t, &mut r).unwrap();
+        out.push(down(&r));
+        be.residual(LevelOp::Fine(&fine), &y, None, &mut t, &mut r).unwrap();
+        out.push(down(&r));
+        if let (Some(t0), Some(c0)) = (h.transfers.first(), h.coarse.first()) {
+            let nc = c0.len();
+            let mut rc = be.zeros(nc).unwrap();
+            be.restrict(t0, &r, &mut rc).unwrap();
+            out.push(down(&rc));
+            let co = be.prepare_coarse(c0.clone()).unwrap();
+            let mut yc = be.zeros(nc).unwrap();
+            be.apply_coarse(&co, &rc, &mut yc).unwrap();
+            out.push(down(&yc));
+            let (mut tc, mut zc) = (be.zeros(nc).unwrap(), be.upload(&system_like(nc + 3)[3..]).unwrap());
+            be.residual(LevelOp::Coarse(&co), &rc, Some(&yc), &mut tc, &mut zc)
+                .unwrap();
+            out.push(down(&zc));
+            be.prolong_add(t0, &zc, &mut y).unwrap();
+            out.push(down(&y));
+        }
+        let mut m = MultigridPreconditioner::new(be, op, h.clone()).unwrap();
+        let mut z = be.zeros(n).unwrap();
+        m.apply(be, &fine, &x, &mut z).unwrap();
+        out.push(down(&z));
+        out
+    }
+    for (base, periodic) in cases {
+        let op = with_periodic(&base, periodic);
+        let what = format!("{:?} {periodic:?}", op.dims);
+        let h = Hierarchy::build(&op, Chebyshev::default()).unwrap().unwrap();
+        let dev = gpu.prepare(op.clone()).unwrap();
+        let l = Levels::build(&gpu, op.dims, periodic, &dev, Chebyshev::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(l.transfers, h.transfers, "{what}");
+        assert_eq!(bits(&l.lmax), bits(&h.lmax), "{what}: Gershgorin bounds");
+        assert_eq!(l.coarsest, h.coarsest, "{what}: coarsest factor");
+        assert!(!h.coarse.is_empty(), "{what}: coarsened");
+        for (lev, s) in h.coarse.iter().enumerate() {
+            let c = gpu.coarse_to_host(&l.coarse[lev]).unwrap();
+            assert_eq!(c.periodic, periodic, "{what}");
+            assert_eq!(bits(&c.coef), bits(&s.coef), "{what}: level {} operator", lev + 1);
+            assert_eq!(
+                bits(&gpu.download(&l.inv_diag[lev]).unwrap()),
+                bits(&s.inv_diag),
+                "{what}: level {} 1/diag",
+                lev + 1
+            );
+        }
+        let b = system_like(op.len());
+        assert!(steps(&gpu, &op, &h, &b) == steps(&cpu, &op, &h, &b), "{what}: f64");
+        let (g32, c32) = (gpu.single().unwrap(), cpu.single().unwrap());
+        assert!(steps(&g32, &op, &h, &b) == steps(&c32, &op, &h, &b), "{what}: f32");
+    }
+    // Assembly of a periodic grid's operator on the device.
+    let atoms = cluster(80, 31);
+    let grid = Grid::centered([0.0, 0.3, -0.1], [30.0, 26.0, 23.0], [61, 53, 41])
+        .unwrap()
+        .with_periodic(lateral);
+    let params = PbParams {
+        pdie: 4.0,
+        ..PbParams::default()
+    }
+    .with_salt(0.15, 2.0);
+    let surf = pbsolve_core::MolecularSurface::for_params(&atoms, &params);
+    let host = StencilOperator::new(&grid, CoefficientMaps::solvated_with(&grid, &atoms, &params, &surf));
+    let (dev, inv) = gpu
+        .assemble_operator(&grid, maps_on(&gpu, &grid, &atoms, &params, Some(&surf)).unwrap())
+        .unwrap();
+    let back = gpu.operator_to_host(&dev).unwrap();
+    assert_eq!(back.periodic, lateral);
+    assert_eq!(bits(&host.kvol), bits(&back.kvol), "kvol");
+    assert_eq!(bits(&host.inv_diag), bits(&gpu.download(&inv).unwrap()), "1/diag");
 }

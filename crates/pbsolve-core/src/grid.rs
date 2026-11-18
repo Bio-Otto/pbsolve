@@ -14,6 +14,52 @@ pub struct Grid {
     pub spacing: [f64; 3],
     /// Position of node (0, 0, 0) in Å.
     pub origin: [f64; 3],
+    /// Periodic axes (x and y only). On a periodic axis of `n` nodes, node
+    /// `n − 1` is the image of node 0: nodes `0 ..= n − 2` are unknowns, the
+    /// last node is neither an unknown nor a Dirichlet node (see [`axis_unknown`]).
+    pub periodic: [bool; 3],
+}
+
+/// Whether node `i` of an axis of `n` nodes is an unknown: `1 ..= n − 2`, and
+/// node 0 too on a periodic axis (whose node `n − 1` is the image of node 0).
+#[inline]
+pub fn axis_unknown(i: usize, n: usize, periodic: bool) -> bool {
+    i + 1 < n && (i > 0 || periodic)
+}
+
+/// The neighbour `i − 1` of unknown node `i` (node `n − 2` for node 0 of a periodic axis).
+#[inline]
+pub fn axis_prev(i: usize, n: usize, periodic: bool) -> usize {
+    if periodic && i == 0 {
+        n - 2
+    } else {
+        i - 1
+    }
+}
+
+/// The neighbour `i + 1` of unknown node `i` (node 0 for node `n − 2` of a periodic axis).
+#[inline]
+pub fn axis_next(i: usize, n: usize, periodic: bool) -> usize {
+    if periodic && i + 2 == n {
+        0
+    } else {
+        i + 1
+    }
+}
+
+/// Whether all three axes satisfy [`axis_unknown`].
+#[inline]
+pub fn is_unknown(i: usize, j: usize, k: usize, dims: [usize; 3], periodic: [bool; 3]) -> bool {
+    axis_unknown(i, dims[0], periodic[0])
+        && axis_unknown(j, dims[1], periodic[1])
+        && axis_unknown(k, dims[2], periodic[2])
+}
+
+/// Number of unknowns of a grid: `n − 2` per axis, `n − 1` per periodic axis.
+pub fn unknown_count(dims: [usize; 3], periodic: [bool; 3]) -> usize {
+    (0..3)
+        .map(|a| dims[a].saturating_sub(2 - usize::from(periodic[a])))
+        .product()
 }
 
 impl Grid {
@@ -53,7 +99,42 @@ impl Grid {
         if n > i32::MAX as u128 {
             return invalid("grid has more than 2^31 nodes");
         }
-        Ok(Self { dims, spacing, origin })
+        Ok(Self {
+            dims,
+            spacing,
+            origin,
+            periodic: [false; 3],
+        })
+    }
+
+    /// This grid with the given periodic axes (x and y only).
+    pub fn with_periodic(mut self, periodic: [bool; 3]) -> Self {
+        assert!(!periodic[2], "the z axis cannot be periodic");
+        self.periodic = periodic;
+        self
+    }
+
+    /// True if an axis is periodic.
+    #[inline]
+    pub fn is_periodic(&self) -> bool {
+        self.periodic.iter().any(|&p| p)
+    }
+
+    /// The node a node stands for: the image node 0 for node `n − 1` of a
+    /// periodic axis, the node itself otherwise.
+    #[inline]
+    pub fn canonical(&self, c: usize) -> usize {
+        if !self.is_periodic() {
+            return c;
+        }
+        let (mut i, mut j, k) = self.ijk(c);
+        if self.periodic[0] && i + 1 == self.dims[0] {
+            i = 0;
+        }
+        if self.periodic[1] && j + 1 == self.dims[1] {
+            j = 0;
+        }
+        self.index(i, j, k)
     }
 
     #[inline]
@@ -106,9 +187,14 @@ impl Grid {
         self.spacing[0] * self.spacing[1] * self.spacing[2]
     }
 
+    /// True for a Dirichlet node: a node on a face of a non-periodic axis.
     #[inline]
     pub fn is_boundary(&self, i: usize, j: usize, k: usize) -> bool {
-        i == 0 || j == 0 || k == 0 || i == self.dims[0] - 1 || j == self.dims[1] - 1 || k == self.dims[2] - 1
+        let [px, py, _] = self.periodic;
+        (!px && (i == 0 || i == self.dims[0] - 1))
+            || (!py && (j == 0 || j == self.dims[1] - 1))
+            || k == 0
+            || k == self.dims[2] - 1
     }
 
     /// True if `p` lies inside the box (boundary included).
@@ -183,35 +269,44 @@ impl Grid {
             return Some(below + i + nx * j);
         }
         let below = nx * ny + (k - 1) * self.inner_plane_boundary();
-        if j == 0 {
+        let (bx, by) = (!self.periodic[0], !self.periodic[1]);
+        // Rows j = 0 and ny − 1 are full rows (y faces), the rows between
+        // them contribute their end nodes (x faces).
+        let ends = if bx { 2 } else { 0 };
+        if by && j == 0 {
             Some(below + i)
-        } else if j == ny - 1 {
-            Some(below + nx + 2 * (ny - 2) + i)
-        } else if i == 0 || i == nx - 1 {
-            Some(below + nx + 2 * (j - 1) + usize::from(i != 0))
+        } else if by && j == ny - 1 {
+            Some(below + nx + ends * (ny - 2) + i)
+        } else if bx && (i == 0 || i == nx - 1) {
+            let first = if by { nx } else { 0 };
+            Some(below + first + 2 * (j - usize::from(by)) + usize::from(i != 0))
         } else {
             None
         }
     }
 
-    /// Boundary nodes of a plane 0 < k < nz − 1: two full rows and both ends
-    /// of the rows between them.
+    /// Boundary nodes of a plane 0 < k < nz − 1: the two full rows of the y
+    /// faces and both ends of the rows between them (x faces); periodic axes
+    /// have no faces.
     #[inline]
     fn inner_plane_boundary(&self) -> usize {
         let [nx, ny, _] = self.dims;
-        2 * nx + 2 * (ny - 2)
+        let (bx, by) = (!self.periodic[0], !self.periodic[1]);
+        let rows = if by { ny - 2 } else { ny };
+        usize::from(by) * 2 * nx + usize::from(bx) * 2 * rows
     }
 
     /// Indices of all boundary nodes, in increasing order.
     pub fn boundary_indices(&self) -> Vec<usize> {
         let [nx, ny, nz] = self.dims;
-        let mut out = Vec::with_capacity(2 * (nx * ny + ny * nz + nx * nz));
+        let (bx, by) = (!self.periodic[0], !self.periodic[1]);
+        let mut out = Vec::with_capacity(2 * nx * ny + (nz - 2) * self.inner_plane_boundary());
         for k in 0..nz {
             for j in 0..ny {
                 let row = nx * (j + ny * k);
-                if k == 0 || k == nz - 1 || j == 0 || j == ny - 1 {
+                if k == 0 || k == nz - 1 || (by && (j == 0 || j == ny - 1)) {
                     out.extend(row..row + nx);
-                } else {
+                } else if bx {
                     out.push(row);
                     out.push(row + nx - 1);
                 }
@@ -341,21 +436,32 @@ mod tests {
 
     #[test]
     fn boundary_indices_are_the_boundary_nodes_in_order() {
-        for dims in [[5, 5, 5], [7, 5, 6], [9, 17, 5], [33, 6, 11]] {
-            let g = Grid::from_spacing([0.0; 3], [0.5; 3], dims).unwrap();
+        let periodic = [
+            [false; 3],
+            [true, false, false],
+            [false, true, false],
+            [true, true, false],
+        ];
+        for (dims, periodic) in [[5, 5, 5], [7, 5, 6], [9, 17, 5], [33, 6, 11]]
+            .into_iter()
+            .flat_map(|d| periodic.map(|p| (d, p)))
+        {
+            let g = Grid::from_spacing([0.0; 3], [0.5; 3], dims)
+                .unwrap()
+                .with_periodic(periodic);
             let brute: Vec<usize> = (0..g.len())
                 .filter(|&c| {
                     let (i, j, k) = g.ijk(c);
                     g.is_boundary(i, j, k)
                 })
                 .collect();
-            assert_eq!(g.boundary_indices(), brute, "{dims:?}");
+            assert_eq!(g.boundary_indices(), brute, "{dims:?} {periodic:?}");
             for c in 0..g.len() {
                 let (i, j, k) = g.ijk(c);
                 assert_eq!(
                     g.boundary_position(i, j, k),
                     brute.binary_search(&c).ok(),
-                    "{dims:?} node {c}"
+                    "{dims:?} {periodic:?} node {c}"
                 );
             }
         }

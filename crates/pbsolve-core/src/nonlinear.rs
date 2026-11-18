@@ -439,7 +439,15 @@ pub(crate) fn solve_level<B: Backend>(
         };
         be.synchronize()?;
         let d = inv_diag.take().expect("a fresh Jacobian");
-        let (delta, s) = pcg_on(be, grid.dims, &op, d, r.take().expect("a residual"), step)?;
+        let (delta, s) = pcg_on(
+            be,
+            grid.dims,
+            grid.periodic,
+            &op,
+            d,
+            r.take().expect("a residual"),
+            step,
+        )?;
         add(s);
         // The solver's buffers return to the pool at a synchronisation.
         be.synchronize()?;

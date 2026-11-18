@@ -5,7 +5,9 @@
 use crate::autogrid::GridSpec;
 use crate::backend::{Backend, MemoryHold};
 use crate::batch::calculation_device_bytes;
-use crate::boundary::{analytic_boundary_values, focus_boundary_values, focus_nodes, BoundaryMedium};
+use crate::boundary::{
+    analytic_boundary_values, focus_boundary_values, focus_nodes, periodic_boundary_values, BoundaryMedium,
+};
 use crate::charge::{atom_energies, spread_charges_sparse_with, spread_charges_with};
 use crate::coulomb::{coulomb_energy_kt, Split};
 use crate::error::{invalid, PbError, Result};
@@ -310,7 +312,7 @@ pub(crate) fn solve_assembled<B: Backend>(
         Pending::Ready(g) => {
             let b = rhs(&g, &inv_diag)?;
             be.synchronize()?;
-            let (x, stats) = pcg_on(be, grid.dims, &op, inv_diag, b, opts)?;
+            let (x, stats) = pcg_on(be, grid.dims, grid.periodic, &op, inv_diag, b, opts)?;
             Ok(Solved {
                 x,
                 g,
@@ -324,7 +326,7 @@ pub(crate) fn solve_assembled<B: Backend>(
             // the memory peak (in the iterations) does not change.
             let mut d = be.zeros(n)?;
             be.copy(&inv_diag, &mut d)?;
-            let prepared = pcg_setup(be, grid.dims, &op, inv_diag, opts)?;
+            let prepared = pcg_setup(be, grid.dims, grid.periodic, &op, inv_diag, opts)?;
             let t = Instant::now();
             let g = later.wait()?;
             let waited = t.elapsed().as_secs_f64();
@@ -354,17 +356,32 @@ impl<B: Backend> LevelSolution<B> {
     }
 
     /// u at the given nodes, computed as [`Self::potential`] computes it,
-    /// reading only those values of x.
+    /// reading only those values of x. The last node of a periodic axis
+    /// reads its image ([`Grid::canonical`]).
     fn values_at(&self, be: &B, nodes: &[usize]) -> Result<Vec<f64>> {
+        if self.grid.is_periodic() {
+            let images: Vec<usize> = nodes.iter().map(|&c| self.grid.canonical(c)).collect();
+            let x = be.gather(&self.x, &images)?;
+            return Ok(images.iter().zip(x).map(|(&c, x)| x + self.g_at(c)).collect());
+        }
         let x = be.gather(&self.x, nodes)?;
         Ok(nodes.iter().zip(x).map(|(&c, x)| x + self.g_at(c)).collect())
     }
 
-    /// The grid and the full potential u = x + g.
+    /// The grid and the full potential u = x + g (on a periodic axis the
+    /// last node holds the value of its image, node 0).
     fn potential(self, be: &B) -> Result<(Grid, Vec<f64>)> {
         let mut u = be.download(&self.x)?;
         drop(self.x);
         add_boundary_values(&self.grid, &mut u, &self.g);
+        if self.grid.is_periodic() {
+            for c in 0..u.len() {
+                let image = self.grid.canonical(c);
+                if image != c {
+                    u[c] = u[image];
+                }
+            }
+        }
         Ok((self.grid, u))
     }
 }
@@ -573,9 +590,68 @@ fn surface_of(atoms: &[Atom], params: &PbParams, medium: Medium) -> Option<Molec
     (medium == Medium::Solvated).then(|| MolecularSurface::for_params(atoms, params))
 }
 
-/// The analytic boundary values of the outermost of the focusing `levels`.
+/// The analytic boundary values of the outermost of the focusing `levels`;
+/// on a laterally periodic level those of its z faces, from the periodic
+/// image sum ([`periodic_boundary_values`]).
 fn outer_boundary_of(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium: Medium) -> Vec<f64> {
-    analytic_boundary_values(&levels[0], atoms, params.bcfl, &boundary_medium(params, medium))
+    let m = boundary_medium(params, medium);
+    if levels[0].is_periodic() {
+        return periodic_boundary_values(&levels[0], atoms, &m);
+    }
+    analytic_boundary_values(&levels[0], atoms, params.bcfl, &m)
+}
+
+/// The focusing levels of a state: with a lateral period, the solvated
+/// state's levels that span it ([`GridSpec::with_period`]) are periodic
+/// along x and y; the reference state stays a single molecule.
+fn state_levels(levels: &[Grid], params: &PbParams, medium: Medium) -> Vec<Grid> {
+    match params.period {
+        Some(p) if medium == Medium::Solvated => levels
+            .iter()
+            .map(|g| {
+                let l = g.lengths();
+                let spans = |a: usize| (l[a] - p[a]).abs() <= 1e-9 * p[a];
+                g.clone().with_periodic([spans(0), spans(1), false])
+            })
+            .collect(),
+        _ => levels.to_vec(),
+    }
+}
+
+/// Checks that the solvated maps of a laterally periodic outermost level
+/// are those of the periodic system: no atom changes them across the seam
+/// (its radius plus the probe diameter or ion radius, the spline window and
+/// a cell), and a membrane's exclusion cone stays inside the period.
+fn check_seams(grid: &Grid, atoms: &[Atom], params: &PbParams) -> Result<()> {
+    let h = grid.spacing[0].max(grid.spacing[1]);
+    let extra = (2.0 * params.srad).max(params.ion_exclusion_radius()) + params.pdie_inset() + h;
+    let lengths = grid.lengths();
+    for (n, a) in atoms.iter().enumerate() {
+        for ax in 0..2 {
+            let x = a.position[ax] - grid.origin[ax];
+            let d = x.min(lengths[ax] - x);
+            if d < a.radius + extra {
+                return invalid(format!(
+                    "atom {n} at {:?} is {d:.2} Å from the lateral periodic boundary along {}; it needs {:.2} Å \
+                     (radius, probe diameter or ion radius, spline window and a cell) so its periodic images do \
+                     not touch it: enlarge the period",
+                    a.position,
+                    ["x", "y"][ax],
+                    a.radius + extra
+                ));
+            }
+        }
+    }
+    if let Some(m) = &params.membrane {
+        let room = (lengths[0].min(lengths[1])) / 2.0 - h;
+        if m.exclusion[0].max(m.exclusion[1]) >= room {
+            return invalid(format!(
+                "the membrane exclusion radius {:?} reaches the lateral periodic boundary (at most {room:.2} Å)",
+                m.exclusion
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Runs the focusing sequence `levels` (APBS mg-auto, see
@@ -724,7 +800,11 @@ pub fn solve_focused<B: Backend>(
     medium: Medium,
 ) -> Result<FieldSolution> {
     params.validate()?;
-    let levels = spec.levels()?;
+    let spec = &spec.with_period(params.period);
+    let levels = state_levels(&spec.levels()?, params, medium);
+    if levels[0].is_periodic() {
+        check_seams(&levels[0], atoms, params)?;
+    }
     let hold = hold_memory(be, spec, params)?;
     let lb0 = bjerrum_length_vacuum(params.temperature);
     let field =
@@ -819,6 +899,9 @@ pub fn polar_forces<B: Backend>(be: &B, atoms: &[Atom], params: &PbParams, spec:
     }
     if params.membrane.is_some() {
         return invalid("forces with a membrane are not available (its slab is not smooth in the atom positions)");
+    }
+    if params.period.is_some() {
+        return invalid("forces with periodic lateral boundaries are not available");
     }
     if !params.surface.is_spline() {
         return invalid(format!(
@@ -916,7 +999,12 @@ fn polar<B: Backend>(
         }
     };
     params.validate()?;
+    let spec = &spec.with_period(params.period);
     let levels = spec.levels()?;
+    let solvated_levels = state_levels(&levels, params, Medium::Solvated);
+    if solvated_levels[0].is_periodic() {
+        check_seams(&solvated_levels[0], atoms, params)?;
+    }
     let hold = hold_memory(be, spec, params)?;
     let kt = kt_in_kcal_per_mol(params.temperature);
     let result = |solvated_kt: f64, reference_kt: f64, stats_solvated, stats_reference, timings, atom_energies_kcal| {
@@ -993,22 +1081,38 @@ fn polar<B: Backend>(
     ) = match background_pool_for(be) {
         Some(pool) => with_background_inputs(
             &pool,
-            &levels,
+            &solvated_levels,
             atoms,
             params,
             Medium::Solvated,
             |solvated| -> Result<_> {
                 let reference = focused(be, &levels, atoms, params, reference, false, finish(Medium::Reference))?;
-                let solvated = focused(be, &levels, atoms, params, solvated, false, finish(Medium::Solvated))?;
+                let solvated = focused(
+                    be,
+                    &solvated_levels,
+                    atoms,
+                    params,
+                    solvated,
+                    false,
+                    finish(Medium::Solvated),
+                )?;
                 Ok((reference, solvated))
             },
         )?,
         None => {
             let reference = focused(be, &levels, atoms, params, reference, false, finish(Medium::Reference))?;
-            let solvated = StateInputs::build(&levels, atoms, params, Medium::Solvated);
+            let solvated = StateInputs::build(&solvated_levels, atoms, params, Medium::Solvated);
             (
                 reference,
-                focused(be, &levels, atoms, params, solvated, false, finish(Medium::Solvated))?,
+                focused(
+                    be,
+                    &solvated_levels,
+                    atoms,
+                    params,
+                    solvated,
+                    false,
+                    finish(Medium::Solvated),
+                )?,
             )
         }
     };
@@ -1032,7 +1136,7 @@ fn polar<B: Backend>(
 mod tests {
     use super::*;
     use crate::cpu::CpuBackend;
-    use crate::params::{Preconditioner, SurfaceMethod};
+    use crate::params::{BoundaryCondition, Preconditioner, SurfaceMethod};
 
     /// Born ion: ΔG = −(l_B0 z² / 2a)(1/ε_in − 1/ε_out) kT.
     fn born(params: &PbParams, a: f64) -> (f64, f64) {
@@ -1223,7 +1327,6 @@ mod tests {
     /// one level and zero boundary values the pair terms are symmetric.
     #[test]
     fn atom_energies_superpose() {
-        use crate::params::BoundaryCondition;
         let atoms = quartet();
         let n = atoms.len();
         for (params, spec) in [
@@ -1467,7 +1570,6 @@ mod tests {
     /// boundary condition, preconditioner and charge method.
     #[test]
     fn energies_from_the_charged_nodes_equal_the_full_potential_energies() {
-        use crate::params::BoundaryCondition;
         let atoms = small_protein();
         let auto = GridSpec::auto(&atoms, 0.5, 1.7, 12.0).unwrap();
         let fine = auto.fine_length;
@@ -1784,5 +1886,279 @@ mod tests {
                 "{pc:?}"
             );
         }
+    }
+
+    /// A laterally periodic solve equals the solve of an explicit supercell
+    /// of copies on the same nodes: on the central copy's cell the potentials
+    /// differ by what the copies beyond the supercell add (e^{−κ·2P}).
+    #[test]
+    fn a_periodic_solve_equals_a_supercell_of_copies() {
+        // Periods of 16 and 18 Å (32 and 36 cells of 0.5 Å).
+        let params = PbParams {
+            pdie: 2.0,
+            tol: 1e-12,
+            period: Some([16.0, 18.0]),
+            ..PbParams::default()
+        }
+        .with_salt(1.0, 2.0);
+        let plain = PbParams {
+            period: None,
+            ..params.clone()
+        };
+        let ([nx, ny], nz) = ([32, 36], 49);
+        let atoms = quartet();
+        let periodic = solve_focused(
+            &CpuBackend::new(),
+            &GridSpec::single([0.0; 3], [16.0, 18.0, 24.0], [nx + 1, ny + 1, nz]),
+            &atoms,
+            &params,
+            Medium::Solvated,
+        )
+        .unwrap();
+        assert!(periodic.grid.periodic[0] && periodic.grid.periodic[1]);
+        let copies = 2usize;
+        let m = 2 * copies + 1;
+        let mut many = Vec::new();
+        let reach = copies as i32;
+        for a in -reach..=reach {
+            for b in -reach..=reach {
+                many.extend(atoms.iter().map(|at| Atom {
+                    position: [
+                        at.position[0] + 16.0 * a as f64,
+                        at.position[1] + 18.0 * b as f64,
+                        at.position[2],
+                    ],
+                    ..*at
+                }));
+            }
+        }
+        let side = [16.0 * m as f64, 18.0 * m as f64];
+        let supercell = solve_focused(
+            &CpuBackend::new(),
+            &GridSpec::single([0.0; 3], [side[0], side[1], 24.0], [m * nx + 1, m * ny + 1, nz]),
+            &many,
+            &plain,
+            Medium::Solvated,
+        )
+        .unwrap();
+        let [sx, sy, _] = supercell.grid.dims;
+        let mut worst: f64 = 0.0;
+        for k in 0..nz {
+            for j in 0..=ny {
+                for i in 0..=nx {
+                    let a = periodic.potential[i + (nx + 1) * (j + (ny + 1) * k)];
+                    let b = supercell.potential[(i + copies * nx) + sx * ((j + copies * ny) + sy * k)];
+                    worst = worst.max((a - b).abs());
+                }
+            }
+        }
+        let scale = periodic.potential.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        // Measured 2.1e-6 of 513 kT/e (4e-9; 2026-11-18): the copies beyond
+        // the supercell, 2P away, are screened by e^{−κ·2P} ≈ 3e-5.
+        assert!(worst < 1e-7 * scale, "max |Δu| = {worst:e} of {scale:e}");
+        // The last x and y planes are the images of the first.
+        for k in 0..nz {
+            for j in 0..=ny {
+                let row = (nx + 1) * (j + (ny + 1) * k);
+                assert_eq!(periodic.potential[row + nx], periodic.potential[row]);
+            }
+            for i in 0..=nx {
+                let plane = (nx + 1) * (ny + 1) * k;
+                assert_eq!(
+                    periodic.potential[plane + (nx + 1) * ny + i],
+                    periodic.potential[plane + i]
+                );
+            }
+        }
+    }
+
+    /// A finer grid that spans the period along one axis only is periodic
+    /// along that axis only; the reference state is never periodic.
+    #[test]
+    fn levels_are_periodic_along_the_axes_they_span() {
+        let params = PbParams {
+            period: Some([16.0, 40.0]),
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
+        let spec = GridSpec {
+            center: [0.0; 3],
+            dims: [33, 33, 33],
+            coarse_length: [16.0, 40.0, 40.0],
+            fine_length: [16.0, 20.0, 20.0],
+        };
+        let levels = spec.levels().unwrap();
+        let solvated: Vec<[bool; 3]> = state_levels(&levels, &params, Medium::Solvated)
+            .iter()
+            .map(|g| g.periodic)
+            .collect();
+        assert_eq!(solvated.first(), Some(&[true, true, false]));
+        assert_eq!(solvated.last(), Some(&[true, false, false]));
+        assert!(state_levels(&levels, &params, Medium::Reference)
+            .iter()
+            .all(|g| !g.is_periodic()));
+    }
+
+    /// A finer grid focused from a periodic one reads the coarse solution
+    /// across the seam: its boundary values are the interpolation of the
+    /// coarse potential, whose last planes repeat the first (image nodes).
+    #[test]
+    fn focusing_reads_the_periodic_level_across_the_seam() {
+        let params = PbParams {
+            pdie: 2.0,
+            period: Some([16.0, 16.0]),
+            ..PbParams::default()
+        }
+        .with_salt(1.0, 2.0);
+        let atoms = quartet();
+        let dims = [33, 33, 49];
+        let cpu = CpuBackend::new();
+        let coarse = solve_focused(
+            &cpu,
+            &GridSpec::single([0.0; 3], [16.0, 16.0, 24.0], dims),
+            &atoms,
+            &params,
+            Medium::Solvated,
+        )
+        .unwrap();
+        // The fine faces at ±7.9 Å lie in the last coarse cell (7.5 … 8 Å).
+        let spec = GridSpec {
+            center: [0.0; 3],
+            dims,
+            coarse_length: [16.0, 16.0, 24.0],
+            fine_length: [15.8, 15.8, 12.0],
+        };
+        let fine = solve_focused(&cpu, &spec, &atoms, &params, Medium::Solvated).unwrap();
+        assert!(!fine.grid.is_periodic() && coarse.grid.is_periodic());
+        let want = focus_boundary_values(&fine.grid, &coarse.grid, |c| coarse.potential[c]).unwrap();
+        let got: Vec<f64> = fine
+            .grid
+            .boundary_indices()
+            .iter()
+            .map(|&c| fine.potential[c])
+            .collect();
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn periodic_boundaries_refuse_what_they_do_not_support() {
+        let atoms = quartet();
+        let base = PbParams {
+            period: Some([30.0, 30.0]),
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
+        let err = |p: PbParams| p.validate().unwrap_err().to_string();
+        assert!(err(PbParams {
+            ions: Vec::new(),
+            ..base.clone()
+        })
+        .contains("need ions"));
+        assert!(err(PbParams {
+            period: Some([30.0, 0.0]),
+            ..base.clone()
+        })
+        .contains("positive"));
+        assert!(err(PbParams {
+            period: Some([f64::NAN, 3.0]),
+            ..base.clone()
+        })
+        .contains("positive"));
+        assert!(err(PbParams {
+            bcfl: BoundaryCondition::Sdh,
+            ..base.clone()
+        })
+        .contains("'mdh'"));
+        assert!(err(PbParams {
+            bcfl: BoundaryCondition::Zero,
+            ..base.clone()
+        })
+        .contains("'mdh'"));
+        assert!(err(PbParams {
+            surface: SurfaceMethod::Gaussian,
+            ..base.clone()
+        })
+        .contains("gauss"));
+        assert!(err(PbParams {
+            coulomb: CoulombMethod::Analytic,
+            ..base.clone()
+        })
+        .contains("lpbe"));
+        assert!(err(PbParams {
+            equation: crate::params::Equation::Nonlinear,
+            ..base.clone()
+        })
+        .contains("lpbe"));
+        assert!(PbParams {
+            bcfl: BoundaryCondition::MdhFast,
+            ..base.clone()
+        }
+        .validate()
+        .is_ok());
+        // An atom too close to the seam of a small period.
+        let spec = GridSpec::auto(&atoms, 0.5, 1.7, 12.0).unwrap();
+        let tight = PbParams {
+            period: Some([9.0, 30.0]),
+            ..base.clone()
+        };
+        let msg = polar_solvation(&CpuBackend::new(), &atoms, &tight, &spec)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("periodic boundary along x"), "{msg}");
+        // The margin: radius + max(2 srad, ion radius) + swin (splines) + a
+        // cell. One atom 0.1 Å inside and 0.1 Å outside it, on a 0.5 Å grid.
+        for (surface, inset) in [(SurfaceMethod::Mol, 0.0), (SurfaceMethod::Spline2, 0.3)] {
+            let p = PbParams {
+                surface,
+                srad: 1.4,
+                ..base.clone()
+            }
+            .with_salt(0.15, 2.5);
+            let need = 1.5 + 2.8 + inset + 0.5;
+            for (shift, ok) in [(-0.1, false), (0.1, true)] {
+                let atom = [Atom {
+                    position: [-15.0 + need + shift, 0.0, 0.0],
+                    charge: 1.0,
+                    radius: 1.5,
+                }];
+                let one = GridSpec::single([0.0; 3], [30.0, 30.0, 30.0], [61, 61, 61]);
+                let r = polar_solvation(&CpuBackend::new(), &atom, &p, &one);
+                assert_eq!(r.is_ok(), ok, "{surface:?} {shift}: {:?}", r.err());
+            }
+        }
+        // The larger of the two exclusion radii must fit inside the cell.
+        let cone = PbParams {
+            membrane: Some(crate::membrane::Membrane {
+                bottom: -5.0,
+                thickness: 10.0,
+                dielectric: 2.0,
+                profile: None,
+                exclusion: [1.0, 14.9],
+                fill: false,
+            }),
+            ..base.clone()
+        };
+        let msg = polar_solvation(&CpuBackend::new(), &atoms, &cone, &spec)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("exclusion"), "{msg}");
+        let spline = PbParams {
+            surface: SurfaceMethod::Spline2,
+            ..base.clone()
+        };
+        let msg = polar_forces(&CpuBackend::new(), &atoms, &spline, &spec)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("periodic"), "{msg}");
+        // The spec with a period spans it with its outermost grid only.
+        let p = spec.with_period(Some([40.0, 8.0]));
+        assert_eq!(&p.coarse_length[..2], &[40.0, 8.0]);
+        assert_eq!(p.fine_length[1], 8.0);
+        assert_eq!(p.fine_length[0], spec.fine_length[0]);
+        assert_eq!(p.with_period(Some([40.0, 8.0])), p);
+        assert_eq!(spec.with_period(None), spec);
     }
 }

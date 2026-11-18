@@ -295,8 +295,11 @@ boundary condition (`mdh`, `zero`, ...) assumes water around the molecule.
 For a charge in the middle of a 30 Å slab against the exact layered
 solution, the error is below 0.2 % with a 150 Å coarse box and 0.25 Å
 spacing. A larger coarse box does not help at 0.5 Å (−2.3 % with 600 Å):
-its coarse levels resolve the slab badly. Amber uses periodic lateral
-boundaries for membranes; pbsolve does not have them yet.
+its coarse levels resolve the slab badly. The automatic grid is too narrow
+for a membrane: for the 317-atom helix of the APBS examples (in a 30 Å
+slab) its 34 Å coarse box gives −48.85 kcal/mol, coarse boxes of 100 and
+150 Å −47.89 and −47.88. Give a coarse box of about 100 Å or more in x and
+y, or use [periodic lateral boundaries](#periodic-lateral-boundaries).
 
 Not available with `surface="gauss"`, atom dielectrics, `coulomb="analytic"`
 or [forces](#forces). With the GPU, the membrane is drawn into the maps on
@@ -308,6 +311,78 @@ the host: a calculation of the APBS helix example took 0.15 instead of
 membrane = pbsolve.Solver(ionic_strength=0.1, pdie=4.0, zmem=-20.0, lmem=40.0,
                           membrane_profile="greene2019", membrane_fill=True)
 result = membrane.polar_solvation(coords, charges, radii)
+```
+
+### Periodic lateral boundaries
+
+`period=(Lx, Ly)` (Å) makes the solvated state a periodic array of the
+solute in x and y, as in the box of a membrane simulation: a membrane slab
+no longer ends at the faces of the box, and the solute sees its images
+through it. APBS has no periodic boundaries; Amber's `bcopt=10` is
+periodic in all three directions on a single grid and is what it
+recommends for membranes [Xiao et al. 2017]; a laterally periodic model is
+that of Ji et al. (2018). pbsolve keeps focusing:
+
+* **Grids.** The outermost grid spans exactly one period in x and y
+  (`GridSpec.with_period`; `make_grid` and the results report it) and is
+  periodic there. On an axis of n nodes node n − 1 is the image of node 0,
+  so nodes 0 … n − 2 are the unknowns and the stencil of node 0 reaches node
+  n − 2. Finer grids focus as usual: their Dirichlet values come from the
+  coarser grid, whose solution already holds the images; a finer grid that
+  spans the period is periodic too. Multigrid coarsens a periodic axis of
+  2m + 1 nodes to m + 1, coarse node I on fine node 2I, and its transfers
+  and Galerkin operators wrap around the seam.
+* **z faces.** The top and bottom of the outermost grid take APBS' `mdh`
+  terms of the charges and all their lateral images, summed as a Fourier
+  series over the reciprocal lattice (G = 2π(m/Lx, n/Ly), A = Lx Ly):
+
+  ```{math}
+  u(\boldsymbol\rho, z) = \sum_i w_i \, \frac{2\pi}{A} \sum_{\mathbf G}
+  \cos\big(\mathbf G\cdot(\boldsymbol\rho - \boldsymbol\rho_i)\big)\,
+  \frac{e^{-s|z - z_i|}}{s}, \qquad s = \sqrt{G^2 + \kappa^2}, \qquad
+  w_i = \frac{l_B q_i}{\varepsilon_\text{sdie}} \frac{e^{\kappa a_i}}{1 + \kappa a_i}
+  ```
+
+  (the two-dimensional Fourier transform of e^{−κr}/r is
+  2π e^{−s|z|}/s). The terms fall off as e^{−|G| d} at a face a distance d
+  from the charges. The series converges only with ions (κ > 0): without
+  them the potential of an array of charged or polar solutes does not decay
+  along z, so **a period needs ions**.
+* **Reference state.** It stays a single molecule in `pdie` on the same
+  grids, with the exact Coulomb boundary, so `bcfl` must be `mdh` or
+  `mdh-fast`. ΔG_polar is then the transfer of one molecule from `pdie`
+  into the periodic array, consistent with a gas-phase energy without
+  images.
+* **Limits.** Every atom must stay clear of the edges of the period by its
+  radius plus the probe diameter (or the ion radius), the spline window and
+  a cell, and a membrane's exclusion cone must fit inside the cell (an
+  error names the atom). `equation="lpbe"`, `coulomb="grid"`, a surface
+  other than `gauss`, no [forces](#forces).
+
+**Images in a membrane.** In water, images a few Debye lengths away change
+nothing: an 80 Å cell moves a small solute's ΔG by 9e-9. Inside a
+low-dielectric slab between salt water the field of a charge decays
+laterally over about L/π (≈ 10 Å for a 30 Å slab), and the net charge of
+the array acts as a charged sheet whose potential across the slab,
+π l_B σ L/ε_m with σ = Q/A, grows with the thickness and the inverse area
+of the cell. For a unit charge in the middle of a 30 Å slab the images add
++1.77 kcal/mol to ΔG_polar with a 30 Å period and +0.05 with 60 Å, which
+pbsolve reproduces to 3e-4 and 8e-5 of the exact lattice sum
+([validation](../VALIDATION)). The sheet potential follows the slab's
+thickness on the coarsest grid, so that grid has to resolve the slab in z:
+with 3.1 Å coarse spacing in z the 30 Å case was off by 13 %, alternating
+in sign with the spacing (an interface placed within one cell, as for the
+Born ion). Keep the coarse z spacing near 1 Å for small, charged cells.
+For the APBS helix example, cells of 40, 60 and 100 Å give −47.38, −47.84
+and −47.88 kcal/mol, the last equal to a plain 100 Å box; the cost is that
+of the plain calculation (same iterations, CPU and GPU).
+
+```{code-block} python
+# The MD box was 92 x 92 Å in x and y: one cell of the bilayer and its protein.
+cell = pbsolve.Solver(ionic_strength=0.15, pdie=4.0, zmem=-20.0, lmem=40.0,
+                      membrane_profile="greene2019", membrane_fill=True,
+                      period=(92.0, 92.0))
+result = cell.polar_solvation(coords, charges, radii)
 ```
 
 ## Charges
