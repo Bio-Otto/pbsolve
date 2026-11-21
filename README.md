@@ -80,11 +80,13 @@ CPU without them; NVRTC comes from conda (`cuda-nvrtc`) or pip
 variable with `set MATURIN_PEP517_ARGS=--features cuda-12` (cmd) or
 `$env:MATURIN_PEP517_ARGS="--features cuda-12"` (PowerShell).
 
-From v0.2.0 on, every release carries ready-made Linux wheels (x86_64,
-Python 3.10–3.14), which need no Rust: one wheel for the CPU and CUDA 12+,
-`pip install pbsolve`, with NVRTC from `pip install "pbsolve[cuda12]"`. They
-are attached to the GitHub release and go to PyPI once publishing is enabled;
-conda-forge is planned (`docs/ROADMAP.md`, R2, and `docs/PACKAGING.md`).
+From v0.2.0 on, every release carries ready-made wheels for Python 3.10–3.14,
+which need no Rust: Linux (x86_64, aarch64) and Windows (x86_64), each one
+wheel for the CPU and CUDA 12+, and macOS (Apple silicon, Intel), CPU only.
+`pip install pbsolve`; `pip install "pbsolve[cuda12]"` adds NVRTC for the GPU.
+They are attached to the GitHub release and go to PyPI once publishing is
+enabled; conda-forge is planned (`docs/ROADMAP.md`, R2, and
+`docs/PACKAGING.md`).
 
 Check the installation (like `python -m openmm.testInstallation`):
 

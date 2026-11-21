@@ -447,9 +447,12 @@ maintainer and v0.2.0.*
   GPU-less runner. A vX.Y.0 release attaches them and, once the maintainer
   has registered the trusted publisher, uploads them to PyPI
   (`docs/PACKAGING.md`).
+* *0.1.2:* wheels for Linux aarch64 and Windows x86_64 (`cuda-12`) and for
+  macOS arm64 and x86_64 (CPU), each built on its own runner and installed
+  on a GPU-less runner of the same platform by CI.
 * Remaining:
   * the first upload (v0.2.0, by the release cadence);
-  * macOS, Windows and aarch64 wheels (they build from the sdist for now);
+  * GPU runs of the aarch64 and Windows wheels (no such GPU at hand);
   * conda-forge.
 
 **R3 Speed on reference hardware.** A first measurement on a shared machine

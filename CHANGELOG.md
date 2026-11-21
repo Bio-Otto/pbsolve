@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Packaging
+
+- Wheels for Linux aarch64 and Windows x86_64 (CUDA 12 support, as on
+  Linux x86_64) and for macOS arm64 and x86_64 (CPU), one per CPython
+  3.10–3.14. CI builds each on its own runner, checks that there is exactly
+  one wheel per Python version, and installs it on a GPU-less runner of the
+  same platform.
+- The `cuda12` extra installs nothing on macOS (pip has no macOS NVRTC).
+
 ### Documentation
 
 - The site's header shows the logo without its light background, with the

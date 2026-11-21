@@ -65,44 +65,81 @@ jobs:
           cargo test -p pbsolve-cuda --features cuda-12 --test gpu
 
   wheels:
-    # PyPI wheels: Linux x86_64 (manylinux2014), built with cuda-12, which runs
-    # on the CPU without a driver; and the sdist for every other platform.
-    runs-on: ubuntu-latest
+    # PyPI wheels, one per CPython version (3.10-3.14) and platform, each built
+    # on its own runner: Linux (manylinux2014) and Windows with cuda-12, which
+    # runs on the CPU without a driver; macOS without CUDA. Plus the sdist.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: x86_64, cuda: --features cuda-12}
+          - {os: ubuntu-24.04-arm, target: aarch64, cuda: --features cuda-12}
+          - {os: windows-latest, target: x64, cuda: --features cuda-12}
+          - {os: macos-latest, target: aarch64}
+          # shortcut: the last Intel macOS runner (retired in 2027); then cross-compile on macos-latest or drop Intel.
+          - {os: macos-15-intel, target: x86_64}
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Interpreters for --find-interpreter (Linux builds use the manylinux container's).
+      - if: runner.os != 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
       - uses: PyO3/maturin-action@v1
         with:
           command: build
+          target: ${{ matrix.target }}
           manylinux: "2014"
-          args: --release --features cuda-12 -i 3.10 3.11 3.12 3.13 3.14 -o dist
-      - uses: PyO3/maturin-action@v1
+          args: >-
+            --release ${{ matrix.cuda }} -o dist
+            ${{ runner.os == 'Linux' && '-i 3.10 3.11 3.12 3.13 3.14' || '--find-interpreter' }}
+      # Exactly one wheel per CPython 3.10-3.14 (no free-threaded or PyPy extras).
+      - shell: bash
+        run: |
+          tags=$(cd dist && ls *.whl | sed -E 's/^pbsolve-[^-]+-([^-]+-[^-]+)-.*/\1/' | sort | tr '\n' ' ')
+          echo "$tags"
+          test "$tags" = "cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313 cp314-cp314 "
+      - if: matrix.target == 'x86_64' && runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: -o dist
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: dist-${{ matrix.os }}-${{ matrix.target }}
           path: dist
 
   wheel-test:
-    # A clean install of the wheel on a runner without a GPU (no checkout).
+    # A clean install of each platform's wheel on a runner without a GPU (no checkout).
     needs: wheels
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest, macos-15-intel]
         python: ["3.10", "3.14"]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
+      # pip picks this platform's wheel from dist only, then the extra from PyPI.
       - run: |
-          whl=$(ls dist/*-cp$(python -c 'import sys; print("%d%d" % sys.version_info[:2])')-*.whl)
-          pip install "${whl}[cuda12]"
+          pip install --no-index --find-links dist --only-binary pbsolve --no-deps pbsolve
+          pip install --find-links dist "pbsolve[cuda12]"
       - run: pbsolve info && pbsolve test
 
   release:
@@ -117,7 +154,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - env:
           GH_TOKEN: ${{ github.token }}
@@ -136,6 +174,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
+          pattern: dist-*
+          merge-multiple: true
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1

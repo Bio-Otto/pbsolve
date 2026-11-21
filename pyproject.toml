@@ -21,7 +21,8 @@ classifiers = [
 
 [project.optional-dependencies]
 # NVRTC for the PyPI wheels (built with cuda-12); the driver comes from the system.
-cuda12 = ["nvidia-cuda-nvrtc-cu12"]
+# macOS wheels have no CUDA (and pip has no macOS NVRTC).
+cuda12 = ["nvidia-cuda-nvrtc-cu12; sys_platform != 'darwin'"]
 openmm = ["openmm>=8.0"]
 test = ["pytest>=7"]
 

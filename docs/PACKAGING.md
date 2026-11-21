@@ -55,30 +55,37 @@ compiled to CUBIN, not PTX.
 ### The PyPI wheels
 
 pip cannot choose between builds of one package by the driver, so PyPI gets
-**one** wheel per Python version (Linux x86_64, manylinux2014, CPython
-3.10–3.14), built with `cuda-12`, and the sdist:
+**one** wheel per Python version (CPython 3.10–3.14) and platform, and the
+sdist:
+
+| Platform | Wheel | CUDA |
+|---|---|---|
+| Linux x86_64, aarch64 | manylinux2014 (glibc ≥ 2.17) | `cuda-12` |
+| Windows x86_64 | `win_amd64` | `cuda-12` |
+| macOS arm64 (≥ 11), x86_64 (≥ 10.12) | `macosx` | none (no NVIDIA driver on macOS) |
 
 ```bash
 pip install pbsolve              # CPU; CUDA too if an NVRTC is already installed
-pip install "pbsolve[cuda12]"    # + nvidia-cuda-nvrtc-cu12, for the GPU
+pip install "pbsolve[cuda12]"    # + nvidia-cuda-nvrtc-cu12, for the GPU (Linux, Windows)
 ```
 
 * Without a driver or a GPU the wheel runs on the CPU (`pbsolve info` gives
-  the reason).
+  the reason). On macOS the extra installs nothing (pip has no macOS NVRTC).
 * A `cuda-12` build runs with CUDA 12 and 13 drivers. Drivers run older
   builds; checked with the 13.2 driver.
 * NVRTC 12.9 compiles for sm_50 to sm_121; NVRTC 13 starts at sm_75, so a
   `cuda-13` wheel would drop Maxwell, Pascal and Volta GPUs.
 * A `cuda-13` build stays available from source
   (`MATURIN_PEP517_ARGS="--features cuda-13"`) and on conda-forge.
-* macOS, Windows and other Linux architectures install from the sdist,
-  which needs Rust ≥ 1.85.
+* Other platforms install from the sdist, which needs Rust ≥ 1.85.
 
-CI (`.github/workflows/ci.yml`) builds the wheels and the sdist in the
-manylinux2014 container (`wheels`). `wheel-test` installs a wheel with
-`[cuda12]` on a runner without a GPU and runs `pbsolve test`. A vX.Y.0 tag
-attaches the files to its GitHub release (`release`) and uploads them to PyPI
-(`pypi`).
+CI (`.github/workflows/ci.yml`) builds each platform's wheels on its own
+runner (`wheels`; Linux in the manylinux2014 container, Intel macOS on
+`macos-15-intel`, GitHub's last Intel image, retired in 2027) and checks that
+there is exactly one wheel per CPython 3.10–3.14. `wheel-test` installs each
+platform's wheel with `[cuda12]` on a runner without a GPU (Python 3.10 and
+3.14) and runs `pbsolve test`. A vX.Y.0 tag attaches the files to its GitHub
+release (`release`) and uploads them to PyPI (`pypi`).
 
 The `pypi` job uses trusted publishing (no stored token) and runs only after
 the maintainer has done three things:
