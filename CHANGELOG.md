@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Documentation
+
+- The site's header shows the logo without its light background, with the
+  name in white (`docs/_static/pbsolve-logo-header.svg`).
+
 ## 0.1.1 — 2026-11-21
 
 Linux wheels for PyPI (ROADMAP R2); the first upload comes with v0.2.0.

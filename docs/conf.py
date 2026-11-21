@@ -76,12 +76,13 @@ html_static_path = ["_static"]
 html_favicon = "_static/pbsolve-mark.svg"
 REPO = "https://github.com/Bio-Otto/pbsolve"
 html_theme_options = {
-    # The logo carries the name (787.5 x 298, paths relative to _static).
+    # The logo carries the name; this variant (transparent, white name, cropped
+    # to 663 x 162) is for the dark header. Paths are relative to _static.
     "project_name": "",
-    "logo": "pbsolve-logo.svg",
+    "logo": "pbsolve-logo-header.svg",
     "logo_alt": "pbsolve",
-    "logo_height": 53,
-    "logo_width": 140,
+    "logo_height": 40,
+    "logo_width": 164,
     # No "Edit on GitHub": the tutorial copy and the API pages have no source file there.
     "github_url": "",
     "header_links": f"GitHub|{REPO}",
