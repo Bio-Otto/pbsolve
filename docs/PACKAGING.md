@@ -23,24 +23,46 @@ Users can pin a CUDA major explicitly: `conda install -c conda-forge pbsolve cud
 Your MM-GBSA/MM-PBSA package then simply lists `pbsolve` (and `openmm`) as
 run dependencies and inherits the automatic GPU selection.
 
+* `compiler('cuda')` must stay in the recipe: conda-forge turns on the CUDA
+  variants only when it finds it (`CF_CUDA_ENABLED`). nvcc is not used, but
+  its activation needs the C++ compiler, so the CUDA variants list
+  `compiler('cxx')` as well.
+* conda-forge builds CPython 3.11–3.14 (its own minimum, CFEP-25) and CUDA
+  12.9 and 13.4 (global pinning, 2026-11).
+
 ## Publishing on conda-forge
 
-1. Tag a release vX.Y.0 on GitHub: CI runs for such tags only and creates
-   the GitHub release when every job passes (patch tags vX.Y.1–vX.Y.9 run no
-   CI). Replace `source: path:` in the recipe with the release tarball `url`
-   and `sha256`.
-2. Open a PR to `conda-forge/staged-recipes` with `recipe/`.
-3. After merge, the feedstock CI builds every CPU/CUDA × Python × platform variant.
+1. Take a release vX.Y.0 (CI runs for such tags only and creates the GitHub
+   release when every job passes; patch tags vX.Y.1–vX.Y.9 run no CI). In a
+   copy of `recipe/`, replace `source: path:` with the tag tarball
+   `https://github.com/Bio-Otto/pbsolve/archive/refs/tags/vX.Y.Z.tar.gz` and
+   its `sha256`.
+2. Open a PR to `conda-forge/staged-recipes` that adds the copy as
+   `recipes/pbsolve/` (`meta.yaml`, `build.sh`, `bld.bat`,
+   `conda-forge.yml`).
+3. After merge, the feedstock CI builds every CPU/CUDA × Python × platform
+   variant. `conda-forge.yml` makes the version bot follow GitHub releases
+   only (`bot.version_updates.sources: [githubreleases]`), so it opens update
+   PRs for vX.Y.0 releases and not for patch tags.
 
 ## Local test builds
 
-conda-forge's CI is the reference build environment. For a local CPU check:
+conda-forge's CI is the reference build environment. Without Docker, a local
+build with conda-forge's pinning reproduces it (this built the three
+variants of 0.1.2 for Python 3.12; see `docs/VALIDATION.md`):
 
 ```bash
-conda install -c conda-forge conda-build conda-forge-pinning
-conda build recipe -m "$CONDA_PREFIX/conda_build_config.yaml" \
-    --variants "{cuda_compiler_version: ['None']}"
+conda create -p ./cf -c conda-forge conda-build conda-forge-pinning conda-smithy
+./cf/bin/conda-smithy recipe-lint --conda-forge recipes/pbsolve   # the staged-recipes linter
+printf 'python:\n  - 3.12.* *_cpython\nis_python_min:\n  - false\n' > py312.yaml
+CF_CUDA_ENABLED=True ./cf/bin/conda-build -c conda-forge --override-channels \
+    -m ./cf/conda_build_config.yaml -m py312.yaml --croot ./bld recipes/pbsolve
 ```
+
+Build from a tarball copy of the recipe (as above): `source: path: ..` copies
+the whole working tree, Cargo's `target/` included. Install the result with
+`-c file://$PWD/bld -c conda-forge`; `CONDA_OVERRIDE_CUDA=` simulates a
+machine without a driver.
 
 ## pip / wheels
 

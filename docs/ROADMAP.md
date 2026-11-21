@@ -450,10 +450,15 @@ maintainer and v0.2.0.*
 * *0.1.2:* wheels for Linux aarch64 and Windows x86_64 (`cuda-12`) and for
   macOS arm64 and x86_64 (CPU), each built on its own runner and installed
   on a GPU-less runner of the same platform by CI.
+* *0.1.3:* the conda recipe builds, checked locally with conda-forge's pinning
+  and linter: CPU, CUDA 12.9 and CUDA 13.4 variants pass their tests, one
+  `conda install` picks the CUDA variant with a driver and the CPU variant
+  without, and the energies are bit-identical to the wheels. `conda-forge.yml`
+  makes the version bot follow GitHub releases (vX.Y.0) only.
 * Remaining:
   * the first upload (v0.2.0, by the release cadence);
   * GPU runs of the aarch64 and Windows wheels (no such GPU at hand);
-  * conda-forge.
+  * the staged-recipes PR (the maintainer's account) and the feedstock.
 
 **R3 Speed on reference hardware.** A first measurement on a shared machine
 (2026-11-15; GPU 94 % busy with other jobs): 1YCR, 0.15 M, 129³ with two

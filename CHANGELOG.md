@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Packaging
+
+- The conda recipe builds (checked locally with conda-forge's pinning and
+  linter: CPU, CUDA 12.9 and CUDA 13.4 variants). The CUDA variants add
+  `compiler('cxx')`, which the `cuda-nvcc` activation needs, and a
+  linter-safe `cuda_major`.
+- The recipe tests run `pip check` and a fast pytest subset that needs only
+  `tests/`. The maintainer is `Bio-Otto`, and the recipe links the
+  documentation.
+- `recipe/conda-forge.yml`: the feedstock's version bot follows GitHub
+  releases, so only vX.Y.0 releases reach conda-forge.
+
 ## 0.1.2 — 2026-11-21
 
 Wheels for Linux aarch64, Windows and macOS (ROADMAP R2); the logo on the

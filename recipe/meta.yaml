@@ -7,7 +7,7 @@
 {% if cuda_compiler_version != "None" %}
 {% set build = build + 200 %}
 {% endif %}
-{% set cuda_major = cuda_compiler_version.split(".")[0] if cuda_compiler_version != "None" else "0" %}
+{% set cuda_major = (cuda_compiler_version|string).split(".")[0] if cuda_compiler_version != "None" else "0" %}
 
 package:
   name: {{ name }}
@@ -30,7 +30,10 @@ requirements:
     - {{ compiler('c') }}
     - {{ stdlib('c') }}
     - {{ compiler('rust') }}
+    # compiler('cuda') turns on conda-forge's CUDA variants; nvcc itself is not
+    # used (NVRTC compiles the kernels at runtime) but its activation needs cxx.
     - {{ compiler('cuda') }}  # [cuda_compiler_version != "None"]
+    - {{ compiler('cxx') }}  # [cuda_compiler_version != "None"]
     - cargo-bundle-licenses
   host:
     - python
@@ -46,18 +49,24 @@ requirements:
 
 test:
   requires:
+    - pip
     - pytest
   source_files:
     - tests
   imports:
     - pbsolve
   commands:
+    - pip check
     - pbsolve info
     - python -m pbsolve.test_installation --platform CPU
-    - pytest -q tests
+    # A fast subset that needs only tests/data (API, readers, analytic accuracy,
+    # pdb2pqr parity, MM-PBSA, APBS apolar); the full suite reads the repository.
+    - pytest -q tests/test_api.py tests/test_io.py tests/test_analytic.py tests/test_prep.py tests/test_mmpbsa.py tests/test_apolar.py
 
 about:
   home: https://github.com/Bio-Otto/pbsolve
+  dev_url: https://github.com/Bio-Otto/pbsolve
+  doc_url: https://pbsolve.readthedocs.io
   license: MIT AND BSD-3-Clause AND BSD-2-Clause
   license_file:
     - LICENSE
@@ -71,4 +80,4 @@ about:
 
 extra:
   recipe-maintainers:
-    - YOUR-GITHUB-HANDLE
+    - Bio-Otto
