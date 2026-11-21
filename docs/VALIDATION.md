@@ -61,6 +61,7 @@ should update the status table below.
 | Membrane potential (0.0.9): `membrane_potential` | the field of a uniform slab between salt water against the exact solution: 2e-9 V in the middle, ≤ 1e-4 V in the baths, ≤ 0.5 % of V inside the slab (cell placement of its faces; the column solution alone 4e-4 kT/e with the surfaces on nodes); ΔG(V) − ΔG(0) = E_V, linear and antisymmetric in V, atom energies and `potential()` consistent to 1e-9; APBS helix series: apparent charge −0.23 … −0.31 e at 100 mV (protein-free slab estimate −0.26 … −0.35 e); CPU = CUDA to 10 digits (plain, profile + fill, periodic); 1.5× (CPU) / 1.7× (CUDA) the time; 35/35 mutations; default path bit-identical to 0.0.8; see *Membrane potential* |
 | Non-polar term in a membrane (0.0.9): `sasa`/`nonpolar_energy(zmem=)`, `nonpolar_membrane=`, `--nonpolar-membrane` | GBSW's switch (Im et al. 2003, Eq. 13): 0/½/1, symmetric, slope 3/(4w) on the surfaces and 0 at the ends; the weighted area of a sphere across a surface = 2πR∫H dz (Archimedes) to 1e-5 (w = 2.5 Å) and within one point's share (w ≤ 0.3 Å), also against an independent Python switch (2e-4); weight 1 and a distant membrane bit-identical to the plain area, plain SASA and γ·SASA + β bit-identical to 0.0.8; APBS helix in a 40 Å membrane: water-exposed area 13 → 52 % as it leaves the membrane, ΔG_np 2.5 → 7.3 kcal/mol (13.2 without membrane), w = 0.3 vs 2.5 Å ≤ 2 %; same cost; 27/27 mutations; see *Non-polar term in a membrane* |
 | PyPI wheels (0.1.1): Linux x86_64, manylinux2014, CPython 3.10–3.14, `cuda-12`, `pbsolve[cuda12]`, sdist | manylinux2014 compliance (maturin) and `twine check --strict` pass; clean environments (Python 3.14 and 3.10, no conda variables): `pbsolve test` passes with the GPU (pip NVRTC 12.9 or the system's 13.3; CUDA vs CPU 0.0, driver 13.2), with no visible device and with the driver library hidden (CPU, with the reason); the sdist builds and passes; 1YCR energies and iterations bit-identical to the development build on CPU and CUDA; the full test suite on the installed wheel 444 passed, 40 skipped (APBS, OpenMM, PROPKA, nbformat absent); see *PyPI wheels (R2)* |
+| Wheels on every platform (0.1.2): Linux aarch64 and Windows x86_64 (`cuda-12`), macOS arm64 and x86_64 (CPU), CPython 3.10–3.14 | CI builds each on its own runner (exactly one wheel per Python version) and installs it on a GPU-less runner of the same platform: `pbsolve test` passes in all 10 jobs, ΔG −82.9970 kcal/mol everywhere; Windows and aarch64 load pip's NVRTC 12.9 and fall back to the CPU without a driver; `twine check --strict` passes; not run on a GPU; see *PyPI wheels (R2)* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -1720,6 +1721,32 @@ so there is one wheel per Python version:
 
 The `pypi` job uploads them once the maintainer has enabled trusted
 publishing.
+
+### Every platform (0.1.2)
+
+CI builds the wheels of each platform on its own runner and installs them on
+a GPU-less runner of the same platform (run 44940232470, from the
+`wheels-all-platforms` branch, version 0.1.1):
+
+| Platform (runner) | Wheel | CUDA in the wheel | `pbsolve info` without a GPU |
+|---|---|---|---|
+| Linux x86_64 (`ubuntu-latest`) | manylinux2014, 1.5 MB | `cuda-12` | CPU; NVRTC 12.9 from `[cuda12]` loaded; reason "NVIDIA driver library (libcuda) not found" |
+| Linux aarch64 (`ubuntu-24.04-arm`) | manylinux2014, 1.4 MB | `cuda-12` | same as Linux x86_64 |
+| Windows x86_64 (`windows-latest`) | `win_amd64`, 1.4 MB | `cuda-12` | same: pip's `nvrtc64_120_0.dll` loaded, no driver |
+| macOS arm64 (`macos-latest`) | `macosx_11_0`, 1.1 MB | none | CPU variant; `[cuda12]` installs only numpy |
+| macOS x86_64 (`macos-15-intel`) | `macosx_10_12`, 1.2 MB | none | same as macOS arm64 |
+
+* Every build gave exactly one wheel per CPython 3.10–3.14. The check in
+  the `wheels` job caught the first attempt, in which `--find-interpreter`
+  also built a CPython 3.15 wheel on the Windows and macOS runners.
+* `wheel-test` (Python 3.10 and 3.14 on each of the five runners, 10 jobs)
+  installed the platform's wheel from the build output only, then
+  `[cuda12]`. `pbsolve test` passed in all 10, with the same Born-ion
+  energy: ΔG −82.9970 kcal/mol (analytic −81.9589), 18 CG iterations.
+* `twine check --strict` passes on all 25 wheels and the sdist.
+* Not run: the aarch64 and Windows wheels on a GPU (none at hand). Their
+  CUDA path is the same code as the Linux x86_64 wheel's, which passed on
+  the GPU above.
 
 ## Input readers (`pbsolve-io`)
 
