@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.4 — 2026-11-22
+
+The conda recipe in the v1 format; v0.1.0 submitted to conda-forge (ROADMAP R2).
+
 ### Packaging
 
 - The conda recipe uses the v1 format (`recipe/recipe.yaml`, built by

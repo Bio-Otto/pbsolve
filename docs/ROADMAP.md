@@ -405,7 +405,7 @@ of Gaussian-dielectric pKa methods (4.21).
 ### First public release
 
 v0.1–v0.3 are done; the repository is public since 2026-11-15, and the latest
-tag is v0.1.3. The first release makes the work usable and checkable by
+tag is v0.1.4. The first release makes the work usable and checkable by
 others. Releases are vX.Y.0 tags that pass CI (decision 5, section 8).
 
 **R1 Public repository and documentation site.** The repository is public
