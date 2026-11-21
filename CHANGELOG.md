@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-11-21
+
+Linux wheels for PyPI (ROADMAP R2); the first upload comes with v0.2.0.
+
 ### Packaging
 
 - Linux wheels for PyPI: one `pbsolve` wheel per CPython version (3.10–3.14,
