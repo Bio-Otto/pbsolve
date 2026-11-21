@@ -432,6 +432,25 @@ How pip users choose the CUDA major (separate package names or extras) is
 part of the work.
 *Evidence:* `pip install` in a clean environment passes `pbsolve test` on a
 machine without a GPU and on one with a GPU.
+*Status (0.1.1): the wheels are done; the first upload waits for the
+maintainer and v0.2.0.*
+* One `pbsolve` wheel per CPython version (3.10–3.14), for Linux x86_64 and
+  manylinux2014, built with `cuda-12`; plus the sdist. The `cuda12` extra
+  adds pip's NVRTC.
+* Why not separate package names: one name keeps a single dependency for
+  other packages. A `cuda-12` build runs on CUDA 12 and 13 drivers and
+  covers sm_50–sm_121 (NVRTC 13 starts at sm_75).
+* Checked in clean environments: with the GPU, with no visible device, with
+  the driver library hidden, and from the sdist. The energies are
+  bit-identical to the development build.
+* CI builds the wheels in the manylinux container and tests them on a
+  GPU-less runner. A vX.Y.0 release attaches them and, once the maintainer
+  has registered the trusted publisher, uploads them to PyPI
+  (`docs/PACKAGING.md`).
+* Remaining:
+  * the first upload (v0.2.0, by the release cadence);
+  * macOS, Windows and aarch64 wheels (they build from the sdist for now);
+  * conda-forge.
 
 **R3 Speed on reference hardware.** A first measurement on a shared machine
 (2026-11-15; GPU 94 % busy with other jobs): 1YCR, 0.15 M, 129³ with two

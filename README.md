@@ -78,8 +78,13 @@ The CUDA build loads the driver and NVRTC when it runs and falls back to the
 CPU without them; NVRTC comes from conda (`cuda-nvrtc`) or pip
 (`nvidia-cuda-nvrtc-cu12`, `nvidia-cuda-nvrtc` for 13). On Windows set the
 variable with `set MATURIN_PEP517_ARGS=--features cuda-12` (cmd) or
-`$env:MATURIN_PEP517_ARGS="--features cuda-12"` (PowerShell). Ready-made
-packages on conda-forge and PyPI are planned (`docs/ROADMAP.md`, R2).
+`$env:MATURIN_PEP517_ARGS="--features cuda-12"` (PowerShell).
+
+From v0.2.0 on, every release carries ready-made Linux wheels (x86_64,
+Python 3.10–3.14), which need no Rust: one wheel for the CPU and CUDA 12+,
+`pip install pbsolve`, with NVRTC from `pip install "pbsolve[cuda12]"`. They
+are attached to the GitHub release and go to PyPI once publishing is enabled;
+conda-forge is planned (`docs/ROADMAP.md`, R2, and `docs/PACKAGING.md`).
 
 Check the installation (like `python -m openmm.testInstallation`):
 

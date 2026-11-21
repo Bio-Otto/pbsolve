@@ -64,15 +64,78 @@ jobs:
           PBSOLVE_NVRTC="$(python -c 'import pbsolve; print(pbsolve._nvrtc_candidates(12)[0])')"
           cargo test -p pbsolve-cuda --features cuda-12 --test gpu
 
+  wheels:
+    # PyPI wheels: Linux x86_64 (manylinux2014), built with cuda-12, which runs
+    # on the CPU without a driver; and the sdist for every other platform.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          manylinux: "2014"
+          args: --release --features cuda-12 -i 3.10 3.11 3.12 3.13 3.14 -o dist
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: -o dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+  wheel-test:
+    # A clean install of the wheel on a runner without a GPU (no checkout).
+    needs: wheels
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - run: |
+          whl=$(ls dist/*-cp$(python -c 'import sys; print("%d%d" % sys.version_info[:2])')-*.whl)
+          pip install "${whl}[cuda12]"
+      - run: pbsolve info && pbsolve test
+
   release:
-    # The GitHub release of a vX.Y.0 tag, created only after the jobs above passed.
+    # The GitHub release of a vX.Y.0 tag, created only after the jobs above
+    # passed, with the wheels and the sdist attached.
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
-    needs: [rust, python]
+    needs: [rust, python, wheel-test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+
+  pypi:
+    # Trusted publishing (no token): needs the publisher registered on PyPI,
+    # the GitHub environment `pypi` and the repository variable PUBLISH_PYPI=true
+    # (docs/PACKAGING.md).
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_PYPI == 'true' }}
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

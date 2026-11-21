@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Packaging
+
+- Linux wheels for PyPI: one `pbsolve` wheel per CPython version (3.10–3.14,
+  x86_64, manylinux2014), built with CUDA 12 support. It runs on the CPU
+  without a driver and on the GPU with CUDA 12 or 13 drivers.
+  `pip install "pbsolve[cuda12]"` adds pip's NVRTC; the sdist builds
+  everywhere else.
+- CI (vX.Y.0 tags and on demand) builds the wheels in the manylinux
+  container and tests them on a runner without a GPU. A release attaches
+  the wheels and the sdist to its GitHub release and uploads them to PyPI
+  once trusted publishing is enabled (`docs/PACKAGING.md`).
+- PyPI project links: documentation and changelog.
+
 ## 0.1.0 — 2026-11-21
 
 The first minor release: everything since 0.0.1, checked by CI on Linux,

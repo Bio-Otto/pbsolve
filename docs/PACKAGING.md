@@ -52,8 +52,53 @@ finds the pip NVRTC in `site-packages/nvidia/` by itself. The NVRTC may be
 newer than the driver as long as the major version matches: kernels are
 compiled to CUBIN, not PTX.
 
-No wheels are on PyPI yet; publishing them is part of the first public
-release (`docs/ROADMAP.md`, R2).
+### The PyPI wheels
+
+pip cannot choose between builds of one package by the driver, so PyPI gets
+**one** wheel per Python version (Linux x86_64, manylinux2014, CPython
+3.10–3.14), built with `cuda-12`, and the sdist:
+
+```bash
+pip install pbsolve              # CPU; CUDA too if an NVRTC is already installed
+pip install "pbsolve[cuda12]"    # + nvidia-cuda-nvrtc-cu12, for the GPU
+```
+
+* Without a driver or a GPU the wheel runs on the CPU (`pbsolve info` gives
+  the reason).
+* A `cuda-12` build runs with CUDA 12 and 13 drivers. Drivers run older
+  builds; checked with the 13.2 driver.
+* NVRTC 12.9 compiles for sm_50 to sm_121; NVRTC 13 starts at sm_75, so a
+  `cuda-13` wheel would drop Maxwell, Pascal and Volta GPUs.
+* A `cuda-13` build stays available from source
+  (`MATURIN_PEP517_ARGS="--features cuda-13"`) and on conda-forge.
+* macOS, Windows and other Linux architectures install from the sdist,
+  which needs Rust ≥ 1.85.
+
+CI (`.github/workflows/ci.yml`) builds the wheels and the sdist in the
+manylinux2014 container (`wheels`). `wheel-test` installs a wheel with
+`[cuda12]` on a runner without a GPU and runs `pbsolve test`. A vX.Y.0 tag
+attaches the files to its GitHub release (`release`) and uploads them to PyPI
+(`pypi`).
+
+The `pypi` job uses trusted publishing (no stored token) and runs only after
+the maintainer has done three things:
+
+1. On pypi.org, under *Your projects → Publishing → Add a new pending
+   publisher*, register owner `Bio-Otto`, repository `pbsolve`, workflow
+   `ci.yml`, environment `pypi`.
+2. In the repository's *Settings → Environments*, create the environment
+   `pypi`.
+3. In *Settings → Secrets and variables → Actions → Variables*, set
+   `PUBLISH_PYPI` = `true`.
+
+Local check of a manylinux wheel without a container (zig as the linker):
+
+```bash
+pip install "maturin>=1.9,<2" "ziglang==0.13.0" twine
+unset CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER   # set by conda's Rust
+maturin build --release --zig --compatibility manylinux2014 --features cuda-12 -o dist
+maturin sdist -o dist && twine check --strict dist/*
+```
 
 ## Troubleshooting
 

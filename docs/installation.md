@@ -1,7 +1,8 @@
 # Installation
 
-pbsolve is a Python package with a compiled core (Rust), installed from
-source until the conda-forge and PyPI packages exist.
+pbsolve is a Python package with a compiled core (Rust). Up to v0.1.x it is
+installed from source; from v0.2.0 on, Linux wheels come with every release
+(PyPI once publishing is enabled), and conda-forge is planned.
 
 ```{include} ../README.md
 :start-after: <!-- docs-install-start -->

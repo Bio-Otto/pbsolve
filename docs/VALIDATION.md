@@ -60,6 +60,7 @@ should update the status table below.
 | Uncertainty over frames (0.0.8): `series_statistics`, `pbsolve.timeseries`, `pbsolve mmpbsa` | statistical inefficiency = pymbar 4.0.3 to 6e-16; on AR(1) series with exact answers g is unbiased and the t interval covers 94–98 % from ~20 effective frames (79 % at N_eff ≈ 3); block bootstrap and blocking calibrated alongside (lower coverage, blocking a check); a 5 ns MD of 1YCR: the per-frame total's error 5.3 × SD/√N (τ 67 ps), short prefixes underestimate τ 25×; 24/24 mutations; see *Uncertainty over frames* |
 | Membrane potential (0.0.9): `membrane_potential` | the field of a uniform slab between salt water against the exact solution: 2e-9 V in the middle, ≤ 1e-4 V in the baths, ≤ 0.5 % of V inside the slab (cell placement of its faces; the column solution alone 4e-4 kT/e with the surfaces on nodes); ΔG(V) − ΔG(0) = E_V, linear and antisymmetric in V, atom energies and `potential()` consistent to 1e-9; APBS helix series: apparent charge −0.23 … −0.31 e at 100 mV (protein-free slab estimate −0.26 … −0.35 e); CPU = CUDA to 10 digits (plain, profile + fill, periodic); 1.5× (CPU) / 1.7× (CUDA) the time; 35/35 mutations; default path bit-identical to 0.0.8; see *Membrane potential* |
 | Non-polar term in a membrane (0.0.9): `sasa`/`nonpolar_energy(zmem=)`, `nonpolar_membrane=`, `--nonpolar-membrane` | GBSW's switch (Im et al. 2003, Eq. 13): 0/½/1, symmetric, slope 3/(4w) on the surfaces and 0 at the ends; the weighted area of a sphere across a surface = 2πR∫H dz (Archimedes) to 1e-5 (w = 2.5 Å) and within one point's share (w ≤ 0.3 Å), also against an independent Python switch (2e-4); weight 1 and a distant membrane bit-identical to the plain area, plain SASA and γ·SASA + β bit-identical to 0.0.8; APBS helix in a 40 Å membrane: water-exposed area 13 → 52 % as it leaves the membrane, ΔG_np 2.5 → 7.3 kcal/mol (13.2 without membrane), w = 0.3 vs 2.5 Å ≤ 2 %; same cost; 27/27 mutations; see *Non-polar term in a membrane* |
+| PyPI wheels (0.1.1): Linux x86_64, manylinux2014, CPython 3.10–3.14, `cuda-12`, `pbsolve[cuda12]`, sdist | manylinux2014 compliance (maturin) and `twine check --strict` pass; clean environments (Python 3.14 and 3.10, no conda variables): `pbsolve test` passes with the GPU (pip NVRTC 12.9 or the system's 13.3; CUDA vs CPU 0.0, driver 13.2), with no visible device and with the driver library hidden (CPU, with the reason); the sdist builds and passes; 1YCR energies and iterations bit-identical to the development build on CPU and CUDA; the full test suite on the installed wheel 444 passed, 40 skipped (APBS, OpenMM, PROPKA, nbformat absent); see *PyPI wheels (R2)* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -1662,6 +1663,63 @@ while one is alive takes 1–3 ms.
   * the preload opt-outs work.
 * CI runs the unit tests for both CUDA majors. The GPU job also runs the Rust
   GPU tests against the pip NVRTC.
+
+## PyPI wheels (R2)
+
+One wheel per CPython version: Linux x86_64, manylinux2014, built with
+`cuda-12` (`docs/PACKAGING.md`). The local check used maturin 1.16 with zig
+0.13 as the linker. The wheel was then installed into clean uv environments
+of the system Python 3.14 and of CPython 3.10, with no conda variables (`env
+-i`). Same machine as above: RTX 2080 SUPER, driver 595.99 (CUDA 13.2),
+system toolkit 13.3; the GPU was 93 % busy with GROMACS.
+
+**Distribution files:**
+* maturin's compliance check passes for manylinux2014 (glibc 2.17).
+* Each wheel is 1.4 MB and the sdist 0.43 MB.
+* `twine check --strict` passes on all of them.
+* Without zig, the conda environment's linker
+  (`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER`) links against glibc 2.34
+  symbols and the check fails, as it should.
+
+| Setup | `pbsolve info` | `pbsolve test` |
+|---|---|---|
+| wheel only (Python 3.14) | CUDA via the system NVRTC 13.3 (the build's NVRTC 12 is absent) | passes, CUDA vs CPU 0.0 |
+| `pbsolve[cuda12]` (Python 3.14, 3.10) | CUDA via pip's NVRTC 12.9 from `site-packages/nvidia/cuda_nvrtc` | passes, CUDA vs CPU 0.0 |
+| `CUDA_VISIBLE_DEVICES=` | CPU; reason `CUDA_ERROR_NO_DEVICE` | passes |
+| driver library hidden (`unshare -rm`, `/dev/null` bound over `libcuda.so*`) | CPU; reason "NVIDIA driver library (libcuda) not found" | passes |
+| sdist, built by pip from source (Python 3.14, Rust 1.85+) | CPU variant (no CUDA compiled in) | passes |
+
+**Same results as the development build.** 1YCR, `pbsolve solvation --json`
+with defaults. The wheel (`cuda-12`, zig-linked, NVRTC 12.9) and the
+development build (`cuda-13`, conda NVRTC) give bit-identical results:
+* CPU: ΔG_polar −1227.3080272523594 kcal/mol;
+* CUDA: −1227.3080272524026 kcal/mol;
+* on both, ΔG_np 30.49391727064984 kcal/mol and CG iterations [12, 12, 8, 8].
+
+**Test suite on the wheel.** The full `pytest tests` ran against the
+installed wheel (Python 3.14, `[cuda12]`, scipy) instead of the source tree:
+444 passed and 40 skipped. Every skip is something not installed in that
+environment, or a test that applies only without a GPU:
+* APBS (32);
+* OpenMM, PROPKA, nbformat (5);
+* a test for machines without CUDA (1);
+* two documentation pages without examples (2).
+
+**Why a `cuda-12` wheel.** pip cannot pick a build by the installed driver,
+so there is one wheel per Python version:
+* A `cuda-12` build runs on CUDA 12 and 13 drivers (above: driver 13.2).
+* NVRTC 12.9 compiles for sm_50 to sm_121. NVRTC 13.3 starts at sm_75, as
+  `nvrtcGetSupportedArchs` reports for both, so a `cuda-13` wheel would drop
+  Maxwell, Pascal and Volta GPUs.
+
+**CI.** `.github/workflows/ci.yml` has three jobs for the wheels:
+* `wheels` builds the same files in the manylinux2014 container.
+* `wheel-test` installs a wheel with `[cuda12]` on a GPU-less runner
+  (Python 3.10 and 3.14) and runs `pbsolve test`.
+* `release` attaches the wheels and the sdist to a vX.Y.0 GitHub release.
+
+The `pypi` job uploads them once the maintainer has enabled trusted
+publishing.
 
 ## Input readers (`pbsolve-io`)
 

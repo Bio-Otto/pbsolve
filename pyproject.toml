@@ -20,6 +20,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# NVRTC for the PyPI wheels (built with cuda-12); the driver comes from the system.
+cuda12 = ["nvidia-cuda-nvrtc-cu12"]
 openmm = ["openmm>=8.0"]
 test = ["pytest>=7"]
 
@@ -28,6 +30,8 @@ pbsolve = "pbsolve.__main__:main"
 
 [project.urls]
 Repository = "https://github.com/Bio-Otto/pbsolve"
+Documentation = "https://pbsolve.readthedocs.io"
+Changelog = "https://github.com/Bio-Otto/pbsolve/blob/main/CHANGELOG.md"
 
 [tool.maturin]
 manifest-path = "crates/pbsolve-py/Cargo.toml"

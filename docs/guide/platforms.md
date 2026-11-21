@@ -26,7 +26,8 @@ analytic energy and against each other.
 * The NVRTC library of the CUDA major version pbsolve was built for
   (`cuda_info()["cuda_major"]`): the conda package `cuda-nvrtc`, or the pip
   package `nvidia-cuda-nvrtc-cu12` (CUDA 12) or `nvidia-cuda-nvrtc`
-  (CUDA 13). pbsolve finds it in the active environment.
+  (CUDA 13). pbsolve finds it in the active environment. With the Linux
+  wheels (built for CUDA 12), `pip install "pbsolve[cuda12]"` installs it.
 
 If anything is missing, a CUDA-enabled pbsolve still works on the CPU, and
 `cuda_info()["reason"]` says why CUDA is not available. `platform="CUDA"`
