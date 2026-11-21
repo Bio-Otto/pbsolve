@@ -5,8 +5,9 @@ CUDA build on machines with an NVIDIA driver and the CPU build elsewhere.
 
 ## How the variants work
 
-`recipe/meta.yaml` builds one CPU variant and one variant per CUDA major
-(`cuda_compiler_version` from conda-forge's global pinning):
+`recipe/recipe.yaml` (the v1 format that rattler-build reads and
+staged-recipes asks for) builds one CPU variant and one variant per CUDA
+major (`cuda_compiler_version` from conda-forge's global pinning):
 
 * CUDA variants get **build number + 200**, so the solver prefers them.
 * CUDA variants **run-depend on `__cuda`** (a virtual package that exists only
@@ -14,9 +15,10 @@ CUDA build on machines with an NVIDIA driver and the CPU build elsewhere.
   driver and the CPU variant is chosen instead.
 * CUDA variants run-depend on `cuda-nvrtc` and on a matching `cuda-version`.
   The driver itself always comes from the system.
-* `recipe/build.sh` turns `cuda_compiler_version=12.x` into the Cargo feature
-  `cuda-12` via `MATURIN_PEP517_ARGS`. No nvcc is invoked: kernels are
-  compiled at runtime by NVRTC.
+* `recipe/build.sh` (`build.bat` on Windows) turns
+  `cuda_compiler_version=12.x` into the Cargo feature `cuda-12` via
+  `MATURIN_PEP517_ARGS`. No nvcc is invoked: kernels are compiled at runtime
+  by NVRTC.
 
 Users can pin a CUDA major explicitly: `conda install -c conda-forge pbsolve cuda-version=12`.
 
@@ -38,7 +40,7 @@ run dependencies and inherits the automatic GPU selection.
    `https://github.com/Bio-Otto/pbsolve/archive/refs/tags/vX.Y.Z.tar.gz` and
    its `sha256`.
 2. Open a PR to `conda-forge/staged-recipes` that adds the copy as
-   `recipes/pbsolve/` (`meta.yaml`, `build.sh`, `bld.bat`,
+   `recipes/pbsolve/` (`recipe.yaml`, `build.sh`, `build.bat`,
    `conda-forge.yml`).
 3. After merge, the feedstock CI builds every CPU/CUDA × Python × platform
    variant. `conda-forge.yml` makes the version bot follow GitHub releases
@@ -47,22 +49,32 @@ run dependencies and inherits the automatic GPU selection.
 
 ## Local test builds
 
-conda-forge's CI is the reference build environment. Without Docker, a local
-build with conda-forge's pinning reproduces it (this built the three
-variants of 0.1.2 for Python 3.12; see `docs/VALIDATION.md`):
+conda-forge's CI is the reference build environment. Without Docker, the
+same steps run locally (this built the variants of 0.1.0 for Python 3.12; see
+`docs/VALIDATION.md`). staged-recipes builds Linux three times, with the
+global pinning plus one of its configs: `.ci_support/linux64.yaml` (CPU),
+`linux64_cuda129.yaml` and `linux64_cuda130.yaml`. conda-build merges them
+into one flat variant file, which rattler-build then reads:
 
 ```bash
-conda create -p ./cf -c conda-forge conda-build conda-forge-pinning conda-smithy
+conda create -p ./cf -c conda-forge rattler-build conda-build conda-forge-pinning conda-smithy
 ./cf/bin/conda-smithy recipe-lint --conda-forge recipes/pbsolve   # the staged-recipes linter
-printf 'python:\n  - 3.12.* *_cpython\nis_python_min:\n  - false\n' > py312.yaml
-CF_CUDA_ENABLED=True ./cf/bin/conda-build -c conda-forge --override-channels \
-    -m ./cf/conda_build_config.yaml -m py312.yaml --croot ./bld recipes/pbsolve
+# linux64_cuda130.yaml from conda-forge/staged-recipes/.ci_support (CUDA 13; or linux64, linux64_cuda129)
+./cf/bin/python - ./cf/conda_build_config.yaml linux64_cuda130.yaml variants.yaml <<'EOF'
+import os, sys, yaml, conda_build.api, conda_build.variants as v
+pinning, staged, out = sys.argv[1:4]
+config = conda_build.api.Config(arch="64", exclusive_config_files=[pinning, staged])
+spec = v.combine_specs({f: v.parse_config_file(os.path.abspath(f), config, loader=yaml.SafeLoader)
+                        for f in config.exclusive_config_files}, log_output=False)
+spec.update(channel_sources=["conda-forge"], python=["3.12.* *_cpython"], is_python_min=["false"])
+yaml.dump(spec, open(out, "w"))
+EOF
+./cf/bin/rattler-build build --recipe recipes/pbsolve/recipe.yaml \
+    --variant-config variants.yaml --target-platform linux-64 --output-dir out
 ```
 
-Build from a tarball copy of the recipe (as above): `source: path: ..` copies
-the whole working tree, Cargo's `target/` included. Install the result with
-`-c file://$PWD/bld -c conda-forge`; `CONDA_OVERRIDE_CUDA=` simulates a
-machine without a driver.
+Install the result with `-c file://$PWD/out -c conda-forge`.
+`CONDA_OVERRIDE_CUDA=` simulates a machine without a driver.
 
 ## pip / wheels
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Packaging
+
+- The conda recipe uses the v1 format (`recipe/recipe.yaml`, built by
+  rattler-build), which conda-forge's staged-recipes asks for. `bld.bat` is
+  now `build.bat`, and `meta.yaml` is gone.
+- The recipe's three Linux builds (CPU, CUDA 12.9, CUDA 13.4) pass locally
+  with staged-recipes' configs. `docs/PACKAGING.md` shows how to run them.
+
 ## 0.1.3 — 2026-11-22
 
 The conda recipe builds with conda-forge's tooling (ROADMAP R2).

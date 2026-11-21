@@ -62,7 +62,7 @@ should update the status table below.
 | Non-polar term in a membrane (0.0.9): `sasa`/`nonpolar_energy(zmem=)`, `nonpolar_membrane=`, `--nonpolar-membrane` | GBSW's switch (Im et al. 2003, Eq. 13): 0/½/1, symmetric, slope 3/(4w) on the surfaces and 0 at the ends; the weighted area of a sphere across a surface = 2πR∫H dz (Archimedes) to 1e-5 (w = 2.5 Å) and within one point's share (w ≤ 0.3 Å), also against an independent Python switch (2e-4); weight 1 and a distant membrane bit-identical to the plain area, plain SASA and γ·SASA + β bit-identical to 0.0.8; APBS helix in a 40 Å membrane: water-exposed area 13 → 52 % as it leaves the membrane, ΔG_np 2.5 → 7.3 kcal/mol (13.2 without membrane), w = 0.3 vs 2.5 Å ≤ 2 %; same cost; 27/27 mutations; see *Non-polar term in a membrane* |
 | PyPI wheels (0.1.1): Linux x86_64, manylinux2014, CPython 3.10–3.14, `cuda-12`, `pbsolve[cuda12]`, sdist | manylinux2014 compliance (maturin) and `twine check --strict` pass; clean environments (Python 3.14 and 3.10, no conda variables): `pbsolve test` passes with the GPU (pip NVRTC 12.9 or the system's 13.3; CUDA vs CPU 0.0, driver 13.2), with no visible device and with the driver library hidden (CPU, with the reason); the sdist builds and passes; 1YCR energies and iterations bit-identical to the development build on CPU and CUDA; the full test suite on the installed wheel 444 passed, 40 skipped (APBS, OpenMM, PROPKA, nbformat absent); see *PyPI wheels (R2)* |
 | Wheels on every platform (0.1.2): Linux aarch64 and Windows x86_64 (`cuda-12`), macOS arm64 and x86_64 (CPU), CPython 3.10–3.14 | CI builds each on its own runner (exactly one wheel per Python version) and installs it on a GPU-less runner of the same platform: `pbsolve test` passes in all 10 jobs, ΔG −82.9970 kcal/mol everywhere; Windows and aarch64 load pip's NVRTC 12.9 and fall back to the CPU without a driver; `twine check --strict` passes; not run on a GPU; see *PyPI wheels (R2)* |
-| conda recipe (0.1.3): CPU, CUDA 12.9, CUDA 13.4 variants (conda-forge pinning, linux-64, Python 3.12) | `conda-smithy recipe-lint --conda-forge` passes; the three variants build from the v0.1.2 tarball and pass the recipe's tests; one `conda install` picks `cuda13` with the driver, `cpu` without (`CONDA_OVERRIDE_CUDA=`), `cuda12` with `cuda-version=12`; 1YCR bit-identical to the development build and the wheels on CPU and CUDA; see *conda-forge recipe (R2)* |
+| conda recipe (0.1.3, v1 format 0.1.4): CPU, CUDA 12.9, CUDA 13.4 variants (conda-forge pinning, linux-64, Python 3.12) | `conda-smithy recipe-lint --conda-forge` passes; the three variants build from the v0.1.0 tarball with rattler-build and staged-recipes' Linux configs and pass the recipe's tests; one `conda install` picks `cuda13` with the driver, `cpu` without (`CONDA_OVERRIDE_CUDA=`), `cuda12` with `cuda-version=12`; 1YCR bit-identical to the development build and the wheels on CPU and CUDA; see *conda-forge recipe (R2)* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -1751,29 +1751,44 @@ a GPU-less runner of the same platform (run 44940232470, from the
 
 ## conda-forge recipe (R2)
 
-The recipe (`recipe/`) had never been built until 0.1.3. A copy that uses
-the v0.1.2 tag tarball (as staged-recipes needs) was built locally with
-conda-build 26.9.1 and conda-forge's global pinning (2026-11), linux-64,
-Python 3.12, `CF_CUDA_ENABLED=True` (`docs/PACKAGING.md`). The toolchain was
-conda-forge's Rust 1.100.0 with sysroot glibc 2.17 (CPU and CUDA 12.9) or
-2.28 (CUDA 13.4). Same machine as the wheel checks: RTX 2080 SUPER, driver
-13.2, GPU 96 % busy with GROMACS.
+The recipe (`recipe/`) had never been built until 0.1.3. All builds below ran
+locally on linux-64 with Python 3.12 and conda-forge's global pinning
+(2026-11) (`docs/PACKAGING.md`). Each recipe copy used a tag tarball, as
+staged-recipes needs. The toolchain was conda-forge's Rust 1.100.0, with
+sysroot glibc 2.17 (CPU and CUDA 12.9) or 2.28 (CUDA 13.4). Same machine as
+the wheel checks: RTX 2080 SUPER, driver 13.2, GPU 96 % busy with GROMACS.
 
-**Linter.** `conda-smithy recipe-lint --conda-forge` (the staged-recipes
-linter) passes, and so does the schema check of `conda-forge.yml`. The bot
-setting `version_updates.sources: [githubreleases]` validates against the
-bot's own schema.
-
-**Two fixes found by the first builds:**
+**0.1.3: the v0 recipe (`meta.yaml`) with conda-build 26.9.1.** Two fixes
+came out of the first builds, and both carried over to the v1 recipe:
 * `cuda_compiler_version.split(".")` broke the linter's rendering; it is
   now `(cuda_compiler_version|string).split(".")`.
 * The CUDA builds failed: the `cuda-nvcc` activation needs `compiler('cxx')`.
   `compiler('cuda')` cannot be dropped instead, because conda-forge enables
   the CUDA variants only when it is present.
 
-**Builds and the recipe's tests.** The tests are `pip check`, `pbsolve
-info`, the installation check and a fast pytest subset: API, readers,
-analytic, prep, MM-PBSA, apolar.
+After the fixes the three variants built and passed their tests, from the
+v0.1.2 tarball and from the v0.1.0 tarball.
+
+**0.1.4: the v1 recipe (`recipe.yaml`) with rattler-build 0.81.0.**
+staged-recipes asks for the v1 format. Its Linux CI runs three builds, and
+each was reproduced locally from the same inputs:
+* the global pinning plus one of `.ci_support/linux64.yaml`,
+  `linux64_cuda129.yaml` and `linux64_cuda130.yaml`;
+* merged by conda-build as `build_all.py` does, then built by rattler-build;
+* source: the v0.1.0 tarball, the version submitted.
+
+`conda-smithy recipe-lint --conda-forge` (the staged-recipes linter) passes,
+and so does the schema check of `conda-forge.yml`. Its bot setting
+`version_updates.sources: [githubreleases]` validates against the bot's own
+schema.
+
+**The recipe's tests:**
+* the import test and `pip check`;
+* `pbsolve info` and the installation check;
+* a fast pytest subset: API, readers, analytic, prep, MM-PBSA, apolar.
+
+Each package carries `LICENSE`, `THIRD_PARTY_NOTICES.md` and `THIRDPARTY.yml`
+(the Rust crates' licenses, 340 KiB) in `info/licenses`.
 
 | Variant | Build string | `pbsolve info` in the test environment | pytest subset |
 |---|---|---|---|
@@ -1782,7 +1797,7 @@ analytic, prep, MM-PBSA, apolar.
 | CUDA 13.4 | `cuda13_py312…_200` | CUDA available, conda NVRTC 13.5 (newer than the 13.2 driver: CUBIN) | 64 passed, 4 skipped |
 
 **One command picks the variant.** `mamba create -c <local> -c conda-forge
-pbsolve python=3.12`:
+pbsolve python=3.12`, with the packages of either recipe:
 
 | Machine | Solver's choice |
 |---|---|
@@ -1790,16 +1805,16 @@ pbsolve python=3.12`:
 | without a driver (`CONDA_OVERRIDE_CUDA=`) | `cpu` variant, no CUDA packages |
 | with the driver, `cuda-version=12` | `cuda12` variant + `cuda-nvrtc` 12.9 |
 
-**Same results everywhere.** In each installed environment, 1YCR at 0.5 Å
-and 0.15 M gives ΔG_polar −1231.4699918383806 kcal/mol on the CPU and
-−1231.469991838372 on CUDA. The development build and the PyPI wheels give
-the same values, bit for bit. `pbsolve test` passes with CUDA vs CPU 0.0.
+**Same results everywhere.** Every installed environment gives the same 1YCR
+energies at 0.5 Å and 0.15 M: three variants, both recipes, 0.1.0 and 0.1.2.
+* ΔG_polar −1231.4699918383806 kcal/mol on the CPU;
+* −1231.469991838372 kcal/mol on CUDA.
 
-**Not covered yet:**
-* the other Python versions and platforms (osx, win, linux-aarch64);
-* the submission to staged-recipes.
+The development build and the PyPI wheels give the same values, bit for bit,
+and `pbsolve test` passes with CUDA vs CPU 0.0.
 
-conda-forge's CI builds all of these.
+**Not covered locally:** the other Python versions and platforms (osx, win,
+linux-aarch64). staged-recipes' CI and then the feedstock build them.
 
 ## Input readers (`pbsolve-io`)
 

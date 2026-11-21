@@ -455,6 +455,9 @@ maintainer and v0.2.0.*
   `conda install` picks the CUDA variant with a driver and the CPU variant
   without, and the energies are bit-identical to the wheels. `conda-forge.yml`
   makes the version bot follow GitHub releases (vX.Y.0) only.
+* *0.1.4:* the recipe moved to the v1 format (`recipe.yaml`, rattler-build),
+  which staged-recipes asks for. Its three Linux builds pass locally from the
+  v0.1.0 tarball, and v0.1.0 is submitted to conda-forge/staged-recipes.
 * Remaining:
   * the first upload (v0.2.0, by the release cadence);
   * GPU runs of the aarch64 and Windows wheels (no such GPU at hand);
