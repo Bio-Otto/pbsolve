@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.3 — 2026-11-22
+
+The conda recipe builds with conda-forge's tooling (ROADMAP R2).
+
 ### Packaging
 
 - The conda recipe builds (checked locally with conda-forge's pinning and
