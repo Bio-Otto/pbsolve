@@ -2,6 +2,10 @@
 
 **Fast Poisson–Boltzmann electrostatics and solvation energies — Rust core, CPU/CUDA backends, Python API.**
 
+**Documentation:** <https://pbsolve.readthedocs.io> (tutorial, user guide, API
+reference, validation). `stable` is the latest release, `latest` the main
+branch, and every release vX.Y.0 keeps its own version.
+
 <!-- docs-intro-start -->
 pbsolve computes electrostatic potentials and polar solvation energies of
 biomolecules from the Poisson–Boltzmann equation, on the CPU or on NVIDIA GPUs,
@@ -61,12 +65,21 @@ solution methods and integrations can be added.
 ## Install
 
 <!-- docs-install-start -->
+pip builds a release from its GitHub tag; this needs Python ≥ 3.10 and a
+Rust toolchain ≥ 1.85 ([rustup](https://rustup.rs)), but no CUDA toolkit:
+
 ```bash
-conda install -c conda-forge pbsolve        # once published; picks CUDA or CPU automatically
-# from source
-pip install .                               # CPU
-maturin develop --release --features cuda-12   # CPU + CUDA (no CUDA toolkit needed to build)
+pip install "pbsolve @ git+https://github.com/Bio-Otto/pbsolve@v0.1.0"      # CPU
+MATURIN_PEP517_ARGS="--features cuda-12" \
+  pip install "pbsolve @ git+https://github.com/Bio-Otto/pbsolve@v0.1.0"    # CPU + CUDA 12 (cuda-13 for CUDA 13)
 ```
+
+The CUDA build loads the driver and NVRTC when it runs and falls back to the
+CPU without them; NVRTC comes from conda (`cuda-nvrtc`) or pip
+(`nvidia-cuda-nvrtc-cu12`, `nvidia-cuda-nvrtc` for 13). On Windows set the
+variable with `set MATURIN_PEP517_ARGS=--features cuda-12` (cmd) or
+`$env:MATURIN_PEP517_ARGS="--features cuda-12"` (PowerShell). Ready-made
+packages on conda-forge and PyPI are planned (`docs/ROADMAP.md`, R2).
 
 Check the installation (like `python -m openmm.testInstallation`):
 

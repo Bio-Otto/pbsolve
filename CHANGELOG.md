@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Documentation
+
+- The documentation site (https://pbsolve.readthedocs.io) uses the Wagtail
+  theme (`sphinx-wagtail-theme` 6.6.0) with the pbsolve logo; the README
+  links it, and every release vX.Y.0 keeps its own version (`stable` is the
+  latest release, `latest` the main branch).
+- Install instructions for a release: `pip install` from its GitHub tag,
+  CPU or CUDA build (`MATURIN_PEP517_ARGS="--features cuda-12"`).
+
 ## 0.0.9 — 2026-11-21
 
 ### Added

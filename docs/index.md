@@ -23,6 +23,11 @@ The [tutorial](tutorial) goes from installation to MM-PBSA and a comparison
 with APBS; the [user guide](guide/index) explains the settings and tools by
 topic.
 
+This site exists for every release: `stable` is the latest release, `latest`
+follows the main branch, and each release vX.Y.0 keeps its own version (the
+version menu of Read the Docs switches between them; the title shows the
+version you are reading).
+
 ```{toctree}
 :maxdepth: 1
 :caption: Using pbsolve

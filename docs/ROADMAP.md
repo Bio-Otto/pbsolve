@@ -418,6 +418,12 @@ https://sphinx-themes.org/sample-sites/sphinx-wagtail-theme/), pinned like
 the other documentation tools; tag the release and archive it with a DOI.
 *Evidence:* the site builds from the tag with `-W`, and every guide example
 runs.
+*Status (v0.1.0):* done except the DOI. The README links the site; a
+release installs with pip from its tag (checked in clean environments, CPU
+and CUDA builds); the site has a version per release (`stable` = the latest
+release); the theme is `sphinx-wagtail-theme` 6.6.0 with the pbsolve logo;
+CI passes on Linux, macOS and Windows. The DOI needs the repository enabled
+on Zenodo before a release is created.
 
 **R2 Packages.** PyPI wheels besides the conda-forge recipe
 (`docs/PACKAGING.md`): Linux x86_64 first, a CPU build and CUDA builds,

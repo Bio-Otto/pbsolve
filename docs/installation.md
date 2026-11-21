@@ -1,8 +1,7 @@
 # Installation
 
-pbsolve is a Python package with a compiled core. A build with the CUDA
-backend loads the NVIDIA driver and NVRTC when it runs, so it needs no CUDA
-toolkit to build and falls back to the CPU on machines without a GPU.
+pbsolve is a Python package with a compiled core (Rust), installed from
+source until the conda-forge and PyPI packages exist.
 
 ```{include} ../README.md
 :start-after: <!-- docs-install-start -->
