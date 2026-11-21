@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.0 — 2026-11-21
+
+The first minor release: everything since 0.0.1, checked by CI on Linux,
+macOS and Windows.
+
 ### Documentation
 
 - The documentation site (https://pbsolve.readthedocs.io) uses the Wagtail
