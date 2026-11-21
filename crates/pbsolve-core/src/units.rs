@@ -27,6 +27,11 @@ pub fn kt_in_kj_per_mol(temperature: f64) -> f64 {
     BOLTZMANN * AVOGADRO * temperature / 1000.0
 }
 
+/// A potential in mV as kT/e at `temperature` (K).
+pub fn millivolts_in_kt_per_e(mv: f64, temperature: f64) -> f64 {
+    mv * 1.0e-3 * ELEMENTARY_CHARGE / (BOLTZMANN * temperature)
+}
+
 /// Modified Debye–Hückel parameter κ̄² = ε_s κ² in Å⁻².
 ///
 /// κ̄² = 4π l_B0 Σ_i n_i z_i², with n_i the number density in Å⁻³
@@ -40,6 +45,13 @@ pub fn kappa_bar_squared(ions: &[IonSpecies], temperature: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_voltage() {
+        // kT/e = 25.6926 mV at 298.15 K, 26.7137 mV at 310 K (CODATA 2018).
+        assert!((millivolts_in_kt_per_e(25.6926, 298.15) - 1.0).abs() < 2e-6);
+        assert!((millivolts_in_kt_per_e(26.7137, 310.0) - 1.0).abs() < 2e-6);
+    }
 
     #[test]
     fn bjerrum_length_at_room_temperature() {

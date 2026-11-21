@@ -332,3 +332,189 @@ def test_cli_membrane_fill(tmp_path, capsys):
     mol = pbsolve.io.load(str(pqr))
     py = pbsolve.Solver(platform="CPU", grid_spacing=0.7, zmem=-6.0, lmem=12.0, membrane_fill=True)
     assert energies[1] == py.polar_solvation(mol.coords, mol.charges, mol.radii).energy != energies[0]
+
+
+def _slab_potential(z, v, kappa, em=2.0, ew=78.54, bottom=-15.0, top=15.0):
+    """Membrane potential across a uniform slab between salt water, the bath below at v (Roux 1997;
+    APBSmem eq. 8): linear in the slab, exponential in the baths, v/2 in the middle."""
+    a = em * v / (2.0 * em + ew * kappa * (top - bottom))
+    if z < bottom:
+        return v - a * math.exp(kappa * (z - bottom))
+    if z > top:
+        return a * math.exp(-kappa * (z - top))
+    return (v - a) + (2.0 * a - v) * (z - bottom) / (top - bottom)
+
+
+def _kt_per_e(mv, temperature=298.15):
+    return mv * 1e-3 / (1.380649e-23 * temperature / 1.602176634e-19)
+
+
+def test_the_membrane_potential_field_matches_the_slab_solution():
+    """A probe charge (radius 0: no cavity) across a uniform slab: E_V = q φ_mp(z). Exact in the
+    middle by symmetry; elsewhere within the placement of the surfaces in a cell (measured ≤ 0.4 %
+    of V at 0.34 Å)."""
+    kw = dict(platform="CPU", ionic_strength=0.15, zmem=-15.0, lmem=30.0, mdie=2.0)
+    kbar2 = pbsolve.Solver(**kw).maps(np.zeros((1, 3)), np.array([1.0]), np.array([0.0]))["kappa_bar_sq"]
+    kappa = math.sqrt(kbar2 / 78.54)
+    s = pbsolve.Solver(membrane_potential=100.0, **kw)
+    v = _kt_per_e(100.0)
+    for z in (-40.0, -16.0, -10.0, 0.0, 7.5, 20.0):
+        grid = pbsolve.GridSpec([0.13, -0.07, 0.0], [129] * 3, [150.0] * 3, [24.0, 24.0, 44.0 + 2 * abs(z)])
+        e = s.polar_solvation(np.array([[0.13, -0.07, z]]), np.array([1.0]), np.array([0.0]), grid=grid)
+        phi = e.membrane_potential_energy / KT
+        assert phi == pytest.approx(_slab_potential(z, v, kappa), abs=(1e-7 if z == 0.0 else 5e-3) * v), z
+
+
+def test_the_membrane_potential_energy_is_linear_and_complete():
+    x, q, r = synthetic_molecule()
+    kw = dict(platform="CPU", grid_spacing=0.6, fadd=10.0, ionic_strength=0.15, zmem=-6.0, lmem=12.0)
+    e = {mv: pbsolve.Solver(membrane_potential=mv, **kw).polar_solvation(x, q, r) for mv in (0.0, 60.0, -60.0, 120.0)}
+    # One more solve per solvated level (the solvated and reference states have as many levels).
+    assert e[0.0].membrane_potential_energy == 0.0 and len(e[60.0].iterations) == 3 * len(e[0.0].iterations) // 2
+    assert e[120.0].membrane_potential_energy == pytest.approx(2.0 * e[60.0].membrane_potential_energy, rel=1e-9)
+    assert e[-60.0].membrane_potential_energy == pytest.approx(-e[60.0].membrane_potential_energy, rel=1e-9)
+    assert e[60.0].energy == pytest.approx(e[0.0].energy + e[60.0].membrane_potential_energy, abs=1e-9)
+    assert e[60.0].atom_energies.sum() == pytest.approx(e[60.0].energy, abs=1e-9)
+    assert e[60.0].membrane_potential_energy != 0.0
+    # An ion deep in the bath below gets q V; one far above nothing.
+    s = pbsolve.Solver(platform="CPU", ionic_strength=0.15, zmem=-15.0, lmem=30.0, membrane_potential=100.0)
+    for z, want in ((-45.0, 1.0), (45.0, 0.0)):
+        grid = pbsolve.GridSpec([0.0, 0.0, z], [97] * 3, [150.0] * 3, [24.0] * 3)
+        res = s.polar_solvation(np.array([[0.0, 0.0, z]]), np.array([1.0]), np.array([1.5]), grid=grid)
+        assert res.membrane_potential_energy / (KT * _kt_per_e(100.0)) == pytest.approx(want, abs=1e-3)
+    # The potential map holds the membrane's field; its energy is ½Σqu + Σqφ_mp.
+    s0, s1 = pbsolve.Solver(**kw), pbsolve.Solver(membrane_potential=60.0, **kw)
+    g = s0.make_grid(x, r)
+    u0, _, _, e0 = s0.potential(x, q, r, grid=g)
+    u1, _, _, e1 = s1.potential(x, q, r, grid=g)
+    assert (e1 - e0) * KT == pytest.approx(e[60.0].membrane_potential_energy, rel=1e-9)
+    assert np.abs(u1 - u0).max() > 1.0
+    _, _, _, r0 = s1.potential(x, q, r, grid=g, reference=True)
+    assert r0 == s0.potential(x, q, r, grid=g, reference=True)[3]  # the reference state has no membrane
+
+
+def test_invalid_membrane_potentials(tmp_path, capsys):
+    for kw, match in (
+        (dict(membrane_potential=50.0, ionic_strength=0.1), "needs a membrane"),
+        (dict(membrane_potential=50.0, zmem=-10.0), "needs ions"),
+        (dict(membrane_potential=50.0, zmem=-10.0, ionic_strength=0.1, equation="npbe"), "lpbe"),
+        (dict(membrane_potential=math.inf, zmem=-10.0, ionic_strength=0.1), "finite"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            pbsolve.Solver(**kw)
+    s = pbsolve.Solver(membrane_potential=-70.0, zmem=-10.0, ionic_strength=0.1)
+    p = dict(s.params)
+    assert p["membrane_potential"] == -70.0
+    p.pop("ionic_strength")
+    assert pbsolve.Solver(**p).params == s.params
+    x, q, r = synthetic_molecule()
+    pqr = tmp_path / "m.pqr"
+    write_pqr(pqr, x, q, r)
+    args = ["solvation", str(pqr), "--platform", "CPU", "--spacing", "0.6", "--json", "--ionic-strength", "0.15",
+            "--zmem", "-6", "--lmem", "12", "--membrane-potential", "-70"]
+    assert cli(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    mol = pbsolve.io.load(str(pqr))
+    py = pbsolve.Solver(platform="CPU", grid_spacing=0.6, ionic_strength=0.15, zmem=-6.0, lmem=12.0, membrane_potential=-70.0)
+    assert out["polar_kcal_mol"] == py.polar_solvation(mol.coords, mol.charges, mol.radii).energy
+
+
+@pytest.mark.skipif("CUDA" not in pbsolve.available_platforms(), reason="no CUDA device")
+@pytest.mark.parametrize("extra", [dict(), dict(period=(30.0, 32.0)), dict(membrane_profile="greene2019", membrane_fill=True)])
+def test_membrane_potential_cuda_matches_cpu(extra):
+    x, q, r = synthetic_molecule()
+    kw = dict(grid_spacing=0.6, fadd=10.0, ionic_strength=0.15, zmem=-6.0, lmem=12.0, membrane_potential=80.0, **extra)
+    cpu = pbsolve.Solver(platform="CPU", **kw).polar_solvation(x, q, r)
+    gpu = pbsolve.Solver(platform="CUDA", **kw).polar_solvation(x, q, r)
+    assert gpu.iterations == cpu.iterations
+    assert gpu.membrane_potential_energy == pytest.approx(cpu.membrane_potential_energy, rel=1e-11, abs=1e-12)
+    assert gpu.energy == pytest.approx(cpu.energy, rel=1e-12)
+
+
+def _switch(z, bottom, thick, w):
+    """GBSW's membrane switch (Im, Feig & Brooks 2003, Eq. 13), written out independently."""
+    u = abs(z - (bottom + thick / 2)) - thick / 2
+    if u <= -w:
+        return 0.0
+    if u >= w:
+        return 1.0
+    return 0.5 + 3 * u / (4 * w) - u**3 / (4 * w**3)
+
+
+def test_the_nonpolar_area_leaves_the_membrane_out():
+    x, q, r = synthetic_molecule()
+    plain = pbsolve.sasa(x, r)
+    # A membrane far away is no membrane, bit for bit.
+    assert np.array_equal(pbsolve.sasa(x, r, zmem=100.0, lmem=20.0), plain)
+    # One sphere across the top surface: dA = 2πR dz (Archimedes), so the area is 2πR ∫ H dz.
+    for z0, w in ((5.5, 0.3), (6.8, 2.5), (4.0, 2.5)):
+        a = pbsolve.sasa(np.array([[0.2, -0.1, z0]]), np.array([1.6]), zmem=-6.0, lmem=12.0, membrane_switch=w)[0]
+        zz = np.linspace(z0 - 3.0, z0 + 3.0, 600_001)
+        exact = 2 * math.pi * 3.0 * np.trapezoid([_switch(z, -6.0, 12.0, w) for z in zz], zz)
+        assert a == pytest.approx(exact, rel=2e-4, abs=1e-6), (z0, w)
+    # The molecule across the membrane: less area, and the energy is γ·area + β.
+    kw = dict(zmem=-6.0, lmem=12.0, membrane_switch=0.3)
+    area = pbsolve.sasa(x, r, **kw)
+    assert 0.0 < area.sum() < 0.8 * plain.sum() and np.all(area <= plain + 1e-12)
+    assert pbsolve.nonpolar_energy(x, r, **kw) == pytest.approx(0.00542 * area.sum() + 0.92, rel=1e-14)
+    assert pbsolve.nonpolar_energy(x, r) == pytest.approx(0.00542 * plain.sum() + 0.92, rel=1e-14)
+    for bad in (dict(zmem=0.0, lmem=0.0), dict(zmem=math.nan), dict(zmem=0.0, membrane_switch=-1.0)):
+        with pytest.raises(ValueError):
+            pbsolve.sasa(x, r, **bad)
+
+
+def test_mmpbsa_nonpolar_terms_in_a_membrane(tmp_path, capsys):
+    x, q, r = synthetic_molecule()
+    lig = np.arange(len(q) - 10, len(q))
+    solver = pbsolve.Solver(platform="CPU", grid_spacing=0.7, ionic_strength=0.15, zmem=-6.0, lmem=12.0)
+    plain = pbsolve.pbsa_solvation_frame(solver, x, q, r, lig)
+    mem = pbsolve.pbsa_solvation_frame(solver, x, q, r, lig, nonpolar_membrane=(-6.0, 12.0), membrane_switch=1.0)
+    for a, b, idx in ((plain.complex, mem.complex, slice(None)), (plain.ligand, mem.ligand, lig)):
+        assert b.polar == a.polar
+        assert b.nonpolar == pytest.approx(pbsolve.nonpolar_energy(x[idx], r[idx], zmem=-6.0, lmem=12.0, membrane_switch=1.0), rel=1e-14)
+        assert b.atom_nonpolar.sum() + 0.92 == pytest.approx(b.nonpolar, rel=1e-14)
+        assert b.nonpolar < a.nonpolar
+    # The command line: --nonpolar-membrane takes the --zmem/--lmem slab; --membrane-potential is reported.
+    pqr = tmp_path / "m.pqr"
+    write_pqr(pqr, x, q, r)
+    mol = pbsolve.io.load(str(pqr))
+    args = ["solvation", str(pqr), "--platform", "CPU", "--spacing", "0.7", "--json", "--ionic-strength", "0.15",
+            "--zmem", "-6", "--lmem", "12"]
+    assert cli(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["nonpolar_kcal_mol"] == pbsolve.nonpolar_energy(mol.coords, mol.radii)
+    assert "membrane_potential_kcal_mol" not in out
+    assert cli(args + ["--nonpolar-membrane", "--membrane-switch", "1.0", "--membrane-potential", "-40"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    want = pbsolve.nonpolar_energy(mol.coords, mol.radii, zmem=-6.0, lmem=12.0, membrane_switch=1.0)
+    assert out["nonpolar_kcal_mol"] == want
+    py = pbsolve.Solver(platform="CPU", grid_spacing=0.7, ionic_strength=0.15, zmem=-6.0, lmem=12.0, membrane_potential=-40.0)
+    res = py.polar_solvation(mol.coords, mol.charges, mol.radii)
+    assert out["membrane_potential_kcal_mol"] == res.membrane_potential_energy != 0.0
+    assert cli(["solvation", str(pqr), "--platform", "CPU", "--nonpolar-membrane"]) == 2
+    assert "--nonpolar-membrane needs a membrane" in capsys.readouterr().err
+    # mmpbsa: two frames of a multi-model PDB.
+    traj = tmp_path / "traj.pdb"
+    with open(traj, "w") as fh:
+        for m, shift in enumerate((0.0, 0.4), 1):
+            fh.write(f"MODEL     {m:4d}\n")
+            for n, (a, b, c) in enumerate(mol.coords + shift):
+                fh.write(f"ATOM  {n + 1:5d}  C   LIG A{mol.resids[n]:4d}    {a:8.3f}{b:8.3f}{c:8.3f}  1.00  0.00           C\n")
+            fh.write("ENDMDL\n")
+    csv = tmp_path / "frames.csv"
+    sel = f"index {len(q) - 10}:{len(q) - 1}"
+    margs = ["mmpbsa", str(pqr), str(traj), "--ligand", sel, "--platform", "CPU", "--spacing", "0.7", "--csv", str(csv),
+             "--ionic-strength", "0.15", "--zmem", "-6", "--lmem", "12", "--nonpolar-membrane", "--membrane-switch", "1.0"]
+    assert cli(margs) == 0
+    capsys.readouterr()
+    import csv as csvmod
+
+    with open(csv) as fh:
+        rows = list(csvmod.DictReader(fh))
+    keep = ~mol.solvent_mask()
+    top = mol.subset(keep)
+    ligand = np.nonzero(top.select(sel))[0]
+    for row, xyz in zip(rows, pbsolve.io.frames(mol.n_atoms, str(traj))):
+        f = pbsolve.pbsa_solvation_frame(solver, np.asarray(xyz)[keep], top.charges, top.radii, ligand,
+                                         nonpolar_membrane=(-6.0, 12.0), membrane_switch=1.0)
+        assert float(row["delta_nonpolar"]) == pytest.approx(f.delta_nonpolar, abs=1e-9)

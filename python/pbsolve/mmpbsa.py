@@ -40,17 +40,35 @@ def nonpolar_energy(
     beta: float = SITKOFF_BETA,
     probe: float = 1.4,
     n_points: int = 960,
+    *,
+    zmem: Optional[float] = None,
+    lmem: float = 40.0,
+    membrane_switch: float = 0.3,
 ) -> float:
-    """Non-polar solvation energy γ·SASA + β in kcal/mol."""
-    area = float(np.sum(sasa(_xyz(coords), _vec(radii), probe=probe, n_points=n_points)))
+    """Non-polar solvation energy γ·SASA + β in kcal/mol.
+
+    With ``zmem`` the area in a membrane from ``zmem`` to ``zmem + lmem``
+    does not count: every exposed point of the surface is weighted by the
+    switch of GBSW (Im, Feig & Brooks 2003), 0 inside the membrane and 1 in
+    the water, smooth over ``membrane_switch`` Å on each side of the
+    surfaces (see :func:`sasa`).
+    """
+    area = float(np.sum(sasa(_xyz(coords), _vec(radii), probe, n_points, zmem, lmem, membrane_switch)))
     return gamma * area + beta
 
 
 def _nonpolar_terms(
-    coords: npt.NDArray[np.float64], radii: npt.NDArray[np.float64], gamma: float, beta: float, probe: float
+    coords: npt.NDArray[np.float64],
+    radii: npt.NDArray[np.float64],
+    gamma: float,
+    beta: float,
+    probe: float,
+    membrane: Optional[tuple[float, float]] = None,
+    membrane_switch: float = 0.3,
 ) -> tuple[float, npt.NDArray[np.float64]]:
     """:func:`nonpolar_energy` (the same value) and γ·SASA of every atom."""
-    area = sasa(coords, radii, probe=probe, n_points=960)
+    zmem, lmem = membrane if membrane is not None else (None, 40.0)
+    area = sasa(coords, radii, probe, 960, zmem, lmem, membrane_switch)
     return gamma * float(np.sum(area)) + beta, gamma * area
 
 
@@ -268,6 +286,8 @@ def pbsa_solvation_frames(
     beta: float = SITKOFF_BETA,
     probe: float = 1.4,
     dielectrics: Optional[npt.ArrayLike] = None,
+    nonpolar_membrane: Optional[tuple[float, float]] = None,
+    membrane_switch: float = 0.3,
 ) -> list[PBSAFrame]:
     """Single-trajectory MM-PBSA solvation terms for several frames.
 
@@ -282,7 +302,11 @@ def pbsa_solvation_frames(
     (:meth:`PBSAFrame.atom_terms`, :meth:`PBSAFrame.residue_terms`).
     ``dielectrics`` gives every complex atom its own interior dielectric
     (see :meth:`Solver.polar_solvation` and :func:`residue_dielectrics`);
-    receptor and ligand keep their atoms' values.
+    receptor and ligand keep their atoms' values. ``nonpolar_membrane=(zmem,
+    lmem)`` leaves the surface buried in a membrane out of the non-polar
+    terms (:func:`nonpolar_energy`; for example the solver's own membrane,
+    ``(solver.params["zmem"], solver.params["lmem"])``), with the switch
+    half-width ``membrane_switch`` (Å).
     """
     q, r = _vec(charges), _vec(radii)
     eps = None if dielectrics is None else _vec(dielectrics)
@@ -313,7 +337,7 @@ def pbsa_solvation_frames(
         for j in range(3):
             x, _, rr = systems[3 * k + j]
             res = polar[3 * k + j]
-            nonpolar, atom_nonpolar = _nonpolar_terms(x, rr, gamma, beta, probe)
+            nonpolar, atom_nonpolar = _nonpolar_terms(x, rr, gamma, beta, probe, nonpolar_membrane, membrane_switch)
             terms.append(
                 SolvationTerms(res.energy, nonpolar, res.atom_energies, atom_nonpolar, reference=res.reference_kt * kt)
             )
@@ -334,15 +358,19 @@ def pbsa_solvation_frame(
     beta: float = SITKOFF_BETA,
     probe: float = 1.4,
     dielectrics: Optional[npt.ArrayLike] = None,
+    nonpolar_membrane: Optional[tuple[float, float]] = None,
+    membrane_switch: float = 0.3,
 ) -> PBSAFrame:
     """Single-trajectory MM-PBSA solvation terms for one frame.
 
     All three PB calculations share one grid (built from the complex unless
     ``grid`` is given), so discretisation errors cancel in the binding
     difference. ``receptor_atoms`` defaults to every atom not in the ligand;
-    ``dielectrics`` as for :func:`pbsa_solvation_frames`.
+    ``dielectrics``, ``nonpolar_membrane`` and ``membrane_switch`` as for
+    :func:`pbsa_solvation_frames`.
     """
     return pbsa_solvation_frames(
         solver, [coords], charges, radii, ligand_atoms, receptor_atoms,
         grid=grid, workers=1, gamma=gamma, beta=beta, probe=probe, dielectrics=dielectrics,
+        nonpolar_membrane=nonpolar_membrane, membrane_switch=membrane_switch,
     )[0]

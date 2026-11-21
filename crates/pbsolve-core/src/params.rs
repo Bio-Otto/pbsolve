@@ -363,6 +363,12 @@ pub struct PbParams {
     /// ([`crate::boundary`]); finer grids focus as usual. The reference
     /// state stays a single molecule. `None`: no periodicity.
     pub period: Option<[f64; 2]>,
+    /// Membrane potential in mV (opt-in; APBSmem `memv`, Roux 1997): the
+    /// bath below the membrane (z < `zmem`) is held at this potential, the
+    /// one above at 0. The solvated state then also gets Σ q_i φ_mp(r_i), the
+    /// charges' energy in the field φ_mp of the polarised membrane, solved
+    /// without them ([`crate::membrane::Membrane::potential_profile`]). 0: none.
+    pub membrane_potential: f64,
 }
 
 impl Default for PbParams {
@@ -390,6 +396,7 @@ impl Default for PbParams {
             atom_pdie: None,
             membrane: None,
             period: None,
+            membrane_potential: 0.0,
         }
     }
 }
@@ -500,6 +507,22 @@ impl PbParams {
             }
             if self.coulomb == CoulombMethod::Analytic {
                 return invalid("a membrane needs coulomb 'grid'");
+            }
+        }
+        if !self.membrane_potential.is_finite() {
+            return invalid("the membrane potential must be finite");
+        }
+        if self.membrane_potential != 0.0 {
+            if self.membrane.is_none() {
+                return invalid("a membrane potential needs a membrane (zmem)");
+            }
+            if self.ionic_strength() <= 0.0 {
+                return invalid("a membrane potential needs ions: the baths hold it through their ionic charge");
+            }
+            if self.equation != Equation::Linear {
+                return invalid(
+                    "a membrane potential needs equation 'lpbe': only the linear field separates from the charges' one",
+                );
             }
         }
         if let Some(p) = self.period {

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added
+
+- A membrane potential: `Solver(membrane_potential=V)` (mV; CLI
+  `--membrane-potential`) holds the bath below an implicit membrane at V
+  against the bath above (Roux 1997, as APBSmem). The field of the
+  polarised membrane is solved without the charges, with the exact
+  one-dimensional solution on the outer faces, and ΔG gains the charges'
+  energy in it, Σ q φ_mp: `PolarResult.membrane_potential_energy`, also
+  part of `energy` and `atom_energies`; `potential()` includes the field.
+  Divided by eV it is the charge the field moves (gating charges). Needs
+  ions and `equation="lpbe"`; works with every membrane option and
+  `period`. Matches the exact uniform slab (V/2 in the middle to 2e-9 V).
+- A non-polar term that knows the membrane: `sasa` and `nonpolar_energy`
+  take `zmem`, `lmem` and `membrane_switch` and weight every exposed point
+  of the surface by the membrane switch of GBSW (Im, Feig & Brooks 2003): 0
+  inside the membrane, 1 in the water, smooth over ±0.3 Å. MM-PBSA takes it
+  with `pbsa_solvation_frame(s)(nonpolar_membrane=(zmem, lmem))` and
+  `pbsolve solvation/mmpbsa --nonpolar-membrane [--membrane-switch W]`.
+  The default term is unchanged.
+- `pbsolve solvation` reports `membrane_potential_kcal_mol` with
+  `--membrane-potential`.
+
 ## 0.0.8 — 2026-11-19
 
 ### Added

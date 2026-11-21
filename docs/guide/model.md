@@ -287,8 +287,9 @@ two need not agree to the last digit.
 The **reference state** has no membrane: ΔG_polar is the transfer of the
 solute from a medium of `pdie` into water with the membrane. With
 `pbsa_solvation_frame` the complex, receptor and ligand all see the same
-membrane on the complex's grid. The non-polar term γ·SASA still counts the
-area buried in the membrane as exposed to water.
+membrane on the complex's grid. The non-polar term γ·SASA counts the area
+buried in the membrane as exposed to water unless it is given the membrane
+too ([non-polar term in a membrane](#non-polar-term-in-a-membrane)).
 
 **Boundaries.** The slab runs into the faces of the box, where the
 boundary condition (`mdh`, `zero`, ...) assumes water around the molecule.
@@ -383,6 +384,82 @@ cell = pbsolve.Solver(ionic_strength=0.15, pdie=4.0, zmem=-20.0, lmem=40.0,
                       membrane_profile="greene2019", membrane_fill=True,
                       period=(92.0, 92.0))
 result = cell.polar_solvation(coords, charges, radii)
+```
+
+### Membrane potential
+
+`membrane_potential=V` (mV; CLI `--membrane-potential`) holds the bath
+below the membrane (z < `zmem`) at V against the bath above. With the
+cytoplasm below, V = V_in − V_out is the usual membrane potential (about
+−70 mV at rest). The model is that of Roux (1997), which APBSmem
+[Callenberg et al. 2010] uses: the ions of the lower bath are in equilibrium
+with a reservoir at V, so the linearized equation becomes
+
+$$
+-\nabla\cdot\big(\varepsilon\,\nabla u\big)
++ \bar\kappa^2\,\big(u - v\,\Theta(\mathbf r)\big)
+= 4\pi\, l_B \sum_i z_i\,\delta(\mathbf r - \mathbf r_i),
+\qquad v = eV/k_BT,
+$$
+
+with Θ = 1 in the lower bath and 0 elsewhere. Water in a pore inside the
+slab belongs to the upper bath, as in APBSmem. The equation is linear, so
+$u = u_q + \varphi_\text{mp}$. Here $u_q$ is the potential of the charges
+without a voltage (the ordinary solvated state), and
+$\varphi_\text{mp}$ is the membrane potential without the charges. It is
+solved on the solvated state's grids with the source $\bar\kappa^2 v\Theta$
+(APBS' `draw_membrane2` charge map). Its outer boundary is the exact
+finite-difference solution of one column of the grid far from the solute:
+v at the bottom face, 0 at the top face, the slab's dielectric and no ions
+inside the slab. Roux writes the free energy as the sum of a capacitive
+energy ½CV², the energy of the charges in $\varphi_\text{mp}$, and the
+voltage-independent reaction-field energy:
+
+$$
+\Delta G(V) = \Delta G_\text{polar}(0) + \sum_i q_i\,\varphi_\text{mp}(\mathbf r_i)
+\;\big[+\,\tfrac12 C V^2\big].
+$$
+
+The middle term has no ½: the charges sit in an external field. pbsolve
+returns it as `result.membrane_potential_energy` and adds it to
+`result.energy` and to the per-atom energies. The capacitive term is left
+out: Roux shows that the changes of the capacitive energy in typical
+molecular processes are negligible under physiological conditions.
+`potential()` returns $u_q + \varphi_\text{mp}$ with the energy
+½Σq u_q + Σq φ_mp; its reference state has no membrane.
+
+**Gating charge.** The term is linear in V. Divided by eV (23.06 kcal/mol
+per volt and elementary charge) it gives the charge the field moves,
+$\sum_i q_i \delta_i$, where $\delta_i = \varphi_\text{mp}(\mathbf r_i)/v$ is the
+fraction of the voltage that drops below atom i. The difference of this
+charge between two conformations is the gating charge (APBSmem's
+"Gating Charge" calculation). One voltage is enough, because the term is
+linear in V.
+
+**Checks.** For a uniform slab the field is known exactly: it decays
+exponentially in the baths and is linear in the slab, with V/2 in the
+middle. pbsolve's field matches it to 2e-9 V in the middle and to 1e-4 V
+in the baths (1e-5 V 25 Å from the membrane). Inside the slab it is off by
+up to 0.5 % of V, because the slab's faces are placed within one cell. An
+ion 30 Å below the membrane gets 0.9998·qV. The energy is linear and
+antisymmetric in V. CPU and CUDA agree to 10 digits, also with `period`
+([validation](../VALIDATION)).
+
+**Limits.** A membrane potential needs a membrane (`zmem`), ions (the
+baths hold the voltage through their ionic charge) and `equation="lpbe"`:
+only the linear equation separates the field of the membrane from that of
+the charges (APBSmem is linear for the same reason). It works with every
+membrane option and with `period`. Like the membrane itself, the field
+assumes laterally uniform baths at the box faces, so use a coarse box of
+about 100 Å or more in x and y, or a period. It costs one more linear
+solve per solvated level: 1.5 times the time of the APBS helix example on
+the CPU, 1.7 times on the GPU.
+
+```{code-block} python
+# The cytoplasm below the membrane at -70 mV against the outside.
+resting = pbsolve.Solver(ionic_strength=0.15, pdie=4.0, zmem=-20.0, lmem=40.0, membrane_potential=-70.0)
+result = resting.polar_solvation(coords, charges, radii)
+charge = result.membrane_potential_energy / (-70e-3 * 23.0605)  # Σ q δ in e
 ```
 
 ## Charges
@@ -516,6 +593,54 @@ print(f"SASA {area.sum():.0f} Å², non-polar term {nonpolar:.2f} kcal/mol")
 
 [Trajectories and MM-PBSA](many.md) combines both terms for complex, receptor and
 ligand.
+
+### Non-polar term in a membrane
+
+The area buried in an [implicit membrane](#implicit-membrane) touches lipid,
+not water, but γ·SASA counts it as exposed. With `zmem` (and `lmem`),
+{py:func}`pbsolve.sasa` and {py:func}`pbsolve.nonpolar_energy` weight every
+exposed point of the surface by the membrane switch of GBSW [Im, Feig &
+Brooks 2003, Eq. 13], with u = |z − z_c| − lmem/2 the point's distance
+outside the nearer membrane surface (z_c its centre):
+
+$$
+H(z) = \begin{cases}
+0 & u \le -w \\
+\tfrac12 + \tfrac{3u}{4w} - \tfrac{u^3}{4w^3} & |u| < w \\
+1 & u \ge w
+\end{cases}
+\qquad
+A = \sum_k a_k\,H(z_k).
+$$
+
+The area inside the membrane then counts zero, so the non-polar attraction
+acts only at the interface ("the surface area becomes zero inside the
+membrane", which assumes uniform protein–lipid non-polar interactions). The
+switch is continuous with its slope. Its half-width w (`membrane_switch`)
+is 0.3 Å by default, the value of Im et al. and CHARMM's default `MSW`;
+CHARMM's membrane examples use 2.5 Å. GBSW applies the switch to the points
+of its own smoothed surface; pbsolve applies it to the points of its SASA,
+and γ and β stay those of the plain term. Because the lattice points are
+evenly spaced in z, the weighted area of a sphere equals 2πR∫H dz (Archimedes)
+to the lattice's resolution. A membrane that does not reach the molecule
+gives the plain area bit for bit.
+
+For MM-PBSA, `pbsa_solvation_frame(s)` take `nonpolar_membrane=(zmem,
+lmem)` (usually the solver's own) and `membrane_switch`, and the command
+line takes `--nonpolar-membrane` with the `--zmem`/`--lmem` slab. The
+default leaves the term unchanged. For the APBS helix in a 40 Å membrane,
+the area exposed to water grows from 13 % of the total, fully inserted, to
+52 % with the helix half out. The non-polar term then rises from 2.5 to
+7.3 kcal/mol, against 13.2 without the membrane.
+
+APBSmem has no non-polar term ("in future releases" [Callenberg et al.
+2010]). The pore of a channel inside the slab counts as membrane, as in
+GBSW. {py:func}`pbsolve.apolar_energy` (surface, volume and dispersion)
+does not know the membrane.
+
+```python
+buried = pbsolve.nonpolar_energy(coords, radii, zmem=-20.0, lmem=40.0)  # kcal/mol
+```
 
 ### Surface, volume and dispersion
 

@@ -58,6 +58,8 @@ should update the status table below.
 | Implicit membrane (0.0.6): `zmem`, `lmem`, `mdie`, `membrane_profile`, `membrane_exclusion`, `membrane_fill` | maps identical to APBS 3.4.1 `examples/helix/draw_membrane2.c` on its helix examples (`mol` and `spl2`, exclusion cone 3.1/5.3 Å and none, surfaces on node planes; 0 mismatches in all four maps); the membrane's effect on the solvated energy agrees with APBS solving those maps to 1.3e-4 (the DX route alone costs ~1e-5, with or without membrane); a charge in a uniform slab and in the Greene profile, with and without salt, against the exact layered solution (images, Hankel transform) within 0.02–0.17 %; PCHIP = SciPy to 1e-13; a membrane outside the grid is bit-identical to none; CPU = CUDA ≤ 3e-15; 25/26 mutations (one equivalent); CUDA 0.11 → 0.15 s on the helix example; see *Implicit membrane* |
 | Periodic lateral boundaries (0.0.7): `period` | periodic operator = the matrix with modular neighbours bit for bit; Galerkin = PᵀAP to 1e-12 with exact symmetry (axes of two unknowns included); z-face Fourier series = real-space image sum to 1e-11; a periodic cell = a plain supercell of copies on the same nodes to 4e-9 (water) and converging geometrically in a membrane; a charge in a slab with its images against the exact lattice sum: +3.4e-4 / −8.3e-5 (P = 30 / 60 Å; the coarse grid must resolve the slab in z, up to 13 % off with 3.1 Å); realistic periods add no placement error (sd 0.02–0.05 kcal/mol as without); APBS helix: automatic plain box 2 % off, periodic and plain agree from 100 Å; CUDA = CPU bit for bit in all kernels (f64, f32), whole calculations ≤ 5.3e-14; 56/56 mutations (Rust, CUDA, Python); default path bit-identical; see *Periodic lateral boundaries* |
 | Uncertainty over frames (0.0.8): `series_statistics`, `pbsolve.timeseries`, `pbsolve mmpbsa` | statistical inefficiency = pymbar 4.0.3 to 6e-16; on AR(1) series with exact answers g is unbiased and the t interval covers 94–98 % from ~20 effective frames (79 % at N_eff ≈ 3); block bootstrap and blocking calibrated alongside (lower coverage, blocking a check); a 5 ns MD of 1YCR: the per-frame total's error 5.3 × SD/√N (τ 67 ps), short prefixes underestimate τ 25×; 24/24 mutations; see *Uncertainty over frames* |
+| Membrane potential (0.0.9): `membrane_potential` | the field of a uniform slab between salt water against the exact solution: 2e-9 V in the middle, ≤ 1e-4 V in the baths, ≤ 0.5 % of V inside the slab (cell placement of its faces; the column solution alone 4e-4 kT/e with the surfaces on nodes); ΔG(V) − ΔG(0) = E_V, linear and antisymmetric in V, atom energies and `potential()` consistent to 1e-9; APBS helix series: apparent charge −0.23 … −0.31 e at 100 mV (protein-free slab estimate −0.26 … −0.35 e); CPU = CUDA to 10 digits (plain, profile + fill, periodic); 1.5× (CPU) / 1.7× (CUDA) the time; 35/35 mutations; default path bit-identical to 0.0.8; see *Membrane potential* |
+| Non-polar term in a membrane (0.0.9): `sasa`/`nonpolar_energy(zmem=)`, `nonpolar_membrane=`, `--nonpolar-membrane` | GBSW's switch (Im et al. 2003, Eq. 13): 0/½/1, symmetric, slope 3/(4w) on the surfaces and 0 at the ends; the weighted area of a sphere across a surface = 2πR∫H dz (Archimedes) to 1e-5 (w = 2.5 Å) and within one point's share (w ≤ 0.3 Å), also against an independent Python switch (2e-4); weight 1 and a distant membrane bit-identical to the plain area, plain SASA and γ·SASA + β bit-identical to 0.0.8; APBS helix in a 40 Å membrane: water-exposed area 13 → 52 % as it leaves the membrane, ΔG_np 2.5 → 7.3 kcal/mol (13.2 without membrane), w = 0.3 vs 2.5 Å ≤ 2 %; same cost; 27/27 mutations; see *Non-polar term in a membrane* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -3601,6 +3603,201 @@ periods (16 × 18 Å supercells) and a test of which levels are periodic for
 the y flag, the seam margin to ±0.1 Å, the larger exclusion radius, the
 memory estimate, and random operators on periodic grids whose seam rows
 decide the Gershgorin bound (assembly and Gershgorin face reads on CUDA).
+
+## Membrane potential (`membrane_potential`)
+
+**Change.** `Solver(membrane_potential=V)` (mV), core
+`PbParams::membrane_potential`, `Membrane::potential_profile`,
+`Membrane::potential_source`, `StateInputs::membrane_potential`. The bath
+below the membrane is held at V against the one above [Roux 1997; as
+APBSmem, Callenberg et al. 2010]. The membrane's field φ_mp is solved
+without the charges on the solvated state's levels and maps, with the
+source κ̄²·V_cell·v/(4π l_B) on the nodes below the slab that have ions
+(the per-node equivalent of `draw_membrane2`'s charge map 0.0012045·I·V).
+The outer faces take the finite-difference solution of one grid column
+(Thomas algorithm: v at the bottom face, 0 at the top, the slab's ε on its
+z faces, no ions on its nodes). ΔG gains E_V = Σ q φ_mp(r_i). The
+capacitive ½CV² is left out: Roux shows that its changes in molecular
+processes are negligible under physiological conditions.
+
+No APBS comparison is possible. APBS 3.4.1 has no membrane potential: its
+helix example sets `memv=0` with the note "THIS WILL NOT WORK FOR YOU",
+and APBSmem is a separate program. The checks are exact solutions and
+identities instead.
+
+**The column.** Its rows hold to 1e-9 (Rust test
+`the_potential_profile_solves_the_column_and_converges_to_the_slab`). Against
+the exact uniform slab (30 Å, ε_m = 2, v = 3.9 kT/e, κ̄² = 1.27 Å⁻²), the
+error is the cell placement of the slab's surfaces:
+
+| Grid | Surfaces relative to the nodes | Max error (kT/e) |
+|---|---|---|
+| 161 nodes, h = 1.0 Å | shifted 0.1 Å | 1.12e-2 |
+| 641 nodes, h = 0.25 Å | shifted 0.1 Å | 1.24e-2 |
+| 641 nodes, h = 0.25 Å | on nodes | 4.1e-4 |
+| 1281 nodes, h = 0.125 Å | shifted 0.03 Å | 3.7e-3 |
+
+The faces put each surface on the nearest node plane, so the error is the
+shift times the slope in the slab (0.127 kT/e per Å here). It does not
+shrink with h for a fixed shift, and it is small when the surfaces fall on
+nodes. The test bounds it by h·|slope|.
+
+**A probe charge across a uniform slab** (radius 0, so no cavity: E_V/q =
+φ_mp; 30 Å slab at −15 … 15 Å, ε_m = 2, 0.15 M, V = 100 mV; 129³ nodes, a
+150 Å coarse box focused on 24 × 24 × (44 + 2|z|) Å):
+
+| z (Å) | φ_mp/V | exact | error/V |
+|---|---|---|---|
+| −40 | 0.999714 | 0.999727 | −1.3e-5 |
+| −20 | 0.996520 | 0.996517 | +2.8e-6 |
+| −16 | 0.994110 | 0.994205 | −9.6e-5 |
+| −10 | 0.827337 | 0.828946 | −1.6e-3 |
+| 0 | 0.500000 | 0.500000 | −1.9e-9 |
+| 7.5 | 0.253901 | 0.253291 | +6.1e-4 |
+| 14 | 0.044012 | 0.039476 | +4.5e-3 |
+| 20 | 0.003480 | 0.003483 | −2.8e-6 |
+| 40 | 0.000286 | 0.000273 | +1.3e-5 |
+
+The middle is exact by symmetry. The errors inside the slab are the cell
+placement of its surfaces on the finest grid (h = 0.56 Å at z = 14).
+`tests/test_membrane.py` checks six of these points, and an ion 30 Å below
+a membrane gets qV to 1e-3 (Rust and Python).
+
+**Identities** (Rust test
+`the_membrane_potential_adds_the_charges_energy_in_its_field` and
+`tests/test_membrane.py`):
+
+* ΔG(V) − ΔG(0) − E_V: 2e-13 kcal/mol.
+* E_V(120 mV) = 2·E_V(60 mV) and E_V(−60 mV) = −E_V(60 mV), to 1e-9
+  relative.
+* The atom energies sum to the total.
+* `potential()`: the potential map gains φ_mp, its energy ½Σq u_q + Σq φ_mp
+  differs from the one without the voltage by E_V to 1e-13, and the
+  reference state is unchanged.
+* The outer faces hold v below and 0 above. Their values in the slab
+  follow the exact slab within 8e-4 V when its surfaces fall on nodes.
+* The refusals: no membrane, no ions, `npbe`, a non-finite V.
+
+**APBS helix series** (`examples/helix`, the polyalanine helix at five
+insertion depths, net charge +1; zmem = −20, lmem = 40, ε_m = 2, pdie = 10,
+sdie = 80, 0.1 M, 97³ nodes from 300 to 100 Å; V = 100 mV). Roux (1997)
+used a helix like this one to illustrate the voltage-dependent insertion:
+
+| Helix | centre z (Å) | ΔG_polar(0) | E_V | Σqδ (e) | protein-free estimate (e) |
+|---|---|---|---|---|---|
+| 0 | 4.6 | 14.757 | −0.5286 | −0.229 | −0.264 |
+| 4 | 8.6 | 14.648 | −0.5767 | −0.250 | −0.290 |
+| 8 | 12.6 | 12.704 | −0.6418 | −0.278 | −0.326 |
+| 12 | 16.6 | 3.844 | −0.7067 | −0.306 | −0.354 |
+| 16 | 20.6 | −1.664 | −0.6422 | −0.279 | −0.342 |
+
+Energies are in kcal/mol. Σqδ = E_V/(eV) is the charge the field moves.
+The protein-free estimate puts every atom's charge into the field of the
+uniform slab without the helix: the same sign and trend. The helix's
+interior (ε = 10 in a slab of 2) draws the field into itself and
+reduces |Σqδ| by 13–18 %.
+
+**Platforms and cost.** CPU and CUDA give the same E_V to 10 digits on the
+helix (−0.5286265138 kcal/mol), and agree to 1e-11 relative in the
+tests: plain box, Greene profile with `membrane_fill`, and `period`. The
+helix takes 0.665 → 1.017 s on the CPU (1.53×) and 0.109 → 0.182 s on CUDA
+(1.68×): the field adds one solve per solvated level (iterations [10, 12,
+8, 8] → [10, 12, 9, 11, 8, 8]). Without a voltage everything is
+bit-identical to 0.0.8: 26 fingerprints of energies, maps, potentials,
+batches and forces, including a membrane and a periodic case, on CPU and
+CUDA.
+
+**Mutations.** 35 of 35 seeded faults caught:
+
+* Rust (31):
+  * the column's slab dielectric, ions, boundary value, diagonal, source,
+    first-row coupling and the three Thomas recurrences;
+  * the source's region, 4π, cell volume and z index;
+  * the four refusals;
+  * the mV conversion and its temperature;
+  * the source switch and the face index;
+  * the column's bath dielectric, the potential flag, the factor 2 of the
+    energy and of the atoms, the total, the atoms' kcal, the reported kcal,
+    the potential map's energy and sum, and the extra solve statistics.
+* Python and bindings (4): the CLI pass-through, the kwarg, the result
+  attribute and the params entry.
+
+Two needed stronger tests first:
+
+* A slab from the second node on. There the first row couples the bottom
+  boundary through the water face; elsewhere both faces are water.
+* The side faces in the slab against the exact slab. The mid-plane value
+  V/2 does not depend on the bath dielectric, by symmetry.
+
+## Non-polar term in a membrane
+
+**Change.** `sasa(zmem=, lmem=, membrane_switch=)` and
+`nonpolar_energy(...)`, `pbsa_solvation_frame(s)(nonpolar_membrane=(zmem,
+lmem), membrane_switch=)`, `--nonpolar-membrane`/`--membrane-switch`; core
+`sasa::sasa_weighted`, `membrane::surface_switch`. Every exposed point of
+the Shrake–Rupley surface counts with the weight H(z) of GBSW's membrane
+switch [Im, Feig & Brooks 2003, Eq. 13]. With u = |z − z_c| − L/2 and
+s = u/w, H is 0 for u ≤ −w, 1 for u ≥ w and ½ + ¾s − ¼s³ between. The
+default w = 0.3 Å is the paper's value (it sets w_m = w = 0.3 Å) and the
+default of CHARMM's `MSW`; CHARMM's membrane examples use `msw 2.5`. The
+paper writes that "the surface area becomes zero inside the membrane", so
+the non-polar attraction acts only at the interface. GBSW integrates the
+switch over its smoothed molecular surface; pbsolve applies it to the
+points of its SASA.
+
+**Checks** (Rust `the_membrane_switch_is_smooth_and_symmetric`,
+`the_weighted_area_integrates_the_switch_over_the_sphere`; Python
+`test_the_nonpolar_area_leaves_the_membrane_out`,
+`test_mmpbsa_nonpolar_terms_in_a_membrane`):
+
+* The switch is 0 in the core, ½ on the surfaces and 1 in the water. It
+  is symmetric, H(u) + H(−u) = 1, and the same on both surfaces. Its slope
+  is 3/(4w) on the surfaces and 0 at both ends; w = 0 gives a step.
+* The lattice's points are evenly spaced in z (golden spiral), and a
+  sphere's area element is 2πR dz (Archimedes). So the weighted area of one
+  sphere across a surface is the midpoint rule of 2πR∫H dz:
+  * w = 2.5 Å: equal to 1e-5 relative;
+  * w = 0.3 Å and the step: within the share of one point.
+  * The Python test checks the same through the bindings against an
+    independent switch and a trapezoidal integral (2e-4).
+* Weight 1 equals the plain area bit for bit: a float sum of 1.0 is the old
+  integer count. A membrane that does not reach the molecule leaves every
+  atom's area bit-identical. Plain SASA and γ·SASA + β of 1YCR and of the
+  APBS helix are bit-identical to 0.0.8.
+* A molecule across the membrane loses area, and no atom gains any. MM-PBSA
+  terms equal `nonpolar_energy` with the membrane for complex and ligand,
+  and their atoms sum to the total minus β. The polar terms are unchanged.
+  `pbsolve solvation` and `mmpbsa` with `--nonpolar-membrane` equal the API.
+  Without `--zmem` the option is refused, and so are a non-positive `lmem`,
+  a NaN `zmem` and a negative width.
+
+**APBS helix in a 40 Å membrane** (`examples/helix`, zmem = −20 Å; areas
+in Å², ΔG_np = γ·A + β with Sitkoff's constants, kcal/mol; the plain SASA
+is 2267.5 Å², ΔG_np 13.210):
+
+| Helix | centre z (Å) | A in water, w = 0.3 Å | fraction | w = 2.5 Å | ΔG_np |
+|---|---|---|---|---|---|
+| 0 | 4.6 | 288.2 | 0.127 | 293.9 | 2.482 |
+| 4 | 8.6 | 447.8 | 0.197 | 448.6 | 3.347 |
+| 8 | 12.6 | 660.7 | 0.291 | 660.9 | 4.501 |
+| 12 | 16.6 | 911.4 | 0.402 | 909.9 | 5.860 |
+| 16 | 20.6 | 1180.6 | 0.521 | 1178.1 | 7.319 |
+
+With the membrane, insertion lowers the non-polar term by 4.8 kcal/mol
+between the half-out and the fully inserted helix. Without it the term does
+not change at all. The width barely matters for a single structure (≤ 2 %).
+The cost is that of the plain area (1YCR: 6 ms).
+
+**Mutations.** 27 of 27 seeded faults caught:
+
+* the switch (8): the absolute value, the half thickness, the centre, both
+  ends, the cubic's two coefficients and the scaling by w;
+* the weighted area (3): the coordinate, the weight and the plain area's
+  weight;
+* the bindings (5): the three refusals, the width and the thickness;
+* Python (5): `nonpolar_energy`'s and MM-PBSA's membrane and width;
+* the command line (6): the option, its refusal, `--lmem`, the width in
+  both commands and the `membrane_potential_kcal_mol` key.
 
 ## Uncertainty over frames (`series_statistics`, `pbsolve mmpbsa`)
 

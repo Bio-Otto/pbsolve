@@ -105,8 +105,8 @@ class PolarResult:
 
     The per-solve lists (:attr:`iterations`, :attr:`residuals`,
     :attr:`preconditioners`, :attr:`levels`) hold the solvated state's levels
-    (coarse first), then the reference state's; with ``coulomb="analytic"``
-    there is no reference solve.
+    (coarse first), with a membrane potential then those of its field, then
+    the reference state's; with ``coulomb="analytic"`` there is no reference solve.
     """
 
     energy: float
@@ -139,6 +139,10 @@ class PolarResult:
     the reaction field at the atom (the energy's charge weights); they
     sum to :attr:`energy`. ``None`` for ``equation="npbe"`` and
     ``"smpbe"`` with ions, whose energy is not a sum over the charges."""
+    membrane_potential_energy: float
+    """The charges' energy in the field of the membrane potential, Σ q_i
+    φ_mp(r_i) in kcal/mol, included in :attr:`energy` (0 without a
+    ``membrane_potential``)."""
 
 class PolarForces:
     """Polar solvation free energy and the forces on the atoms (:meth:`Solver.polar_forces`).
@@ -298,6 +302,14 @@ class Solver:
     membrane_fill : bool
         Leave the water and ions in every part of a membrane plane that is not
         connected to the sides of the box, such as a pore the solute encloses.
+    membrane_potential : float
+        Membrane potential in mV (APBSmem ``memv``; not in APBS itself): the
+        bath below the membrane (z < ``zmem``) is held at this potential, the
+        bath above at 0, so for a cytoplasm below it is the resting potential
+        V_in − V_out. The solvated state then also counts Σ q_i φ_mp(r_i), the
+        charges' energy in the field of the polarised membrane, which is solved
+        without them (Roux 1997); the capacitive energy ½CV² is left out. Needs
+        a membrane, ions and ``equation="lpbe"``. Default 0: none.
     period : (float, float), optional
         Lateral period in Å along x and y (not in APBS): the solvated state
         becomes a periodic array of the solute, as in a membrane simulation box.
@@ -358,6 +370,7 @@ class Solver:
         membrane_profile: Optional[str | Sequence[tuple[float, float]]] = None,
         membrane_exclusion: tuple[float, float] = (0.0, 0.0),
         membrane_fill: bool = False,
+        membrane_potential: float = 0.0,
         period: Optional[tuple[float, float]] = None,
     ) -> None: ...
     @property
@@ -717,7 +730,13 @@ def cuda_info() -> dict[str, object]:
     """
 
 def sasa(
-    coords: npt.ArrayLike, radii: npt.ArrayLike, probe: float = 1.4, n_points: int = 960
+    coords: npt.ArrayLike,
+    radii: npt.ArrayLike,
+    probe: float = 1.4,
+    n_points: int = 960,
+    zmem: Optional[float] = None,
+    lmem: float = 40.0,
+    membrane_switch: float = 0.3,
 ) -> npt.NDArray[np.float64]:
     """Solvent-accessible surface area of each atom (Shrake–Rupley).
 
@@ -731,11 +750,27 @@ def sasa(
         Solvent probe radius in Å.
     n_points : int
         Test points per atom sphere.
+    zmem : float, optional
+        z of the lower surface of a membrane (Å). Each exposed point's share
+        of the area is then weighted by the switch of GBSW (Im, Feig & Brooks
+        2003): 0 inside the membrane farther than ``membrane_switch`` from its
+        surfaces, 1 in the water beyond that, a smooth cubic between. None: no
+        membrane.
+    lmem : float
+        Membrane thickness in Å.
+    membrane_switch : float
+        Half-width w of the switch in Å (0: a step at the surfaces). 0.3 is the
+        value of Im et al. and CHARMM's default; CHARMM's membrane examples use 2.5.
 
     Returns
     -------
     numpy.ndarray, shape (N,)
         Area of each atom in Å².
+
+    Raises
+    ------
+    ValueError
+        If ``lmem`` is not positive or ``membrane_switch`` is negative.
     """
 
 def _apolar_terms(

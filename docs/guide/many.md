@@ -96,8 +96,10 @@ of Greene et al. 2019). Complex, receptor and ligand then all sit in the same
 membrane on the complex's grid. Align the protein with z and centre it, as
 the membrane is a slab normal to z, and pass the frames in that frame of
 reference. `membrane_fill=True` keeps the water in a channel the protein
-encloses. The non-polar term γ·SASA still counts the area buried in the
-membrane as water-exposed.
+encloses. By default the non-polar term γ·SASA counts the area buried in
+the membrane as water-exposed; `nonpolar_membrane=(zmem, lmem)` (command
+line `--nonpolar-membrane`) leaves it out ([non-polar term in a
+membrane](model.md#non-polar-term-in-a-membrane)).
 
 The automatic grid is too narrow in x and y for a membrane: the slab ends
 at its faces (2 % of ΔG_polar for the APBS helix example). Either pass a
@@ -113,8 +115,20 @@ same for every frame.
 solver = pbsolve.Solver(ionic_strength=0.15, pdie=2.0, zmem=-20.0, lmem=40.0,
                         membrane_profile="greene2019", membrane_fill=True,
                         period=(92.0, 92.0))
-terms = pbsolve.pbsa_solvation_frame(solver, frame, charges, radii, ligand)
+terms = pbsolve.pbsa_solvation_frame(solver, frame, charges, radii, ligand, nonpolar_membrane=(-20.0, 40.0))
 ```
+
+With `membrane_potential=V` every polar term also holds the charges' energy
+E_V in the field across the membrane ([membrane
+potential](model.md#membrane-potential)). In the single-trajectory scheme the
+ligand stays at its bound position in all three calculations, so this part
+of ΔΔG only measures how the partners reshape each other's field. A charged
+ligand that binds from one of the baths also crosses part of the voltage:
+its voltage-dependent binding energy is E_V(complex) − E_V(receptor) −
+q_lig·V_bath (V_bath = V for the bath below the membrane, 0 for the one
+above; q·V in kcal/mol is 0.0230605·q·V with V in mV), which differs from
+the single-trajectory value by E_V(ligand at the site) − q_lig·V_bath. The
+term is linear in V, so one voltage gives it for all.
 
 ### Residue-specific interior dielectrics
 

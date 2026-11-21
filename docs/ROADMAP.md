@@ -510,7 +510,8 @@ or residue-dependent interior dielectric as an option, not a default.
 which correlates better with experiment than a uniform slab [Greene et al.
 2019], and periodic lateral boundaries to avoid edge effects. Benchmarks in
 [Wang et al. 2022] show that membrane dielectric parameters must be tuned per system.
-*Status: membrane maps (0.0.6) and periodic lateral boundaries (0.0.7) done.*
+*Status: done. Membrane maps (0.0.6), periodic lateral boundaries (0.0.7),
+the membrane potential and a membrane-aware non-polar term (0.0.9).*
 * `zmem`, `lmem`, `mdie`: the slab of APBS' `draw_membrane2` [Callenberg et
   al. 2010] (non-solute faces get the membrane's ε, nodes lose their ions,
   optional exclusion cone `membrane_exclusion`); the maps are identical to
@@ -529,8 +530,21 @@ which correlates better with experiment than a uniform slab [Greene et al.
   is unchanged. A periodic cell equals the limit of explicit supercells
   (4e-9 in water) and the exact lattice sum of a charge in a slab (3e-4);
   the automatic plain box was 2 % off for the APBS helix (edge effect).
-* Remaining: a membrane potential (APBSmem's `memv`), non-polar terms that
-  know the membrane.
+* `membrane_potential=V` (mV): the bath below the membrane at V [Roux
+  1997], as APBSmem's `memv`: u = u_q + φ_mp, φ_mp solved without the
+  charges with the source κ̄²vΘ (lower bath) and the exact column solution
+  on the outer faces; ΔG gains Σ q_i φ_mp(r_i) (the capacitive ½CV² is left
+  out, negligible after Roux). Linear equation only. The field matches the
+  exact uniform slab (V/2 in the middle to 2e-9 V, baths 1e-4 V, interior
+  0.5 % from the cell placement of the faces); CPU = CUDA, also periodic.
+* `sasa`/`nonpolar_energy(zmem=, lmem=, membrane_switch=)`,
+  `pbsa_solvation_frame(s)(nonpolar_membrane=)`, `--nonpolar-membrane`:
+  the SASA points weighted by GBSW's membrane switch [Im, Feig & Brooks
+  2003] (0 in the slab, 1 in water, cubic over ±w, w = 0.3 Å), so the area
+  buried in the membrane no longer counts. The weighted area of a sphere
+  equals 2πR∫H dz; a membrane away from the molecule is bit-identical to
+  none. Depth-dependent surface tensions (HDGB) and membrane-aware
+  volume/dispersion terms are not implemented.
 
 **4.18 Uncertainty and convergence over frames.** Block averaging, bootstrap
 confidence intervals and correlation-time estimates in `pbsolve mmpbsa`, so a
@@ -721,6 +735,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Holst M, Saied F. Multigrid solution of the Poisson–Boltzmann equation. J. Comput. Chem. 14, 105 (1993).
 * Holst MJ, Saied F. Numerical solution of the nonlinear Poisson–Boltzmann equation: developing more robust and efficient methods. J. Comput. Chem. 16, 337 (1995).
 * Huang et al. Neural network Poisson–Boltzmann electrostatics for biomolecular interactions. J. Comput. Phys. (2025); preprint HKU IMR2025-01.
+* Im W, Feig M, Brooks CL III. An implicit membrane generalized Born theory for the study of structure, stability, and interactions of membrane proteins. Biophys. J. 85, 2900 (2003).
 * Im W, Beglov D, Roux B. Continuum solvation model: computation of electrostatic forces from numerical solutions to the Poisson–Boltzmann equation. Comput. Phys. Commun. 111, 59 (1998).
 * Jha A, Nottoli M, Mikhalev A, Quan C, Stamm B. Linear scaling computation of forces for the domain-decomposition linear Poisson–Boltzmann method. J. Chem. Phys. 158, 104105 (2023).
 * Ji N, Liu T, Xu J, Shen LQ, Lu B. A finite element solution of lateral periodic Poisson–Boltzmann model for membrane channel proteins. Int. J. Mol. Sci. 19, 695 (2018).
@@ -745,6 +760,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
 * Reis PBPS, Vila-Viçosa D, Rocchia W, Machuqueiro M. PypKa: a flexible Python module for Poisson–Boltzmann-based pKa calculations. J. Chem. Inf. Model. 60, 4442 (2020).
 * Rocchia W, Alexov E, Honig B. Extending the applicability of the nonlinear Poisson–Boltzmann equation: multiple dielectric constants and multivalent ions. J. Phys. Chem. B 105, 6507 (2001).
+* Roux B. Influence of the membrane potential on the free energy of an intrinsic protein. Biophys. J. 73, 2980 (1997).
 * Schnieders MJ, Baker NA, Ren P, Ponder JW. Polarizable atomic multipole solutes in a Poisson–Boltzmann continuum. J. Chem. Phys. 126, 124114 (2007).
 * Sharp KA, Honig B. Calculating total electrostatic energies with the nonlinear Poisson–Boltzmann equation. J. Phys. Chem. 94, 7684 (1990).
 * Silalahi ARJ, Boschitsch AH, Harris RC, Fenley MO. Comparing the predictions of the nonlinear Poisson–Boltzmann equation and the ion size-modified Poisson–Boltzmann equation for a low-dielectric charged spherical cavity in an aqueous salt solution. J. Chem. Theory Comput. 6, 3631 (2010).

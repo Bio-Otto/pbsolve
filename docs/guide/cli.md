@@ -62,6 +62,7 @@ Commands that solve take these options; they are the
 | `--membrane-profile` | none | depth-dependent membrane dielectric: `greene2019` or `DEPTH:EPS,DEPTH:EPS,...` (depth below the nearer surface in Å from 0, PCHIP) |
 | `--membrane-exclusion` | 0 0 | radii (Å) at the bottom and the top of a cone around the grid's vertical axis left without membrane (channel pores) |
 | `--membrane-fill` | off | keep water and ions where a membrane plane is not connected to the sides of the box (pores the solute encloses) |
+| `--membrane-potential` | 0 | membrane potential (mV) of the bath below the membrane against the one above; the charges also get their energy in its field (see [the model](model.md#membrane-potential)); needs ions |
 | `--period` | none | lateral period `LX LY` (Å): the solvated state is a periodic array of the solute in x and y, as in a membrane simulation box; needs ions (see [the model](model.md#periodic-lateral-boundaries)) |
 
 ## `pbsolve info`
@@ -87,7 +88,9 @@ pbsolve solvation INPUT [options]
 ```
 
 Prints ΔG_polar, the non-polar term (γ·SASA + β, Sitkoff constants), the
-grid and the solver statistics. Takes the [input options](#input-options)
+grid and the solver statistics (with `--membrane-potential` also the
+charges' energy in its field, `membrane_potential_kcal_mol`, part of
+ΔG_polar). Takes the [input options](#input-options)
 and the [solver options](#solver-options), and:
 
 | Option | Meaning |
@@ -97,6 +100,8 @@ and the [solver options](#solver-options), and:
 | `--placements` | also solve on this many grid placements (at least 2) and report the mean, sd and sem of ΔG_polar ([error estimates](solver.md#error-estimates)) |
 | `--extrapolate` | with `--placements`: repeat at this finer spacing and extrapolate the mean to zero spacing |
 | `--residue-dielectric` | two values, CHARGED and NEUTRAL: the interior dielectric of the atoms of charged residues (net charge at least 0.5 e) and of all other atoms, in place of `--pdie`, which then applies outside the surface in the reference state ([interior dielectric per atom](model.md#interior-dielectric-per-atom)) |
+| `--nonpolar-membrane` | leave the surface buried in the `--zmem`/`--lmem` membrane out of the non-polar term: each exposed point of the SASA is weighted by the GBSW switch, 0 inside the membrane, 1 in the water ([non-polar term in a membrane](model.md#non-polar-term-in-a-membrane)) |
+| `--membrane-switch` | half-width (Å) of that switch at the membrane surfaces (default 0.3; 0: a step) |
 | `--json` | print the results as JSON |
 
 ```bash
@@ -147,6 +152,8 @@ and the frames needed for `--target-sem`. Takes the
 | `--target-sem` | the summary tells how many frames give this standard error (kcal/mol, default 0.5) at the measured correlation ([how many frames](many.md#how-many-frames)) |
 | `--workers` | calculations solved at once (default 2 on the CPU, 3 on CUDA, fewer if the GPU memory is short); results do not depend on it |
 | `--residue-dielectric` | two values, CHARGED and NEUTRAL: the interior dielectric of the atoms of charged residues (net charge at least 0.5 e) and of all other atoms, in place of `--pdie`, which then applies outside the surface in the reference state ([interior dielectric per atom](model.md#interior-dielectric-per-atom)); the summary then also gives `delta_reference`, the receptor–ligand interaction that replaces the force field's Coulomb term (always a column of `--csv`) |
+| `--nonpolar-membrane` | leave the surface buried in the `--zmem`/`--lmem` membrane out of the non-polar term: each exposed point of the SASA is weighted by the GBSW switch, 0 inside the membrane, 1 in the water ([non-polar term in a membrane](model.md#non-polar-term-in-a-membrane)) |
+| `--membrane-switch` | half-width (Å) of that switch at the membrane surfaces (default 0.3; 0: a step) |
 
 ## `pbsolve prep`
 

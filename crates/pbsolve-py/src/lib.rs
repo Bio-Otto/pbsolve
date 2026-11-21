@@ -392,8 +392,8 @@ impl PyGridSpec {
 ///
 /// The per-solve lists (:attr:`iterations`, :attr:`residuals`,
 /// :attr:`preconditioners`, :attr:`levels`) hold the solvated state's levels
-/// (coarse first), then the reference state's; with ``coulomb="analytic"``
-/// there is no reference solve.
+/// (coarse first), with a membrane potential then those of its field, then
+/// the reference state's; with ``coulomb="analytic"`` there is no reference solve.
 #[pyclass(name = "PolarResult", module = "pbsolve", frozen, get_all)]
 struct PyPolarResult {
     /// Polar solvation free energy ΔG_polar in kcal/mol.
@@ -426,6 +426,10 @@ struct PyPolarResult {
     /// sum to :attr:`energy`. ``None`` for ``equation="npbe"`` and
     /// ``"smpbe"`` with ions, whose energy is not a sum over the charges.
     atom_energies: Option<Py<PyArray1<f64>>>,
+    /// The charges' energy in the field of the membrane potential, Σ q_i
+    /// φ_mp(r_i) in kcal/mol, included in :attr:`energy` (0 without a
+    /// ``membrane_potential``).
+    membrane_potential_energy: f64,
 }
 
 #[pymethods]
@@ -468,6 +472,7 @@ impl PyPolarResult {
             timings: timings_map(&r.timings),
             grid: PyGridSpec { inner: r.grid },
             platform: platform.to_string(),
+            membrane_potential_energy: r.membrane_potential_kcal,
         }
     }
 }
@@ -638,6 +643,14 @@ impl PyPolarForces {
 /// membrane_fill : bool
 ///     Leave the water and ions in every part of a membrane plane that is not
 ///     connected to the sides of the box, such as a pore the solute encloses.
+/// membrane_potential : float
+///     Membrane potential in mV (APBSmem ``memv``; not in APBS itself): the
+///     bath below the membrane (z < ``zmem``) is held at this potential, the
+///     bath above at 0, so for a cytoplasm below it is the resting potential
+///     V_in − V_out. The solvated state then also counts Σ q_i φ_mp(r_i), the
+///     charges' energy in the field of the polarised membrane, which is solved
+///     without them (Roux 1997); the capacitive energy ½CV² is left out. Needs
+///     a membrane, ions and ``equation="lpbe"``. Default 0: none.
 /// period : (float, float), optional
 ///     Lateral period in Å along x and y (not in APBS): the solvated state
 ///     becomes a periodic array of the solute, as in a membrane simulation box.
@@ -838,7 +851,7 @@ impl PySolver {
         preconditioner = "multigrid-f32", chgm = "spl0", interface = "sharp", coulomb = "grid",
         equation = "lpbe", ion_size = 0.0, swin = 0.3, gauss_sigma = 0.93,
         gauss_contour = 20.0, zmem = None, lmem = 40.0, mdie = 2.0, membrane_profile = None,
-        membrane_exclusion = (0.0, 0.0), membrane_fill = false, period = None
+        membrane_exclusion = (0.0, 0.0), membrane_fill = false, membrane_potential = 0.0, period = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -875,6 +888,7 @@ impl PySolver {
         membrane_profile: Option<Bound<'_, PyAny>>,
         membrane_exclusion: (f64, f64),
         membrane_fill: bool,
+        membrane_potential: f64,
         period: Option<(f64, f64)>,
     ) -> PyResult<Self> {
         let profile: Option<std::sync::Arc<[[f64; 2]]>> = match membrane_profile {
@@ -922,6 +936,7 @@ impl PySolver {
                 fill: membrane_fill,
             }),
             period: period.map(|(x, y)| [x, y]),
+            membrane_potential,
             ..PbParams::default()
         };
         params = match ions {
@@ -997,6 +1012,7 @@ impl PySolver {
             m.map_or((0.0, 0.0), |m| (m.exclusion[0], m.exclusion[1])),
         )?;
         d.set_item("membrane_fill", m.is_some_and(|m| m.fill))?;
+        d.set_item("membrane_potential", p.membrane_potential)?;
         d.set_item("period", p.period.map(|[x, y]| (x, y)))?;
         Ok(d)
     }
@@ -1570,25 +1586,61 @@ impl PySolver {
 ///     Solvent probe radius in Å.
 /// n_points : int
 ///     Test points per atom sphere.
+/// zmem : float, optional
+///     z of the lower surface of a membrane (Å). Each exposed point's share
+///     of the area is then weighted by the switch of GBSW (Im, Feig & Brooks
+///     2003): 0 inside the membrane farther than ``membrane_switch`` from its
+///     surfaces, 1 in the water beyond that, a smooth cubic between. None: no
+///     membrane.
+/// lmem : float
+///     Membrane thickness in Å.
+/// membrane_switch : float
+///     Half-width w of the switch in Å (0: a step at the surfaces). 0.3 is the
+///     value of Im et al. and CHARMM's default; CHARMM's membrane examples use 2.5.
 ///
 /// Returns
 /// -------
 /// numpy.ndarray, shape (N,)
 ///     Area of each atom in Å².
+///
+/// Raises
+/// ------
+/// ValueError
+///     If ``lmem`` is not positive or ``membrane_switch`` is negative.
 #[pyfunction]
-#[pyo3(signature = (coords, radii, probe = 1.4, n_points = 960))]
+#[pyo3(signature = (coords, radii, probe = 1.4, n_points = 960, zmem = None, lmem = 40.0, membrane_switch = 0.3))]
+#[allow(clippy::too_many_arguments)]
 fn sasa<'py>(
     py: Python<'py>,
     coords: PyReadonlyArray2<'py, f64>,
     radii: PyReadonlyArray1<'py, f64>,
     probe: f64,
     n_points: usize,
+    zmem: Option<f64>,
+    lmem: f64,
+    membrane_switch: f64,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     let xyz = coords_from(coords.as_array())?;
     let r = radii.as_array().to_vec();
     let q = vec![0.0; r.len()];
     let atoms = atoms_from_arrays(&xyz, &q, &r).map_err(to_py)?;
-    let out = py.detach(|| pbsolve_core::sasa::sasa(&atoms, probe, n_points));
+    let out = match zmem {
+        None => py.detach(|| pbsolve_core::sasa::sasa(&atoms, probe, n_points)),
+        Some(z) => {
+            if !z.is_finite() || !lmem.is_finite() || lmem <= 0.0 {
+                return Err(PyValueError::new_err(
+                    "the membrane needs a finite zmem and a positive lmem",
+                ));
+            }
+            if !membrane_switch.is_finite() || membrane_switch < 0.0 {
+                return Err(PyValueError::new_err(
+                    "membrane_switch must be a non-negative width (Å)",
+                ));
+            }
+            let weight = |zp: f64| pbsolve_core::membrane::surface_switch(zp, z, lmem, membrane_switch);
+            py.detach(|| pbsolve_core::sasa::sasa_weighted(&atoms, probe, n_points, weight))
+        }
+    };
     Ok(PyArray1::from_vec(py, out))
 }
 

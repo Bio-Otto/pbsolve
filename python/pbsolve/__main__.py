@@ -132,6 +132,14 @@ def _add_solver(p: argparse.ArgumentParser) -> None:
         help="keep water and ions where a membrane plane is not connected to the sides of the box (pores)",
     )
     p.add_argument(
+        "--membrane-potential",
+        type=float,
+        default=0.0,
+        metavar="MV",
+        help="membrane potential in mV: the bath below the membrane (z < --zmem) against the one above; the charges "
+        "also get their energy in its field (Roux 1997, APBSmem memv); needs ions",
+    )
+    p.add_argument(
         "--period",
         nargs=2,
         type=float,
@@ -181,6 +189,7 @@ def _solver(args: argparse.Namespace, dime_policy: Optional[str] = None) -> Solv
         membrane_profile=_membrane_profile(args.membrane_profile),
         membrane_exclusion=tuple(args.membrane_exclusion),
         membrane_fill=args.membrane_fill,
+        membrane_potential=args.membrane_potential,
         period=tuple(args.period) if args.period else None,
     )
 
@@ -233,6 +242,30 @@ def _add_dielectrics(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_nonpolar_membrane(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--nonpolar-membrane",
+        action="store_true",
+        help="leave the surface buried in the --zmem/--lmem membrane out of the non-polar term (GBSW switch, "
+        "Im, Feig & Brooks 2003)",
+    )
+    p.add_argument(
+        "--membrane-switch",
+        type=float,
+        default=0.3,
+        metavar="W",
+        help="half-width (Å) of that switch at the membrane surfaces (default 0.3)",
+    )
+
+
+def _nonpolar_membrane(args: argparse.Namespace) -> Optional[tuple[float, float]]:
+    if not args.nonpolar_membrane:
+        return None
+    if args.zmem is None:
+        raise ValueError("--nonpolar-membrane needs a membrane (--zmem)")
+    return (args.zmem, args.lmem)
+
+
 # ----------------------------------------------------------------- commands
 def _solvation(args: argparse.Namespace) -> int:
     if args.extrapolate is not None and args.placements < 2:
@@ -243,13 +276,15 @@ def _solvation(args: argparse.Namespace) -> int:
     solver = _solver(args, "apbs" if args.apbs_grid else None)
     grid = solver.make_grid(coords, radii)
     eps = _dielectrics(args, mol)
+    membrane = _nonpolar_membrane(args)
     res = solver.polar_solvation(coords, charges, radii, grid=grid, dielectrics=eps)
+    zmem, lmem = membrane if membrane is not None else (None, 40.0)
     out = {
         "file": args.input,
         "atoms": int(len(charges)),
         "net_charge": float(np.sum(charges)),
         "polar_kcal_mol": res.energy,
-        "nonpolar_kcal_mol": nonpolar_energy(coords, radii),
+        "nonpolar_kcal_mol": nonpolar_energy(coords, radii, zmem=zmem, lmem=lmem, membrane_switch=args.membrane_switch),
         "platform": res.platform,
         "device": solver.device_name,
         "cg_iterations": res.iterations,
@@ -260,6 +295,8 @@ def _solvation(args: argparse.Namespace) -> int:
     }
     if eps is not None:
         out["residue_dielectric"] = args.residue_dielectric
+    if args.membrane_potential:
+        out["membrane_potential_kcal_mol"] = res.membrane_potential_energy
     if args.placements:
         spacings = [args.spacing, args.extrapolate] if args.extrapolate is not None else None
         est = estimate_error(
@@ -338,6 +375,7 @@ def _mmpbsa(args: argparse.Namespace) -> int:
         raise ValueError("--per-residue needs equation 'lpbe' (or no ions): the nonlinear energy is not a sum over atoms")
     labels = _residue_labels(mol)
     eps = _dielectrics(args, mol)
+    membrane = _nonpolar_membrane(args)
     residues: dict[str, list[tuple[float, float]]] = {}
     rows = []
     # Frames are solved in chunks so that `workers` calculations overlap
@@ -348,7 +386,8 @@ def _mmpbsa(args: argparse.Namespace) -> int:
 
     def flush() -> None:
         results = pbsa_solvation_frames(
-            solver, chunk, mol.charges, mol.radii, lig, rec, workers=args.workers, dielectrics=eps
+            solver, chunk, mol.charges, mol.radii, lig, rec, workers=args.workers, dielectrics=eps,
+            nonpolar_membrane=membrane, membrane_switch=args.membrane_switch,
         )
         for f in results:
             row = {"frame": args.start + len(rows) * args.step, **f.as_dict()}
@@ -439,6 +478,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="with --placements: repeat at this finer spacing and extrapolate the mean to zero spacing",
     )
     _add_dielectrics(s)
+    _add_nonpolar_membrane(s)
     s.add_argument("--json", action="store_true")
 
     c = sub.add_parser("convert", help="write a PQR file from any supported input (charges + radii)")
@@ -478,6 +518,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "fit in the free GPU memory); results do not depend on it",
     )
     _add_dielectrics(m)
+    _add_nonpolar_membrane(m)
     _add_solver(m)
 
     sub.add_parser("prep", help="PDB/mmCIF -> PQR: hydrogens, protonation, force field (see 'pbsolve prep -h')", add_help=False)

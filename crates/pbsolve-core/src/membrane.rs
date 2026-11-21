@@ -28,6 +28,24 @@ use std::sync::Arc;
 /// the headgroup plane (20 Å from the centre), 1 at the centre.
 pub const GREENE_2019: [[f64; 2]; 5] = [[0.0, 80.0], [5.0, 20.0], [10.0, 4.0], [15.0, 2.0], [20.0, 1.0]];
 
+/// Weight of the solvent-accessible surface at height `z` for the non-polar
+/// term of a membrane from `bottom` to `bottom + thickness` (GBSW, Im, Feig &
+/// Brooks 2003): 0 in the slab farther than `width` from its surfaces, 1 in
+/// the water farther than `width` from them, and between
+/// H = ½ + ¾ s − ¼ s³ with s = (|z − centre| − thickness/2)/width, which is
+/// continuous with its slope. `width` 0 is a step (0 on the surfaces).
+pub fn surface_switch(z: f64, bottom: f64, thickness: f64, width: f64) -> f64 {
+    let u = (z - (bottom + 0.5 * thickness)).abs() - 0.5 * thickness;
+    if u <= -width {
+        0.0
+    } else if u >= width {
+        1.0
+    } else {
+        let s = u / width;
+        0.5 + 0.75 * s - 0.25 * s * s * s
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Membrane {
     /// z of the lower membrane surface, Å (APBS `zmem`).
@@ -161,6 +179,84 @@ impl Membrane {
                 }
             }
         }
+    }
+}
+
+impl Membrane {
+    /// The membrane potential across the slab without solute (kT/e) at the z
+    /// nodes of `grid`, with the bath below the membrane held at `v` and the
+    /// one above at 0: the finite-difference solution of the one-dimensional
+    /// problem a column of the grid far from any solute forms (its z faces in
+    /// the slab take the membrane's dielectric, its nodes in the slab no ions),
+    /// with `v` at the grid's bottom face and 0 at its top face. It is the
+    /// boundary of the membrane-potential field (Roux 1997; the planar
+    /// solution of APBSmem, here on the grid and for any profile).
+    pub fn potential_profile(&self, grid: &Grid, sdie: f64, kappa_bar_sq: f64, v: f64) -> Vec<f64> {
+        let nz = grid.dims[2];
+        let h = grid.spacing[2];
+        let z = |k: f64| grid.origin[2] + k * h;
+        let pchip = self.profile.as_deref().map(Pchip::new);
+        let in_slab = |zz: f64| zz >= self.bottom && zz <= self.top();
+        // Face k + ½ and node k of the column.
+        let eps: Vec<f64> = (0..nz)
+            .map(|k| {
+                let zf = z(k as f64 + 0.5);
+                if in_slab(zf) {
+                    self.value(pchip.as_ref(), zf)
+                } else {
+                    sdie
+                }
+            })
+            .collect();
+        let kap: Vec<f64> = (0..nz)
+            .map(|k| if in_slab(z(k as f64)) { 0.0 } else { kappa_bar_sq })
+            .collect();
+        // Rows k = 1 .. nz − 2 (per unit area, divided by h):
+        // (ε_{k−½}(φ_k − φ_{k−1}) + ε_{k+½}(φ_k − φ_{k+1}))/h² + κ̄²_k φ_k = κ̄²_k v Θ_k.
+        let mut phi = vec![0.0; nz];
+        phi[0] = v;
+        let n = nz - 2;
+        let (mut c_prime, mut d_prime) = (vec![0.0; n], vec![0.0; n]);
+        for r in 0..n {
+            let k = r + 1;
+            let (lo, hi) = (eps[k - 1] / (h * h), eps[k] / (h * h));
+            let diag = lo + hi + kap[k];
+            let mut rhs = if z(k as f64) < self.bottom { kap[k] * v } else { 0.0 };
+            if k == 1 {
+                rhs += lo * phi[0];
+            }
+            let sub = if k == 1 { 0.0 } else { -lo };
+            let sup = if k + 2 == nz { 0.0 } else { -hi };
+            let denom = diag - sub * if r > 0 { c_prime[r - 1] } else { 0.0 };
+            c_prime[r] = sup / denom;
+            d_prime[r] = (rhs - sub * if r > 0 { d_prime[r - 1] } else { 0.0 }) / denom;
+        }
+        for r in (0..n).rev() {
+            phi[r + 1] = d_prime[r] - c_prime[r] * if r + 1 < n { phi[r + 2] } else { 0.0 };
+        }
+        phi
+    }
+
+    /// The source of the membrane-potential field as node charges (e): the
+    /// ions of the bath below the membrane (nodes below the bottom of the slab
+    /// with ions; pores in the slab belong to the bath above, as in APBSmem)
+    /// held at `v` (kT/e), κ̄²·V·v/(4π l_B0) per node with the node's κ̄² from
+    /// `kappa_sq` and cell volume V (APBS `draw_membrane2`'s charge map).
+    pub fn potential_source(&self, grid: &Grid, kappa_sq: &[f64], v: f64, lb0: f64) -> Vec<f64> {
+        let plane = grid.dims[0] * grid.dims[1];
+        let scale = grid.cell_volume() * v / (4.0 * std::f64::consts::PI * lb0);
+        kappa_sq
+            .iter()
+            .enumerate()
+            .map(|(c, &k)| {
+                let z = grid.origin[2] + (c / plane) as f64 * grid.spacing[2];
+                if z < self.bottom {
+                    k * scale
+                } else {
+                    0.0
+                }
+            })
+            .collect()
     }
 }
 
@@ -476,5 +572,77 @@ mod tests {
         assert_eq!(m.dielectric_at(10.0), 2.0);
         assert_eq!(m.dielectric_at(0.0), 1.0); // the core beyond 20 Å depth
         assert_eq!(m.dielectric_at(3.0), m.dielectric_at(-3.0));
+    }
+
+    /// The column solution is the finite-difference solution of the
+    /// one-dimensional problem (checked row by row), takes v and 0 at the
+    /// ends, and converges to the exact profile of a uniform slab between
+    /// salt water (linear in the slab, exponential in the baths); its source
+    /// is the lower bath's ions.
+    #[test]
+    fn the_potential_profile_solves_the_column_and_converges_to_the_slab() {
+        let m = Membrane {
+            bottom: -15.0,
+            thickness: 30.0,
+            dielectric: 2.0,
+            profile: None,
+            exclusion: [0.0, 0.0],
+            fill: false,
+        };
+        let (sdie, kbar2, v): (f64, f64, f64) = (78.54, 1.27, 3.9);
+        let kappa = (kbar2 / sdie).sqrt();
+        let a = 2.0 * v / (2.0 * 2.0 + sdie * kappa * 30.0);
+        let exact = |z: f64| {
+            if z < -15.0 {
+                v - a * (kappa * (z + 15.0)).exp()
+            } else if z > 15.0 {
+                a * (-kappa * (z - 15.0)).exp()
+            } else {
+                (v - a) + (2.0 * a - v) * (z + 15.0) / 30.0
+            }
+        };
+        let mut errors = Vec::new();
+        let slope = (2.0 * a - v).abs() / 30.0;
+        for (n, centre) in [(161, 0.1), (641, 0.1), (641, 0.0), (1281, 0.03)] {
+            let grid = Grid::centered([0.0, 0.0, centre], [10.0, 10.0, 160.0], [5, 5, n]).unwrap();
+            let phi = m.potential_profile(&grid, sdie, kbar2, v);
+            assert_eq!((phi[0], phi[n - 1]), (v, 0.0));
+            let h = grid.spacing[2];
+            let z = |k: usize| grid.origin[2] + k as f64 * h;
+            let in_slab = |zz: f64| (-15.0..=15.0).contains(&zz);
+            let eps = |k: usize| if in_slab(z(k) + 0.5 * h) { 2.0 } else { sdie };
+            for k in 1..n - 1 {
+                let kap = if in_slab(z(k)) { 0.0 } else { kbar2 };
+                let lhs =
+                    (eps(k - 1) * (phi[k] - phi[k - 1]) + eps(k) * (phi[k] - phi[k + 1])) / (h * h) + kap * phi[k];
+                let rhs = if z(k) < -15.0 { kap * v } else { 0.0 };
+                assert!((lhs - rhs).abs() < 1e-9, "row {k}: {lhs} vs {rhs}");
+            }
+            let error = (0..n).map(|k| (phi[k] - exact(z(k))).abs()).fold(0.0, f64::max);
+            // The slab's faces and nodes place each surface within a cell: at
+            // most h·|slope| (measured: 0.1 Å shifts give 0.011–0.012 kT/e).
+            assert!(
+                error < h * slope + 1e-3,
+                "n {n}, centre {centre}: {error} > {}",
+                h * slope
+            );
+            errors.push(error);
+        }
+        assert!(errors[3] < 0.5 * errors[1], "{errors:?}");
+        // A slab from the second node on: its first row couples φ_0 through the
+        // water face below it, ε_{1/2} = sdie, not the slab face above.
+        let grid = Grid::centered([0.0, 0.0, 4.0], [10.0, 10.0, 40.0], [5, 5, 41]).unwrap();
+        let phi = m.potential_profile(&grid, sdie, kbar2, v);
+        let row = sdie * (phi[1] - v) + 2.0 * (phi[1] - phi[2]);
+        assert!(row.abs() < 1e-9, "{row}");
+        // The source: κ̄² V v / (4π l_B) below the slab, 0 elsewhere.
+        let grid = Grid::centered([0.0; 3], [8.0, 8.0, 40.0], [5, 5, 21]).unwrap();
+        let kap = vec![2.0; grid.len()];
+        let q = m.potential_source(&grid, &kap, v, 560.0);
+        let per = 2.0 * grid.cell_volume() * v / (4.0 * std::f64::consts::PI * 560.0);
+        for (c, &x) in q.iter().enumerate() {
+            let below = grid.origin[2] + grid.ijk(c).2 as f64 * grid.spacing[2] < -15.0;
+            assert_eq!(x, if below { per } else { 0.0 });
+        }
     }
 }

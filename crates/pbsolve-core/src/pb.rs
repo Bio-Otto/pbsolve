@@ -19,7 +19,7 @@ use crate::nonlinear::{self, IonTerms, NonlinearLevel};
 use crate::params::{ChargeMethod, CoulombMethod, PbParams, SurfaceMethod};
 use crate::solver::{pcg_on, pcg_setup, SolveStats, SolverOptions};
 use crate::surface::{maps_on, CoefficientMaps, MolecularSurface};
-use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
+use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, millivolts_in_kt_per_e};
 use rayon::prelude::*;
 use std::f64::consts::PI;
 use std::sync::mpsc;
@@ -108,6 +108,10 @@ pub struct PolarSolvation {
     /// `energy_kcal`. `None` for the nonlinear equations with ions, whose
     /// energy is not a sum over the charges.
     pub atom_energies_kcal: Option<Vec<f64>>,
+    /// Σ q_i φ_mp(r_i) in kcal/mol, the charges' energy in the field of the
+    /// membrane potential ([`PbParams::membrane_potential`]), part of
+    /// `solvated_kt` and `energy_kcal`; 0 without it.
+    pub membrane_potential_kcal: f64,
 }
 
 /// ΔG_polar with the forces on the atoms ([`polar_forces`]).
@@ -427,6 +431,7 @@ fn solve_level<B: Backend>(
     params: &PbParams,
     surf: Option<&MolecularSurface>,
     decompose: bool,
+    potential: Option<f64>,
     timings: &mut Timings,
 ) -> Result<(LevelSolution<B>, SolveStats, NodeCharges, LevelExtra)> {
     let ions = IonTerms::new(params);
@@ -448,7 +453,15 @@ fn solve_level<B: Backend>(
         (None, spread_charges_sparse_with(&grid, atoms, params.chgm)?)
     };
     let opts = solver_options(params);
-    let scatter = || be.scatter(grid.len(), &nodes, &charges);
+    // The membrane-potential field: the polarised bath is the source, not the atoms' charges.
+    let field_source = match (potential, &params.membrane) {
+        (Some(v), Some(m)) => Some(m.potential_source(&grid, &be.download(&maps[3])?, v, lb0)),
+        _ => None,
+    };
+    let scatter = || match &field_source {
+        Some(q) => be.upload(q),
+        None => be.scatter(grid.len(), &nodes, &charges),
+    };
     let solved = solve_assembled(be, &grid, &grid.boundary_indices(), g, maps, scatter, lb0, opts)?;
     let (x, g, mut stats) = (solved.x, solved.g, solved.stats);
     // The solver's buffers are freed at the next synchronisation (where no
@@ -561,6 +574,9 @@ fn focus_from<B: Backend>(be: &B, fine: &Grid, coarse: &LevelSolution<B>) -> Res
 struct StateInputs {
     surf: Pending<Option<MolecularSurface>>,
     outer_boundary: Pending<Vec<f64>>,
+    /// The membrane potential (kT/e) whose field this state solves, with the
+    /// polarised bath as the source instead of the charges; `None`: the charges' field.
+    potential: Option<f64>,
     /// Time spent building them in the foreground.
     timings: Timings,
 }
@@ -579,6 +595,34 @@ impl StateInputs {
         Self {
             surf: Pending::Ready(surf),
             outer_boundary: Pending::Ready(outer_boundary),
+            potential: None,
+            timings,
+        }
+    }
+
+    /// The inputs of the membrane-potential field of the solvated state: its
+    /// surface, the potential `v` (kT/e) and, on the outermost level's
+    /// boundary, the field of the membrane without solute.
+    fn membrane_potential(levels: &[Grid], atoms: &[Atom], params: &PbParams, v: f64) -> Self {
+        let mut timings = Timings::default();
+        let t = Instant::now();
+        let surf = surface_of(atoms, params, Medium::Solvated);
+        timings.maps += t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let grid = &levels[0];
+        let m = params.membrane.as_ref().expect("a membrane potential needs a membrane");
+        let kappa = kappa_bar_squared(&params.ions, params.temperature);
+        let profile = m.potential_profile(grid, params.sdie, kappa, v);
+        let values = grid
+            .boundary_indices()
+            .iter()
+            .map(|&c| profile[grid.ijk(c).2])
+            .collect();
+        timings.boundary += t.elapsed().as_secs_f64();
+        Self {
+            surf: Pending::Ready(surf),
+            outer_boundary: Pending::Ready(values),
+            potential: Some(v),
             timings,
         }
     }
@@ -676,6 +720,7 @@ fn focused<B: Backend, T>(
     let StateInputs {
         surf,
         outer_boundary,
+        potential,
         mut timings,
     } = inputs;
     let t = Instant::now();
@@ -717,6 +762,7 @@ fn focused<B: Backend, T>(
             params,
             surf.as_ref(),
             decompose && finest,
+            potential,
             &mut timings,
         )?;
         let (sol, s, charges, split) = solved;
@@ -774,6 +820,7 @@ fn with_background_inputs<R>(
     let inputs = StateInputs {
         surf: Pending::Later(surf_rx),
         outer_boundary: Pending::Later(boundary_rx),
+        potential: None,
         timings: Timings::default(),
     };
     std::thread::scope(|s| {
@@ -817,7 +864,7 @@ pub fn solve_focused<B: Backend>(
             timings.solve += t.elapsed().as_secs_f64();
             Ok((field, energy))
         };
-    let (((grid, potential), energy_kt), stats, timings) = match background_pool_for(be) {
+    let (((grid, mut potential), mut energy_kt), mut stats, mut timings) = match background_pool_for(be) {
         Some(pool) => with_background_inputs(&pool, &levels, atoms, params, medium, |inputs| {
             focused(be, &levels, atoms, params, inputs, false, field)
         })?,
@@ -831,6 +878,24 @@ pub fn solve_focused<B: Backend>(
             field,
         )?,
     };
+    if medium == Medium::Solvated && params.membrane_potential != 0.0 {
+        // The total potential adds the membrane's field; the energy ½Σq u + Σq φ_mp.
+        let v = millivolts_in_kt_per_e(params.membrane_potential, params.temperature);
+        let inputs = StateInputs::membrane_potential(&levels, atoms, params, v);
+        let read = |sol: LevelSolution<B>, _: NodeCharges, _, _, timings: &mut Timings| {
+            let t = Instant::now();
+            let field = sol.potential(be)?;
+            timings.solve += t.elapsed().as_secs_f64();
+            Ok(field)
+        };
+        let ((_, phi), more, t) = focused(be, &levels, atoms, params, inputs, false, read)?;
+        let q = spread_charges_with(&grid, atoms, params.chgm.energy_method())?;
+        let dot = |u: &[f64]| q.iter().zip(u).map(|(a, b)| a * b).sum::<f64>();
+        energy_kt = Some(0.5 * dot(&potential) + dot(&phi));
+        potential.iter_mut().zip(&phi).for_each(|(u, p)| *u += p);
+        stats.extend(more);
+        timings += t;
+    }
     hold.release()?;
     Ok(FieldSolution {
         grid,
@@ -1019,6 +1084,7 @@ fn polar<B: Backend>(
             grid: spec.clone(),
             timings,
             atom_energies_kcal,
+            membrane_potential_kcal: 0.0,
         }
     };
     if params.coulomb == CoulombMethod::Analytic {
@@ -1117,18 +1183,42 @@ fn polar<B: Backend>(
         }
     };
     timings += ref_timings;
+    // The charges' energy Σ q_i φ_mp(r_i) in the field of the polarised
+    // membrane, solved without them (Roux 1997; the capacitive ½CV² is left out).
+    let mut stats_solvated = stats_solvated;
+    let (potential_kt, potential_atoms) = if params.membrane_potential != 0.0 {
+        let v = millivolts_in_kt_per_e(params.membrane_potential, params.temperature);
+        let inputs = StateInputs::membrane_potential(&solvated_levels, atoms, params, v);
+        let energy = |sol: LevelSolution<B>, charges: NodeCharges, _, _, timings: &mut Timings| {
+            let t = Instant::now();
+            let (half, per_atom) = energy_at_charges(be, &sol, charges, atoms, params)?;
+            timings.energy += t.elapsed().as_secs_f64();
+            Ok((2.0 * half, per_atom.into_iter().map(|e| 2.0 * e).collect::<Vec<f64>>()))
+        };
+        let ((e, per_atom), more, t) = focused(be, &solvated_levels, atoms, params, inputs, false, energy)?;
+        stats_solvated.extend(more);
+        timings += t;
+        (e, Some(per_atom))
+    } else {
+        (0.0, None)
+    };
     hold.release()?;
-    let per_atom = solv_atoms
-        .zip(ref_atoms)
-        .map(|(s, r)| s.iter().zip(&r).map(|(s, r)| (s - r) * kt).collect());
-    let res = result(
-        solvated_kt,
+    let per_atom = solv_atoms.zip(ref_atoms).map(|(s, r)| {
+        let mut out: Vec<f64> = s.iter().zip(&r).map(|(s, r)| (s - r) * kt).collect();
+        if let Some(p) = &potential_atoms {
+            out.iter_mut().zip(p).for_each(|(o, p)| *o += p * kt);
+        }
+        out
+    });
+    let mut res = result(
+        solvated_kt + potential_kt,
         reference_kt,
         stats_solvated,
         stats_reference,
         timings,
         per_atom,
     );
+    res.membrane_potential_kcal = potential_kt * kt;
     Ok((res, forces.zip(ref_forces).map(|(s, r)| [s, r])))
 }
 
@@ -2160,5 +2250,101 @@ mod tests {
         assert_eq!(p.fine_length[0], spec.fine_length[0]);
         assert_eq!(p.with_period(Some([40.0, 8.0])), p);
         assert_eq!(spec.with_period(None), spec);
+    }
+
+    #[test]
+    fn the_membrane_potential_adds_the_charges_energy_in_its_field() {
+        let membrane = crate::membrane::Membrane {
+            bottom: -6.0,
+            thickness: 12.0,
+            dielectric: 2.0,
+            profile: None,
+            exclusion: [0.0, 0.0],
+            fill: false,
+        };
+        let base = PbParams {
+            membrane: Some(membrane),
+            ..PbParams::default()
+        }
+        .with_salt(0.15, 2.0);
+        let at = |mv: f64| PbParams {
+            membrane_potential: mv,
+            ..base.clone()
+        };
+        let be = CpuBackend::new();
+        let v = millivolts_in_kt_per_e(100.0, base.temperature);
+        assert!(at(50.0).validate().is_ok() && at(f64::INFINITY).validate().is_err());
+        for refused in [
+            PbParams {
+                membrane: None,
+                ..at(50.0)
+            },
+            at(50.0).with_salt(0.0, 2.0),
+            PbParams {
+                equation: crate::params::Equation::Nonlinear,
+                ..at(50.0)
+            },
+        ] {
+            assert!(refused.validate().is_err());
+        }
+        // An ion deep in the bath below sits at V (to ~2e-4 V: the field decays
+        // with the Debye length), one far above at 0.
+        let spec = GridSpec::single([0.0; 3], [120.0; 3], [97; 3]);
+        for (z, want) in [(-40.0, 1.0), (40.0, 0.0)] {
+            let ion = [Atom {
+                position: [0.0, 0.0, z],
+                charge: 1.0,
+                radius: 1.5,
+            }];
+            let r = polar_solvation(&be, &ion, &at(100.0), &spec).unwrap();
+            let kt = r.energy_kcal / r.energy_kt;
+            assert!((r.membrane_potential_kcal / kt / v - want).abs() < 1e-3, "{z}");
+        }
+        // A molecule across the membrane: linear in V, part of the total and of the atoms.
+        let atoms = [
+            ([0.3, -0.2, -5.0], 1.0, 1.8),
+            ([2.5, 0.1, 0.5], -0.6, 1.6),
+            ([-0.4, 2.4, 4.0], -0.7, 1.7),
+        ]
+        .map(|(position, charge, radius)| Atom {
+            position,
+            charge,
+            radius,
+        });
+        let spec = GridSpec::single([0.0; 3], [40.0; 3], [65; 3]);
+        let e = [0.0, 60.0, -60.0, 120.0].map(|mv| polar_solvation(&be, &atoms, &at(mv), &spec).unwrap());
+        let ev = e[1].membrane_potential_kcal;
+        assert_eq!(e[0].membrane_potential_kcal, 0.0);
+        assert!(ev.abs() > 0.1, "{ev}");
+        assert!((e[1].energy_kcal - e[0].energy_kcal - ev).abs() < 1e-9);
+        assert!((e[2].membrane_potential_kcal + ev).abs() < 1e-9 * ev.abs());
+        assert!((e[3].membrane_potential_kcal - 2.0 * ev).abs() < 1e-9 * ev.abs());
+        let sum: f64 = e[1].atom_energies_kcal.as_ref().unwrap().iter().sum();
+        assert!((sum - e[1].energy_kcal).abs() < 1e-9);
+        assert_eq!(e[1].stats_solvated.len(), 2 * e[0].stats_solvated.len());
+        // The potential map holds the field; its energy is ½Σq u + Σq φ_mp.
+        let f0 = solve_focused(&be, &spec, &atoms, &at(0.0), Medium::Solvated).unwrap();
+        let f1 = solve_focused(&be, &spec, &atoms, &at(60.0), Medium::Solvated).unwrap();
+        let q = spread_charges_with(&f0.grid, &atoms, base.chgm.energy_method()).unwrap();
+        let dot = |u: &[f64]| q.iter().zip(u).map(|(a, b)| a * b).sum::<f64>();
+        let kt = e[1].energy_kcal / e[1].energy_kt;
+        assert!((f1.energy_kt.unwrap() - 0.5 * dot(&f0.potential) - ev / kt).abs() < 1e-9);
+        let phi: Vec<f64> = f1.potential.iter().zip(&f0.potential).map(|(a, b)| a - b).collect();
+        assert!((dot(&phi) - ev / kt).abs() < 1e-9);
+        // The boundary faces hold the column profile: V below the membrane, 0 above.
+        let [nx, ny, nz] = f0.grid.dims;
+        let corner = |k: usize| phi[nx * ny * k];
+        assert!((corner(0) - v * 0.6).abs() < 1e-6 * v && corner(nz - 1).abs() < 1e-6 * v);
+        // In the slab, the side faces follow the uniform slab between salt water
+        // (linear, through V − A at its bottom; A = ε_m V/(2ε_m + ε_w κ L)). The
+        // faces put the slab's surfaces on the nodes at ∓6.25 Å, so L = 12.5 Å.
+        let kappa = (kappa_bar_squared(&base.ions, base.temperature) / base.sdie).sqrt();
+        let a = 2.0 * 0.6 * v / (2.0 * 2.0 + base.sdie * kappa * 12.5);
+        for k in [23, 28, 37, 41] {
+            let z = -20.0 + k as f64 * 0.625;
+            let exact = (0.6 * v - a) + (2.0 * a - 0.6 * v) * (z + 6.25) / 12.5;
+            // Measured ≤ 8e-4 V: the column's baths end 14 Å from the slab.
+            assert!((corner(k) - exact).abs() < 2e-3 * v, "{k}: {} vs {exact}", corner(k));
+        }
     }
 }

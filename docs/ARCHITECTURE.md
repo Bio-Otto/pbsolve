@@ -71,7 +71,14 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   exclusion cone to the membrane's ε (uniform, or PCHIP in the depth below
   the nearer surface) and κ̄² = 0, optionally only where a 4-connected path
   in the z plane reaches the box sides (`fill`), and uploads them again. The
-  reference state has no membrane.
+  reference state has no membrane. A membrane potential
+  (`PbParams::membrane_potential`, mV) adds a third pass over the solvated
+  levels (`StateInputs::membrane_potential`): the same maps, the source
+  `Membrane::potential_source` (κ̄²·V·v/4πl_B on the nodes below the slab,
+  uploaded instead of the scattered charges) and on the outer faces
+  `Membrane::potential_profile`, the Thomas-algorithm solution of one grid
+  column. `polar` adds Σq φ_mp (twice the usual ½Σqu read at the charged
+  nodes) to the solvated energy, `solve_focused` adds φ_mp to the potential.
 * **Ions:** κ̄² is zero inside `r_i + r_ion` (largest listed ion radius) of
   every atom with `r_i > 0`, marked the same way.
 * **Nonlinear PB** (`nonlinear.rs`): with `equation="npbe"` the solvated
@@ -102,7 +109,10 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   `Accessibility` test), volume (trapezoidal rule over APBS' cell-list box)
   and WCA dispersion (per atom, a 0.5 Å-default lattice within 14 Å), with
   APBS' coordinate accumulation and order of sums; host only, parallel over
-  atoms or planes. Independent of the PB grid.
+  atoms or planes. Independent of the PB grid. The γ·SASA term's area
+  (`sasa.rs`, Shrake–Rupley on a golden-spiral lattice) weights every
+  exposed point by `weight(z)` (`sasa_weighted`; 1 for the plain area, the
+  GBSW switch `membrane::surface_switch` for a membrane).
 * **Coulomb part** (`coulomb.rs`): with `coulomb="analytic"` the finest level
   solves A v = χ·A_p G − A(χG) for v = u − χG, where G is the Coulomb
   potential in `pdie` and χ the interior nodes within max(1 Å, 2h) of an

@@ -36,7 +36,11 @@ solution methods and integrations can be added.
   `draw_membrane2` rule, maps identical), uniform or with the depth profile
   of Greene et al. (2019), with automatic pore filling, and periodic
   lateral boundaries (`period=(Lx, Ly)`): the solute repeats in x and y as
-  in the simulation box, so the slab does not end at the box faces.
+  in the simulation box, so the slab does not end at the box faces. A
+  membrane potential (`membrane_potential=` in mV, Roux 1997) adds the
+  charges' energy in the field across the membrane (gating charges), and
+  the non-polar term can leave out the area buried in the membrane (GBSW's
+  switch, `nonpolar_membrane=`).
 * **A dielectric per atom** — `dielectrics=` gives every atom (e.g. charged
   and other residues) its own interior dielectric, as DelPhi's multiple
   dielectrics; equal values reproduce one `pdie` bit for bit.
