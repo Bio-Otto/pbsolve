@@ -81,7 +81,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      # Interpreters for --find-interpreter (Linux builds use the manylinux container's).
+      # Interpreters for -i (Linux builds use the manylinux container's). Named
+      # explicitly: --find-interpreter also takes the runner's CPython 3.15.
       - if: runner.os != 'Linux'
         uses: actions/setup-python@v5
         with:
@@ -96,9 +97,7 @@ jobs:
           command: build
           target: ${{ matrix.target }}
           manylinux: "2014"
-          args: >-
-            --release ${{ matrix.cuda }} -o dist
-            ${{ runner.os == 'Linux' && '-i 3.10 3.11 3.12 3.13 3.14' || '--find-interpreter' }}
+          args: --release ${{ matrix.cuda }} -i 3.10 3.11 3.12 3.13 3.14 -o dist
       # Exactly one wheel per CPython 3.10-3.14 (no free-threaded or PyPy extras).
       - shell: bash
         run: |
