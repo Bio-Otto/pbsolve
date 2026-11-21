@@ -62,7 +62,7 @@ should update the status table below.
 | Non-polar term in a membrane (0.0.9): `sasa`/`nonpolar_energy(zmem=)`, `nonpolar_membrane=`, `--nonpolar-membrane` | GBSW's switch (Im et al. 2003, Eq. 13): 0/½/1, symmetric, slope 3/(4w) on the surfaces and 0 at the ends; the weighted area of a sphere across a surface = 2πR∫H dz (Archimedes) to 1e-5 (w = 2.5 Å) and within one point's share (w ≤ 0.3 Å), also against an independent Python switch (2e-4); weight 1 and a distant membrane bit-identical to the plain area, plain SASA and γ·SASA + β bit-identical to 0.0.8; APBS helix in a 40 Å membrane: water-exposed area 13 → 52 % as it leaves the membrane, ΔG_np 2.5 → 7.3 kcal/mol (13.2 without membrane), w = 0.3 vs 2.5 Å ≤ 2 %; same cost; 27/27 mutations; see *Non-polar term in a membrane* |
 | PyPI wheels (0.1.1): Linux x86_64, manylinux2014, CPython 3.10–3.14, `cuda-12`, `pbsolve[cuda12]`, sdist | manylinux2014 compliance (maturin) and `twine check --strict` pass; clean environments (Python 3.14 and 3.10, no conda variables): `pbsolve test` passes with the GPU (pip NVRTC 12.9 or the system's 13.3; CUDA vs CPU 0.0, driver 13.2), with no visible device and with the driver library hidden (CPU, with the reason); the sdist builds and passes; 1YCR energies and iterations bit-identical to the development build on CPU and CUDA; the full test suite on the installed wheel 444 passed, 40 skipped (APBS, OpenMM, PROPKA, nbformat absent); see *PyPI wheels (R2)* |
 | Wheels on every platform (0.1.2): Linux aarch64 and Windows x86_64 (`cuda-12`), macOS arm64 and x86_64 (CPU), CPython 3.10–3.14 | CI builds each on its own runner (exactly one wheel per Python version) and installs it on a GPU-less runner of the same platform: `pbsolve test` passes in all 10 jobs, ΔG −82.9970 kcal/mol everywhere; Windows and aarch64 load pip's NVRTC 12.9 and fall back to the CPU without a driver; `twine check --strict` passes; not run on a GPU; see *PyPI wheels (R2)* |
-| conda recipe (0.1.3, v1 format 0.1.4): CPU, CUDA 12.9, CUDA 13.4 variants (conda-forge pinning, linux-64, Python 3.12) | `conda-smithy recipe-lint --conda-forge` passes; the three variants build from the v0.1.0 tarball with rattler-build and staged-recipes' Linux configs and pass the recipe's tests; one `conda install` picks `cuda13` with the driver, `cpu` without (`CONDA_OVERRIDE_CUDA=`), `cuda12` with `cuda-version=12`; 1YCR bit-identical to the development build and the wheels on CPU and CUDA; see *conda-forge recipe (R2)* |
+| conda recipe (0.1.3, v1 format 0.1.4): CPU, CUDA 12.9, CUDA 13.4 variants (conda-forge pinning, linux-64, Python 3.12) | `conda-smithy recipe-lint --conda-forge` passes; the three variants build from the v0.1.0 tarball with rattler-build and staged-recipes' Linux configs and pass the recipe's tests; staged-recipes' CI passes on linux-64 (CPU, CUDA 12.9, 13), osx-64 and win-64 for Python 3.11–3.14 (after declaring the entry point for Windows); one `conda install` picks `cuda13` with the driver, `cpu` without (`CONDA_OVERRIDE_CUDA=`), `cuda12` with `cuda-version=12`; 1YCR bit-identical to the development build and the wheels on CPU and CUDA; see *conda-forge recipe (R2)* |
 | Size-modified PB (0.0.2): `equation="smpbe"`, `ion_size` | lattice-gas ions of one size (APBS 3.4.1 disables `smpbe`); planar double layer against the exact profile: errors 2e-4 (npbe) to 4e-7 at 0.125 Å, orders 2.6–3.8; charged cavity [Silalahi et al. 2010]: entropic cost ∝ a³ (slope 3.00), counterions saturate at 1/(N_A a³) where point ions reach 84 M; functional stationary; a → 0 gives npbe; `npbe` bit-identical; CPU = CUDA; 9/9 mutations; cost as npbe; see *Size-modified PB* |
 | Nonlinear PB (0.0.2): `equation="npbe"` | inexact Newton on the multigrid linear solver, APBS' functional with the coarser levels' outer terms; APBS 3.4.1 `npbe` (1YCR, −8/−20/−30 e test systems, 1:1 and 2:1 salts, 1–3 levels): identical maps, solvated energies ≤ 2.3e-9 and nonlinear corrections to 1e-4 kcal/mol in APBS units; functional stationary at the solution; weak potentials give the linearized potential; 15/15 mutations caught; CPU = CUDA ≤ 1e-10; default `lpbe` bit-identical; Newton on the device from a damped start, cost 1.3–1.4× (CPU), 1.7–1.9× (CUDA), 4 extra device vectors (asserted); see *Nonlinear Poisson–Boltzmann* |
 | Reaction-field decomposition (0.0.2): `coulomb="analytic"` | one solve per level, no reference state; sparse right-hand side = dense χ·A_pG − A(χG) to 1e-11 and zero off the layer; Rust = Python prototype to 4e-15; default `grid` bit-identical (CPU, CUDA); CPU–CUDA ≤ 1e-10; 11/11 mutations caught; fractional interface: placement spread halves (analytic references and 1YCR), same limits as `grid`, 1YCR ΔG_polar error at 0.5 Å −5.6 instead of −10.1 kcal/mol; sharp interface: ≤ 0.16 points; 1.7× faster on the CPU, 7–20 % on CUDA (1YCR), slower for 5DK3 on CUDA (direct Coulomb sum); see *Reaction-field decomposition* |
@@ -1813,8 +1813,27 @@ energies at 0.5 Å and 0.15 M: three variants, both recipes, 0.1.0 and 0.1.2.
 The development build and the PyPI wheels give the same values, bit for bit,
 and `pbsolve test` passes with CUDA vs CPU 0.0.
 
-**Not covered locally:** the other Python versions and platforms (osx, win,
-linux-aarch64). staged-recipes' CI and then the feedstock build them.
+**staged-recipes CI (PR conda-forge/staged-recipes#35780, v0.1.0).**
+* The linters pass ("All recipes are excellent.").
+* The first run failed on Windows only. The package built, but `pbsolve info`
+  did not start: pip's `Scripts\pbsolve.exe` holds the build machine's
+  Python path.
+* With the command declared in the recipe (`build.python.entry_points`),
+  conda writes its own launcher (`Scripts\pbsolve.exe` +
+  `pbsolve-script.py`), and the second run passed everywhere.
+
+| CI build | Python | Result of the recipe's tests |
+|---|---|---|
+| linux_64 (CPU) | 3.11–3.14 | all pass; pytest 65 passed, 3 skipped |
+| linux_64_cuda_129 | 3.11–3.14 | all pass; CUDA compiled, no GPU on the runner (CPU) |
+| linux_64_cuda_130 | 3.11–3.14 | same |
+| osx_64 (CPU) | 3.11–3.14 | all pass |
+| win_64 (CPU) | 3.11–3.14 | all pass |
+
+**Not covered yet:**
+* linux-aarch64, osx-arm64 and the Windows CUDA variants: staged-recipes
+  does not build them, the feedstock will;
+* CUDA on a GPU in CI (none there; checked locally above).
 
 ## Input readers (`pbsolve-io`)
 

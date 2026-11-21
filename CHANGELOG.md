@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Packaging
+
+- The conda recipe declares the `pbsolve` command
+  (`build.python.entry_points`). pip's Windows launcher holds the build
+  machine's Python path and did not start on Windows. With this change the
+  staged-recipes CI passes on Linux (CPU, CUDA 12.9, 13), macOS and Windows
+  for Python 3.11–3.14.
+
 ## 0.1.4 — 2026-11-22
 
 The conda recipe in the v1 format; v0.1.0 submitted to conda-forge (ROADMAP R2).

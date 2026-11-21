@@ -457,7 +457,10 @@ maintainer and v0.2.0.*
   makes the version bot follow GitHub releases (vX.Y.0) only.
 * *0.1.4:* the recipe moved to the v1 format (`recipe.yaml`, rattler-build),
   which staged-recipes asks for. Its three Linux builds pass locally from the
-  v0.1.0 tarball, and v0.1.0 is submitted to conda-forge/staged-recipes.
+  v0.1.0 tarball, and v0.1.0 is submitted to conda-forge/staged-recipes
+  (#35780). Its CI passes on linux-64 (CPU, CUDA 12.9, 13), osx-64 and win-64
+  for Python 3.11–3.14, once the recipe declares the `pbsolve` entry point
+  (Windows); the PR waits for review.
 * Remaining:
   * the first upload (v0.2.0, by the release cadence);
   * GPU runs of the aarch64 and Windows wheels (no such GPU at hand);

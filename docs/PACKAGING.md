@@ -31,6 +31,9 @@ run dependencies and inherits the automatic GPU selection.
   `compiler('cxx')` as well.
 * conda-forge builds CPython 3.11–3.14 (its own minimum, CFEP-25) and CUDA
   12.9 and 13.4 (global pinning, 2026-11).
+* The `pbsolve` command is declared in the recipe (`build.python.entry_points`),
+  so conda writes its own launchers. pip's `Scripts\pbsolve.exe` holds the
+  build machine's Python path and does not start on Windows.
 
 ## Publishing on conda-forge
 
