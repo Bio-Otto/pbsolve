@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.0.9 — 2026-11-21
+
 ### Added
 
 - A membrane potential: `Solver(membrane_potential=V)` (mV; CLI
