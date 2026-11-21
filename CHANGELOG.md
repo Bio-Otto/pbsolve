@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.2 — 2026-11-21
+
+Wheels for Linux aarch64, Windows and macOS (ROADMAP R2); the logo on the
+documentation header.
+
 ### Packaging
 
 - Wheels for Linux aarch64 and Windows x86_64 (CUDA 12 support, as on
