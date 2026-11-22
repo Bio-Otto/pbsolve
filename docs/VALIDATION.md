@@ -43,7 +43,7 @@ should update the status table below.
 5. **MM-PBSA benchmark.** Correlation of ΔG_bind with experiment on a public
    protein–ligand set, compared with the same protocol using APBS.
 
-## Status (0.1.5)
+## Status (0.1.6)
 
 | Check | Result |
 |---|---|

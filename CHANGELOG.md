@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.1.6 — 2026-11-22
+
+Residue pairs of the polar term (ROADMAP 4.15).
+
 ### Added
 
 - Pairwise residue decomposition of the polar term (ROADMAP 4.15):
