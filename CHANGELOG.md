@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.5 — 2026-11-22
+
+The Gaussian dielectric cross-checked against pyDelPhi (ROADMAP R4); the conda
+recipe declares its command.
+
 ### Validation
 
 - Cross-check of the Gaussian dielectric with pyDelPhi 0.2.0 (ROADMAP R4).
