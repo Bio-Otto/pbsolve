@@ -187,6 +187,31 @@ force field for a full decomposition. With `equation="npbe"` or `"smpbe"` and
 ions the energy is a functional, not a sum over the charges, and there are
 no per-atom terms.
 
+**Residue pairs.** {py:func}`pbsolve.pbsa_pair_terms` splits the polar
+binding term further, over pairs of residues;
+{py:func}`pbsolve.residue_pair_terms` does the same for ΔG_polar of one
+structure.
+
+* E[a, b] = ½ Σ_{i∈a} q_i φ_b(r_i) is half the energy of residue a's charges
+  in the reaction field of residue b's.
+* Row a sums to residue a's share and all entries to the total.
+* The pair a–b interacts by E[a, b] + E[b, a].
+* For binding: a receptor–ligand pair has only the complex's terms, and a
+  pair within one partner has the complex's minus that partner's.
+
+The field of a residue comes from one extra PB calculation with its charges
+reversed: by linearity, the difference to the full calculation is the field
+of that residue alone. The cost is one calculation per charged residue of
+complex, receptor and ligand: 196 calculations on top of the frame's 3 for
+1YCR (98 residues), 4.5 minutes on 18 CPU threads.
+
+```{code-block} python
+names, pairs = pbsolve.pbsa_pair_terms(solver, mol.coords, mol.charges, mol.radii, ligand, labels)
+interaction = pairs + pairs.T - np.diag(np.diag(pairs))  # kcal/mol per residue pair
+a, b = np.unravel_index(np.argmin(interaction), interaction.shape)
+print(f"most favourable pair: {names[a]} – {names[b]}: {interaction[a, b]:.2f} kcal/mol")
+```
+
 ### Binding entropy
 
 The single-trajectory protocol leaves out the entropy of binding, −TΔS. The
@@ -289,7 +314,10 @@ pbsolve mmpbsa complex.prmtop md.nc --ligand "resname LIG" --step 10 \
 
 `--per-residue` writes every residue's share of the binding terms, averaged
 over the frames, with the standard error of its total (for independent and
-for correlated frames). The summary gives every term's standard error for
+for correlated frames). `--pairwise pairs.csv` writes the polar term per
+residue pair (`residue,partner,delta_polar,sem`, the matrix E above; the rows
+of a residue sum to its polar share). It multiplies the number of PB
+calculations per frame by about two thirds of the number of residues. The summary gives every term's standard error for
 correlated frames, its interval and correlation time, and how many frames
 `--target-sem` (default 0.5 kcal/mol) needs: for the solvation terms alone,
 which the gas-phase energy largely cancels, this is a pessimistic count;

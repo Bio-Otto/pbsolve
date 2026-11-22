@@ -524,7 +524,7 @@ stays a research topic. Parameters fitted on openly licensed data only (e.g. Fre
 
 **4.15 Per-residue and pairwise decomposition** of polar and nonpolar terms
 (standard in MM-PBSA analysis tools [Miller et al. 2012; Valdés-Tresanco et al. 2021]).
-*Status: per-atom and per-residue done (0.0.3); pairwise remains.*
+*Status: done (per-atom and per-residue 0.0.3, pairwise 0.1.6).*
 * Every polar energy comes per atom, ½ q_i φ_rf(r_i) with the energy's charge
   weights (`PolarResult.atom_energies`), and sums to ΔG_polar; the binding
   terms per atom and residue (`PBSAFrame.atom_terms`, `residue_terms`,
@@ -533,8 +533,13 @@ stays a research topic. Parameters fitted on openly licensed data only (e.g. Fre
   charge i plus its pair terms (single and pair solves, to 1e-8), and with one
   level and zero boundary values the pair terms are symmetric. APBS
   `calcenergy comps` agrees to 3e-8 (`bcfl zero`) on 1YCR.
-* Remaining: pairwise residue terms (one solve per residue), and the
-  non-polar terms of `apolar_energy` per residue (the volume has no atoms).
+* *0.1.6:* pairwise residue terms, `residue_pair_terms` and
+  `pbsa_pair_terms` (`pbsolve mmpbsa --pairwise`): one calculation per
+  charged residue with its charges reversed gives that residue's field by
+  linearity; the matrix sums to ΔG_polar and its rows to the residue shares,
+  and it equals single and pair calculations to 4e-8 kcal/mol. The non-polar
+  terms of `apolar_energy` per residue: `ApolarEnergy.residue_terms` (p V
+  belongs to no residue).
 
 **4.16 Entropy and dielectric options.** Interaction entropy from the
 trajectory [Duan, Liu & Zhang 2016], which large benchmarks (summarised in

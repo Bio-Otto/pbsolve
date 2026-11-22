@@ -14,7 +14,7 @@ faster for proteins; 1YCR's energy changes by 0.05 %).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -62,6 +62,34 @@ class ApolarEnergy:
     """Area of each atom, Å²."""
     atom_dispersion: npt.NDArray[np.float64]
     """Dispersion energy of each atom, kcal/mol."""
+
+    def residue_terms(self, residues: Sequence[Any]) -> dict[Any, tuple[float, float]]:
+        """The surface (γ·A_i) and dispersion energies summed per residue.
+
+        Parameters
+        ----------
+        residues : sequence, length N
+            A residue label for every atom.
+
+        Returns
+        -------
+        dict
+            label → (surface, dispersion) in kcal/mol, in the order the labels
+            first appear. They sum to :attr:`surface` and :attr:`dispersion`;
+            :attr:`pressure_volume` belongs to no atom (the volume is the
+            molecule's).
+        """
+        labels = list(residues)
+        if len(labels) != self.atom_dispersion.size:
+            raise ValueError(f"{len(labels)} residue labels for {self.atom_dispersion.size} atoms")
+        gamma = self.surface / self.area if self.area > 0.0 else 0.0  # area is NaN when γ = 0
+        surface = gamma * self.atom_area if gamma else np.zeros_like(self.atom_dispersion)
+        out: dict[Any, list[float]] = {}
+        for label, a, d in zip(labels, surface.tolist(), self.atom_dispersion.tolist()):
+            acc = out.setdefault(label, [0.0, 0.0])
+            acc[0] += a
+            acc[1] += d
+        return {k: (v[0], v[1]) for k, v in out.items()}
 
 
 def apolar_energy(

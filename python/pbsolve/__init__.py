@@ -115,9 +115,11 @@ from .mmpbsa import (  # noqa: E402
     PBSAFrame,
     SolvationTerms,
     nonpolar_energy,
+    pbsa_pair_terms,
     pbsa_solvation_frame,
     pbsa_solvation_frames,
     residue_dielectrics,
+    residue_pair_terms,
 )
 from .timeseries import SeriesStatistics, series_statistics  # noqa: E402
 
@@ -149,6 +151,7 @@ __all__ = [
     "kt_kcal_per_mol",
     "kt_kj_per_mol",
     "nonpolar_energy",
+    "pbsa_pair_terms",
     "pbsa_solvation_frame",
     "pbsa_solvation_frames",
     "prep",
@@ -157,6 +160,7 @@ __all__ = [
     "read_pqr",
     "read_structure",
     "residue_dielectrics",
+    "residue_pair_terms",
     "sasa",
     "series_statistics",
     "timeseries",

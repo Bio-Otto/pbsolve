@@ -149,6 +149,7 @@ and the frames needed for `--target-sem`. Takes the
 | `--start`, `--stop`, `--step` | frames to use (0-based, as a Python slice) |
 | `--csv` | write the per-frame terms to this CSV file |
 | `--per-residue` | write every residue's share of ΔG_polar, ΔG_nonpolar and ΔG_solv of binding (mean over frames, and the standard error of the total, for independent and for correlated frames) to this CSV file; residues are named `chain:resname:resid`; β belongs to no residue |
+| `--pairwise` | write the polar binding term per residue pair (mean over frames, with its standard error) to this CSV file; one extra PB calculation per charged residue of complex, receptor and ligand per frame |
 | `--target-sem` | the summary tells how many frames give this standard error (kcal/mol, default 0.5) at the measured correlation ([how many frames](many.md#how-many-frames)) |
 | `--workers` | calculations solved at once (default 2 on the CPU, 3 on CUDA, fewer if the GPU memory is short); results do not depend on it |
 | `--residue-dielectric` | two values, CHARGED and NEUTRAL: the interior dielectric of the atoms of charged residues (net charge at least 0.5 e) and of all other atoms, in place of `--pdie`, which then applies outside the surface in the reference state ([interior dielectric per atom](model.md#interior-dielectric-per-atom)); the summary then also gives `delta_reference`, the receptor–ligand interaction that replaces the force field's Coulomb term (always a column of `--csv`) |

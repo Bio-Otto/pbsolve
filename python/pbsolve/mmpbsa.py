@@ -374,3 +374,177 @@ def pbsa_solvation_frame(
         grid=grid, workers=1, gamma=gamma, beta=beta, probe=probe, dielectrics=dielectrics,
         nonpolar_membrane=nonpolar_membrane, membrane_switch=membrane_switch,
     )[0]
+
+
+def _groups(labels: Sequence[Any]) -> tuple[list[Any], npt.NDArray[np.int64]]:
+    """The distinct labels in order of first appearance, and every atom's index among them."""
+    index: dict[Any, int] = {}
+    ids = np.array([index.setdefault(label, len(index)) for label in labels], dtype=np.int64)
+    return list(index), ids
+
+
+def _pair_systems(
+    xyz: npt.NDArray[np.float64], q: npt.NDArray[np.float64], r: npt.NDArray[np.float64], ids: npt.NDArray[np.int64]
+) -> tuple[list[tuple[Any, Any, Any]], list[int]]:
+    """All charges, then the charges of each charged group reversed (uncharged groups have no field)."""
+    flipped = [b for b in range(int(ids.max()) + 1) if np.any(q[ids == b] != 0.0)]
+    systems = [(xyz, q, r)]
+    for b in flipped:
+        reversed_b = q.copy()
+        reversed_b[ids == b] *= -1.0
+        systems.append((xyz, reversed_b, r))
+    return systems, flipped
+
+
+def _pair_matrix(results: Sequence[Any], ids: npt.NDArray[np.int64], flipped: Sequence[int]) -> npt.NDArray[np.float64]:
+    """E[a, b] = ½ Σ_{i∈a} q_i φ_b(r_i) from the atom energies of :func:`_pair_systems`' calculations.
+
+    By linearity, with the charges of b reversed every atom's energy changes by
+    q_i φ_b(r_i) outside b, while inside b the sum of the two is q_i φ_b(r_i).
+    """
+    base = results[0]
+    if base.atom_energies is None:
+        raise ValueError("pair terms need per-atom energies, which the nonlinear equations with ions do not have")
+    if base.membrane_potential_energy != 0.0:
+        raise ValueError(
+            "pair terms leave out the energy in the membrane potential, which is linear in the charges; "
+            "use membrane_potential=0"
+        )
+    n = int(ids.max()) + 1
+    e0 = base.atom_energies
+    m = np.zeros((n, n))
+    for res, b in zip(results[1:], flipped):
+        m[:, b] = 0.5 * np.bincount(ids, weights=e0 - res.atom_energies, minlength=n)
+        m[b, b] = 0.5 * np.bincount(ids, weights=e0 + res.atom_energies, minlength=n)[b]
+    return m
+
+
+def residue_pair_terms(
+    solver: Solver,
+    coords: npt.ArrayLike,
+    charges: npt.ArrayLike,
+    radii: npt.ArrayLike,
+    residues: Sequence[Any],
+    *,
+    grid: Optional[GridSpec] = None,
+    workers: Optional[int] = None,
+    dielectrics: Optional[npt.ArrayLike] = None,
+) -> tuple[list[Any], npt.NDArray[np.float64]]:
+    """ΔG_polar of one structure split into pairs of residues.
+
+    ``E[a, b] = ½ Σ_{i∈a} q_i φ_b(r_i)``: half the energy of residue a's
+    charges in the reaction field φ_b of residue b's charges. Row a sums to
+    residue a's share (its atoms' :attr:`PolarResult.atom_energies`), and
+    all entries sum to ΔG_polar. The two residues of a pair interact by
+    ``E[a, b] + E[b, a]``; the two halves agree up to the focusing and the
+    boundary values. One extra PB calculation per charged residue gives its
+    field (the same structure with that residue's charges reversed); all of
+    them share one grid and are solved ``workers`` at a time.
+
+    Parameters
+    ----------
+    solver : Solver
+        Any settings with per-atom energies (not the nonlinear equations with
+        ions, nor a membrane potential).
+    coords, charges, radii : array_like
+        As for :meth:`Solver.polar_solvation`.
+    residues : sequence, length N
+        A residue label for every atom (e.g. ``"B:LEU:26"``).
+    grid : GridSpec, optional
+        The grid of all calculations; by default the automatic grid of the
+        structure.
+    workers : int, optional
+        As for :meth:`Solver.polar_solvation_many`.
+    dielectrics : array_like, shape (N,), optional
+        As for :meth:`Solver.polar_solvation`.
+
+    Returns
+    -------
+    labels : list
+        The residues in order of first appearance.
+    terms : numpy.ndarray, shape (len(labels), len(labels))
+        ``E`` in kcal/mol.
+    """
+    xyz, q, r = _xyz(coords), _vec(charges), _vec(radii)
+    if len(residues) != q.size:
+        raise ValueError(f"{len(residues)} residue labels for {q.size} atoms")
+    labels, ids = _groups(residues)
+    systems, flipped = _pair_systems(xyz, q, r, ids)
+    g = grid if grid is not None else solver.make_grid(xyz, r)
+    eps = None if dielectrics is None else [_vec(dielectrics)] * len(systems)
+    results = solver.polar_solvation_many(systems, grid=g, workers=workers, dielectrics=eps)
+    return labels, _pair_matrix(results, ids, flipped)
+
+
+def pbsa_pair_terms(
+    solver: Solver,
+    coords: npt.ArrayLike,
+    charges: npt.ArrayLike,
+    radii: npt.ArrayLike,
+    ligand_atoms: Sequence[int],
+    residues: Sequence[Any],
+    receptor_atoms: Optional[Sequence[int]] = None,
+    *,
+    grid: Optional[GridSpec] = None,
+    workers: Optional[int] = None,
+    dielectrics: Optional[npt.ArrayLike] = None,
+) -> tuple[list[Any], npt.NDArray[np.float64]]:
+    """The polar binding term of one frame split into pairs of residues.
+
+    :func:`residue_pair_terms` of the complex minus those of the receptor and
+    of the ligand, each placed at its residues; all three on the complex's
+    grid (or ``grid``), as :func:`pbsa_solvation_frame` computes them. The
+    entries sum to :attr:`PBSAFrame.delta_polar` and row a to residue a's
+    polar share in :meth:`PBSAFrame.residue_terms`. A receptor–ligand pair
+    gets only the complex's terms, since the two are apart in the other
+    states. The cost is one PB calculation per charged residue of each
+    species on top of the three of :func:`pbsa_solvation_frame`.
+
+    Parameters
+    ----------
+    solver : Solver
+        As for :func:`residue_pair_terms`.
+    coords, charges, radii : array_like
+        The complex, as for :func:`pbsa_solvation_frame`.
+    ligand_atoms : sequence of int
+        The ligand's atoms in the complex.
+    residues : sequence, length N
+        A residue label for every complex atom.
+    receptor_atoms : sequence of int, optional
+        Default: every atom not in the ligand.
+    grid : GridSpec, optional
+        The grid of all calculations; by default the complex's automatic grid.
+    workers : int, optional
+        As for :meth:`Solver.polar_solvation_many`.
+    dielectrics : array_like, shape (N,), optional
+        Interior dielectric of every complex atom; receptor and ligand keep
+        their atoms' values.
+
+    Returns
+    -------
+    labels : list
+        The complex's residues in order of first appearance.
+    terms : numpy.ndarray, shape (len(labels), len(labels))
+        ΔΔG_polar per residue pair in kcal/mol.
+    """
+    xyz, q, r = _xyz(coords), _vec(charges), _vec(radii)
+    if len(residues) != q.size:
+        raise ValueError(f"{len(residues)} residue labels for {q.size} atoms")
+    eps = None if dielectrics is None else _vec(dielectrics)
+    lig, rec = _selections(xyz.shape[0], ligand_atoms, receptor_atoms)
+    labels, ids = _groups(residues)
+    g = grid if grid is not None else solver.make_grid(xyz, r)
+    parts, systems, atom_eps = [], [], []
+    for idx in (None, rec, lig):
+        sel = slice(None) if idx is None else idx
+        sys_, flipped = _pair_systems(xyz[sel], q[sel], r[sel], ids[sel])
+        parts.append((len(systems), len(sys_), sel, flipped))
+        systems += sys_
+        atom_eps += [None if eps is None else eps[sel]] * len(sys_)
+    results = solver.polar_solvation_many(systems, grid=g, workers=workers, dielectrics=None if eps is None else atom_eps)
+    total = np.zeros((len(labels), len(labels)))
+    for k, (start, count, sel, flipped) in enumerate(parts):
+        m = _pair_matrix(results[start:start + count], ids[sel], flipped)
+        present = np.arange(m.shape[0])  # group b of the species is complex group b (ids keep the complex numbering)
+        total[np.ix_(present, present)] += m if k == 0 else -m
+    return labels, total

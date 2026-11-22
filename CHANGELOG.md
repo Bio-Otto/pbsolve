@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- Pairwise residue decomposition of the polar term (ROADMAP 4.15):
+  - `residue_pair_terms` for one structure and `pbsa_pair_terms` for binding,
+    from the command line `pbsolve mmpbsa --pairwise FILE`;
+  - E[a, b] = ½ Σ_{i∈a} q_i φ_b(r_i). Rows sum to the per-residue shares and
+    all entries to ΔG_polar;
+  - the cost is one extra PB calculation per charged residue (its charges
+    reversed).
+- `ApolarEnergy.residue_terms`: the surface and dispersion terms of
+  `apolar_energy` per residue.
+
 ## 0.1.5 — 2026-11-22
 
 The Gaussian dielectric cross-checked against pyDelPhi (ROADMAP R4); the conda

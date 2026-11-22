@@ -80,6 +80,93 @@ def test_per_residue_cli(tmp_path):
         mean(frames, "delta_nonpolar") + pbsolve.SITKOFF_BETA, rel=1e-10
     )
     assert cli(args + ["--per-residue", str(residues_csv), "--equation", "npbe", "--ionic-strength", "0.1"]) == 2
+    # pair terms of the first frames: rows sum to the residues' polar shares, all to delta_polar
+    pairs_csv = tmp_path / "pairs.csv"
+    short = args + ["--stop", "2", "--csv", str(frames_csv), "--per-residue", str(residues_csv)]
+    assert cli(short + ["--pairwise", str(pairs_csv)]) == 0
+    frames, residues = list(csv.DictReader(open(frames_csv))), list(csv.DictReader(open(residues_csv)))
+    pairs = list(csv.DictReader(open(pairs_csv)))
+    assert len(pairs) == 10 * 10
+    assert sum(float(p["delta_polar"]) for p in pairs) == pytest.approx(mean(frames, "delta_polar"), rel=1e-8)
+    rows = {}
+    for p in pairs:
+        rows[p["residue"]] = rows.get(p["residue"], 0.0) + float(p["delta_polar"])
+    for row in residues:
+        assert rows[row["residue"]] == pytest.approx(float(row["delta_polar"]), abs=1e-6)
+    assert cli(args + ["--pairwise", str(pairs_csv), "--equation", "npbe", "--ionic-strength", "0.1"]) == 2
+
+
+def _group_sums(labels, names, values):
+    return np.bincount([names.index(lab) for lab in labels], weights=values, minlength=len(names))
+
+
+def test_residue_pair_terms_are_the_linear_response():
+    x, q, r = synthetic_molecule()
+    labels = [f"R{i // 5}" for i in range(len(q))]
+    s = pbsolve.Solver(platform="CPU", grid_spacing=0.6, fadd=10.0, ionic_strength=0.15)
+    g = s.make_grid(x, r)
+    names, e = pbsolve.residue_pair_terms(s, x, q, r, labels, grid=g, workers=2)
+    assert names == [f"R{k}" for k in range(6)]
+    res = s.polar_solvation(x, q, r, grid=g)
+    assert e.sum() == pytest.approx(res.energy, rel=1e-9)
+    np.testing.assert_allclose(e.sum(axis=1), _group_sums(labels, names, res.atom_energies), rtol=0, atol=1e-6)
+
+    def alone(*groups):  # ΔG_polar with the charges of these residues only
+        keep = np.isin(labels, [names[k] for k in groups])
+        return s.polar_solvation(x, np.where(keep, q, 0.0), r, grid=g).energy
+
+    single = [alone(a) for a in range(6)]
+    np.testing.assert_allclose(np.diag(e), single, rtol=0, atol=1e-6)
+    for a, b in ((0, 1), (2, 5), (3, 4)):
+        assert e[a, b] + e[b, a] == pytest.approx(alone(a, b) - single[a] - single[b], abs=1e-6)
+    # with focusing and analytic boundary values the halves differ slightly; on one level with
+    # zero boundary values the operator is symmetric
+    assert 1e-6 < np.abs(e - e.T).max() < 1e-4 * np.abs(e).max()
+    one = pbsolve.Solver(platform="CPU", ionic_strength=0.15, bcfl="zero")
+    _, e1 = pbsolve.residue_pair_terms(one, x, q, r, labels, grid=pbsolve.GridSpec(g.center, g.dims, g.fine_length))
+    np.testing.assert_allclose(e1, e1.T, rtol=0, atol=1e-6)
+    with pytest.raises(ValueError, match="labels"):
+        pbsolve.residue_pair_terms(s, x, q, r, labels[:-1])
+    npbe = pbsolve.Solver(platform="CPU", grid_spacing=0.6, fadd=10.0, ionic_strength=0.1, equation="npbe")
+    with pytest.raises(ValueError, match="per-atom"):
+        pbsolve.residue_pair_terms(npbe, x, q, r, labels)
+    # the energy in a membrane potential is linear in the charges and has no pair terms
+    fake = type("R", (), {"atom_energies": np.zeros(len(q)), "membrane_potential_energy": 0.1})()
+    with pytest.raises(ValueError, match="membrane potential"):
+        pbsolve.mmpbsa._pair_matrix([fake], np.zeros(len(q), dtype=np.int64), [])
+
+
+def test_binding_pair_terms():
+    x, q, r = synthetic_molecule()
+    labels = ["A"] * 7 + ["B"] * 8 + ["C"] * 5 + ["L1"] * 4 + ["L2"] * 6
+    lig = np.arange(20, 30)
+    s = pbsolve.Solver(platform="CPU", grid_spacing=0.6, fadd=10.0, ionic_strength=0.15)
+    names, d = pbsolve.pbsa_pair_terms(s, x, q, r, lig, labels)
+    f = pbsolve.pbsa_solvation_frame(s, x, q, r, lig)
+    assert names == ["A", "B", "C", "L1", "L2"]
+    assert d.sum() == pytest.approx(f.delta_polar, rel=1e-9)
+    shares = f.residue_terms(labels)
+    np.testing.assert_allclose(d.sum(axis=1), [shares[n][0] for n in names], rtol=0, atol=1e-6)
+    # receptor–ligand pairs are the complex's alone; pairs within one partner lose that partner's
+    _, c = pbsolve.residue_pair_terms(s, x, q, r, labels, grid=s.make_grid(x, r))
+    np.testing.assert_allclose(d[:3, 3:], c[:3, 3:], rtol=0, atol=1e-9)
+    _, rec = pbsolve.residue_pair_terms(s, x[:20], q[:20], r[:20], labels[:20], grid=s.make_grid(x, r))
+    np.testing.assert_allclose(d[:3, :3], c[:3, :3] - rec, rtol=0, atol=1e-6)
+
+
+def test_apolar_terms_per_residue():
+    x, _, r = synthetic_molecule()
+    labels = [f"R{i // 7}" for i in range(len(r))]
+    a = pbsolve.apolar_energy(x, r, epsilons=np.full(len(r), 0.1))
+    res = a.residue_terms(labels)
+    assert list(res) == [f"R{k}" for k in range(5)]
+    assert sum(v[0] for v in res.values()) == pytest.approx(a.surface, rel=1e-12)
+    assert sum(v[1] for v in res.values()) == pytest.approx(a.dispersion, rel=1e-12)
+    assert a.pressure_volume != 0  # ... which belongs to no residue
+    no_surface = pbsolve.apolar_energy(x, r, gamma=0.0, epsilons=np.full(len(r), 0.1))
+    assert all(v[0] == 0.0 for v in no_surface.residue_terms(labels).values())
+    with pytest.raises(ValueError, match="labels"):
+        a.residue_terms(labels[:-1])
 
 
 @pytest.mark.skipif(find_apbs() is None, reason="APBS not installed")

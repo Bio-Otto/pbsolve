@@ -56,7 +56,8 @@ solution methods and integrations can be added.
 * **MM-PBSA ready** — polar (PB) + non-polar (γ·SASA + β) terms, shared grids for
   complex/receptor/ligand, OpenMM bridge, OpenDX maps. Trajectory frames are
   solved several at a time; results do not depend on the number of workers.
-  Per-residue shares, and −TΔS from the interaction entropy of the frames.
+  Per-residue and residue-pair shares, and −TΔS from the interaction entropy of
+  the frames.
 * **Reads simulation output directly** — PDB, mmCIF, Amber, CHARMM/NAMD, GROMACS
   and common trajectory formats, plus built-in preparation of PDB files.
 * **Validated and reproducible** — checked against analytic results and

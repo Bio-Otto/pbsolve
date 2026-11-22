@@ -699,7 +699,10 @@ The three terms equal APBS' to the digits it prints, on APBS' own alkane
 examples and on a protein ([validation](../VALIDATION)), and
 {py:func}`pbsolve.apbs.apolar_energy` runs APBS on the same input. Each term
 is computed only when its coefficient is not zero; for 1YCR (1670 atoms) the
-calculation takes 0.75 s on 18 CPU threads (APBS: 13 s).
+calculation takes 0.75 s on 18 CPU threads (APBS: 13 s). The surface and
+dispersion terms come per atom (`atom_area`, `atom_dispersion`), and
+{py:meth}`~pbsolve.ApolarEnergy.residue_terms` sums them per residue. p V
+belongs to no residue, since the volume is the molecule's.
 
 ## Forces
 

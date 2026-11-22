@@ -54,6 +54,7 @@ should update the status table below.
 | Gaussian dielectric vs pyDelPhi 0.2.0 (0.1.5, ROADMAP R4): `scripts/compare_pydelphi.py`, `tests/test_pydelphi.py` | shared grids, pdie 1, 0 and 0.15 M, synthetic molecule and 1YCR: every face of both runs equal to pyDelPhi's cubes (6 digits) once its four definitions are applied (Gaussians cut at max(3σR_max, R_max + r_ion) + √3/2·h, density floor 0.02, 2 % smoothing, contour on the density); Born-penalty ions with pbsolve's sign (potential rms 1.4e-6 kT/e); Debye constant 0.01990076478 (+0.082 % length), screened-Coulomb boundary, CODATA 2006 (1.83e-7); with them every energy to pyDelPhi's last digit (≤ 4.1e-5 kT); without them ΔG_polar 5e-6 apart, salt effect 1.0 %; see *Cross-check with pyDelPhi (R4)* |
 | Non-polar terms (0.0.2): `apolar_energy` (γ·SASA + p·SAV + WCA dispersion, as APBS `apolar`) | APBS' 11 alkane examples to every printed digit (totals ≤ 2.2e-13); APBS 3.4.1 live on neopentane, a synthetic molecule with radius-0 atoms and 1YCR (1670 atoms) ≤ 1.3e-12, volumes identical, per atom ≤ 5e-13; one sphere, two spheres and one atom's dispersion against closed forms (0.2–0.5 %); Lennard-Jones from OpenMM = APBS' AMBER parameters to 1e-9; 10/10 mutations; 1YCR 0.75 s on 18 threads (APBS 12.7 s); see *Non-polar terms* |
 | Per-atom and per-residue decomposition (0.0.3): `PolarResult.atom_energies`, `PBSAFrame.atom_terms`/`residue_terms`, `pbsolve mmpbsa --per-residue` | shares sum to ΔG_polar (1e-12; `spl0`, `spl2`, `spl4`, `coulomb="analytic"`, forces path identical); linear response: E_i of all charges = E_i alone + pair terms from single and pair solves (1e-8, focusing and `mdh`), pair terms symmetric with one level and `zero` (1e-8); APBS 3.4.1 `calcenergy comps` per atom ≤ 2.8e-6 of the largest share with `mdh`, 1e-9 (synthetic) and 3.2e-8 (1YCR) with `zero`; 9/9 mutations; energies bit-identical (CPU, CUDA), the shares add ≤ 50 ms to 5DK3; see *Per-atom and per-residue decomposition* |
+| Residue pairs (0.1.6): `residue_pair_terms`, `pbsa_pair_terms`, `pbsolve mmpbsa --pairwise`; `ApolarEnergy.residue_terms` | one calculation per charged residue (its charges reversed): sums to ΔG_polar (1.2e-10) and rows to the residue shares; equals single and pair calculations to 4e-8 kcal/mol; symmetric to 2.6e-8 on one level with zero boundary values (focused `mdh`: 1e-5 of the largest entry); 1YCR binding: 98 residues, sum = ΔΔG_polar to 8.5e-6, 267 s CPU; 8/8 mutations; see *Residue pairs and non-polar residue terms* |
 | Interaction entropy (0.0.4): `interaction_entropy`, `interaction_energy` | IE and C2 of two-level energy distributions = closed form (1e-12); normal energies: C2 = σ²/2kT, IE → C2, and the low bias of IE at large σ reproduces Ekberg & Ryde 2021 (σ = 3 kcal/mol: IE 7.0 ± 0.4 vs exact 7.60 with 10⁵ frames, C2 7.59 ± 0.03); no overflow at σ = 200 kcal/mol; E_int = OpenMM 8.6 (Reference platform, ff14SB peptides from tleap, bonds and 1-4 exceptions inside the molecules) to 1.7e-12, and = an explicit pair sum to 1e-12; 16/16 mutations; see *Interaction entropy* |
 | Atom dielectrics (0.0.5): `dielectrics=`, `residue_dielectrics`, `--residue-dielectric`, `PBSAFrame.delta_reference` | equal values reproduce `pdie` bit for bit (maps of `mol` and `vdw`, both states, `lpbe` and `npbe`, every Python method; fingerprint of the default path unchanged); every interior face owned by the atom of smallest power distance (brute force); a central charge sees only the outer boundary for any interior ε (0.25 Å: −1.50/−0.14/+0.64 % for ε 1/4/20); one sphere against Kirkwood with its own interior ≤ 0.92 % at 0.25 Å; two spheres with interiors 4 and 10 against the exact solution (`two_sphere_energy(sphere_pdie=)`) −0.32 % and −0.74 % at 0.25 Å (one `pdie`: −1.68 and −1.58 %); `delta_reference` = Coulomb/`pdie` exactly with `coulomb="analytic"`, to 0.03 % for 1YCR at 0.35 Å on the grid; CPU = CUDA ≤ 8e-14; 30/30 mutations; CPU +6 %, CUDA 2.2× (host maps); see *Atom dielectrics* |
 | Implicit membrane (0.0.6): `zmem`, `lmem`, `mdie`, `membrane_profile`, `membrane_exclusion`, `membrane_fill` | maps identical to APBS 3.4.1 `examples/helix/draw_membrane2.c` on its helix examples (`mol` and `spl2`, exclusion cone 3.1/5.3 Å and none, surfaces on node planes; 0 mismatches in all four maps); the membrane's effect on the solvated energy agrees with APBS solving those maps to 1.3e-4 (the DX route alone costs ~1e-5, with or without membrane); a charge in a uniform slab and in the Greene profile, with and without salt, against the exact layered solution (images, Hankel transform) within 0.02–0.17 %; PCHIP = SciPy to 1e-13; a membrane outside the grid is bit-identical to none; CPU = CUDA ≤ 3e-15; 25/26 mutations (one equivalent); CUDA 0.11 → 0.15 s on the helix example; see *Implicit membrane* |
@@ -3378,6 +3379,71 @@ APBS comparison.
 The shares reuse the potential at the charged nodes; the energy stage of
 5DK3 (20 179 atoms) grows from 3 to 10 ms on the CPU and from 5 to 53 ms on
 CUDA, under 1 % of the calculation (shared machine).
+
+### Residue pairs and non-polar residue terms (0.1.6)
+
+**Change.**
+* `pbsolve.residue_pair_terms` splits ΔG_polar of one structure into
+  E[a, b] = ½ Σ_{i∈a} q_i φ_b(r_i): half the energy of residue a's charges
+  in the reaction field φ_b of residue b's.
+* `pbsolve.pbsa_pair_terms` does the same for the polar binding term
+  (complex minus receptor and ligand, each at its residues, on the
+  complex's grid).
+* `pbsolve mmpbsa --pairwise FILE` writes the mean over the frames.
+* `ApolarEnergy.residue_terms` sums the surface and dispersion energies of
+  `apolar_energy` per residue; p V belongs to no residue.
+
+Rows of the pair matrix sum to the per-residue shares and all entries to the
+total, as the per-atom shares split each interaction equally.
+
+**Method.** The field of residue b comes from one extra calculation, the
+same structure with b's charges reversed. With R the discrete
+reaction-field operator, every atom's energy changes by
+½ q_i (R q)_i − ½ q_i (R(q − 2q_b))_i = q_i (R q_b)_i outside b. Inside b the
+sum of the two energies is q_i (R q_b)_i. All calculations share one grid
+and run concurrently (`polar_solvation_many`); residues without charges are
+skipped. A membrane potential adds energy linear in the charges, so pair
+terms refuse it, and the nonlinear equations with ions have no per-atom
+energies.
+
+**Checks** (`tests/test_decomposition.py`, synthetic molecule of six
+residues, 0.15 M, focusing with `mdh`):
+* the entries sum to ΔG_polar to 1.2e-10 relative, the rows to the residue
+  shares to 3.5e-8 kcal/mol;
+* linear response: the diagonal equals ΔG_polar with only that residue's
+  charges, and E[a, b] + E[b, a] = E(a ∪ b) − E(a) − E(b), both from separate
+  calculations, to 1.1e-8 and 3.6e-8 kcal/mol;
+* the halves E[a, b] and E[b, a] differ by up to 1.1e-3 kcal/mol (1.1e-5 of
+  the largest entry) with focusing and analytic boundary values, and by
+  2.6e-8 (the solver tolerance) on one level with zero boundary values, where
+  the operator is symmetric;
+* binding: the entries sum to `delta_polar` and the rows to the residues'
+  polar shares (to 3e-8); receptor–ligand pairs equal the complex's, and
+  pairs within a partner equal the complex's minus the partner's;
+* `--pairwise`: the CSV sums to the mean `delta_polar` (1.4e-8) and every
+  residue's rows to its `--per-residue` polar column;
+* `ApolarEnergy.residue_terms` sums to `surface` and `dispersion` exactly;
+* 8/8 mutations caught: the factor ½, the self term from the difference,
+  charges zeroed instead of reversed, the partner's sign, the
+  membrane-potential check, a skipped last residue, the surface tension of
+  the non-polar terms, the CLI's transposed columns.
+
+**1YCR** (pdb2pqr AMBER radii, chain B as ligand, 0.15 M, default grid, CPU):
+* Size and cost: 98 residues (85 + 13). The pair terms took 199 calculations
+  and 267 s on 18 threads, against 5.3 s for the frame's three.
+* Sums: the entries sum to ΔΔG_polar = 392.1313 kcal/mol (difference
+  8.5e-6), and the rows to the residue shares within 9.2e-6.
+* Symmetry: the halves differ by at most 4.8e-4 kcal/mol, where the largest
+  entry is 32.5.
+* Split by location: the receptor–ligand pairs sum to +257.4 kcal/mol, the
+  pairs within the receptor to +38.0 and within the ligand to +96.8.
+* Most favourable pairs (E[a, b] + E[b, a]): A:VAL:109–B:ASN:29 −38.7,
+  A:GLU:52–B:ASN:29 −25.4, A:GLU:52–B:GLU:28 −25.3.
+* Most unfavourable pairs: A:LYS:51–B:GLU:28 +65.0, A:LYS:51–B:ASN:29
+  +35.1, A:LYS:94–B:ASP:21 +27.7.
+
+These are solvation pair terms: for the interaction itself add the pair's
+Coulomb energy from ΔE_MM, which offsets most of them.
 
 ## Non-polar terms: surface, volume and dispersion (`apolar_energy`)
 

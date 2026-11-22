@@ -12,7 +12,7 @@ import numpy as np
 
 from . import Solver, __version__, available_platforms, cuda_info, estimate_error, write_dx
 from .io import Molecule, frames, load
-from .mmpbsa import nonpolar_energy, pbsa_solvation_frames, residue_dielectrics
+from .mmpbsa import nonpolar_energy, pbsa_pair_terms, pbsa_solvation_frames, residue_dielectrics
 from .timeseries import series_statistics
 
 
@@ -371,12 +371,16 @@ def _mmpbsa(args: argparse.Namespace) -> int:
     if not args.target_sem > 0.0:
         raise ValueError("--target-sem must be positive")
     solver = _solver(args)
-    if args.per_residue and solver.params["equation"] != "lpbe" and solver.params["ionic_strength"] > 0:
-        raise ValueError("--per-residue needs equation 'lpbe' (or no ions): the nonlinear energy is not a sum over atoms")
+    for flag, name in ((args.per_residue, "--per-residue"), (args.pairwise, "--pairwise")):
+        if flag and solver.params["equation"] != "lpbe" and solver.params["ionic_strength"] > 0:
+            raise ValueError(f"{name} needs equation 'lpbe' (or no ions): the nonlinear energy is not a sum over atoms")
+    if args.pairwise and solver.params["membrane_potential"] != 0.0:
+        raise ValueError("--pairwise leaves out the energy in the membrane potential; use --membrane-potential 0")
     labels = _residue_labels(mol)
     eps = _dielectrics(args, mol)
     membrane = _nonpolar_membrane(args)
     residues: dict[str, list[tuple[float, float]]] = {}
+    pairs: list = []  # (labels, matrix) per frame
     rows = []
     # Frames are solved in chunks so that `workers` calculations overlap
     # while memory stays bounded; output order is the frame order.
@@ -389,12 +393,16 @@ def _mmpbsa(args: argparse.Namespace) -> int:
             solver, chunk, mol.charges, mol.radii, lig, rec, workers=args.workers, dielectrics=eps,
             nonpolar_membrane=membrane, membrane_switch=args.membrane_switch,
         )
-        for f in results:
+        for xyz, f in zip(chunk, results):
             row = {"frame": args.start + len(rows) * args.step, **f.as_dict()}
             rows.append(row)
             if args.per_residue:
                 for label, terms in f.residue_terms(labels).items():
                     residues.setdefault(label, []).append(terms)
+            if args.pairwise:
+                pairs.append(pbsa_pair_terms(
+                    solver, xyz, mol.charges, mol.radii, lig, labels, rec, workers=args.workers, dielectrics=eps
+                ))
             print(
                 f"frame {row['frame']:>6}: ΔG_polar {row['delta_polar']:10.4f}  ΔG_nonpolar {row['delta_nonpolar']:8.4f}"
                 f"  ΔG_solv {row['delta_solvation']:10.4f} kcal/mol",
@@ -439,6 +447,18 @@ def _mmpbsa(args: argparse.Namespace) -> int:
                 corr = series_statistics(total).sem if len(total) > 1 else 0.0
                 fh.write(f"{label},{t[:, 0].mean()},{t[:, 1].mean()},{total.mean()},{sem},{corr}\n")
         print(f"per-residue shares of {len(residues)} residues written to {args.per_residue}")
+    if args.pairwise:
+        # E[a, b] = ½ Σ_{i∈a} q_i φ_b: rows sum to the polar per-residue shares, everything to delta_polar.
+        names = pairs[0][0]
+        terms = np.array([m for _, m in pairs])
+        with open(args.pairwise, "w") as fh:
+            fh.write("residue,partner,delta_polar,sem\n")
+            for a, name_a in enumerate(names):
+                for b, name_b in enumerate(names):
+                    t = terms[:, a, b]
+                    sem = float(np.std(t, ddof=1)) / math.sqrt(len(t)) if len(t) > 1 else 0.0
+                    fh.write(f"{name_a},{name_b},{t.mean()},{sem}\n")
+        print(f"pair terms of {len(names)} residues written to {args.pairwise}")
     return 0
 
 
@@ -504,6 +524,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--per-residue",
         metavar="CSV",
         help="write every residue's share of the binding terms (mean over frames) to this CSV file",
+    )
+    m.add_argument(
+        "--pairwise",
+        metavar="CSV",
+        help="write the polar binding term per residue pair (mean over frames) to this CSV file; costs one extra "
+        "PB calculation per charged residue of complex, receptor and ligand per frame",
     )
     m.add_argument(
         "--target-sem",
