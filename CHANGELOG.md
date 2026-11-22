@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Documentation
+
+- ROADMAP 4.16 is closed. The formula-based entropy estimate and PB-fitted
+  residue dielectrics are not implemented; the ROADMAP says why.
+
 ## 0.1.6 — 2026-11-22
 
 Residue pairs of the polar term (ROADMAP 4.15).

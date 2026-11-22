@@ -545,10 +545,11 @@ stays a research topic. Parameters fitted on openly licensed data only (e.g. Fre
 trajectory [Duan, Liu & Zhang 2016], which large benchmarks (summarised in
 [Wang E et al. 2019]) recommend over truncated normal modes for MD-based
 MM/PB(GB)SA, and
-optional formula-based entropy estimates [ChemRxiv 2024 preprint]. Variable
+optional formula-based entropy estimates [Dong, Li & Wang 2025]. Variable
 or residue-dependent interior dielectric as an option, not a default.
-*Status: interaction entropy done (0.0.4), atom and residue dielectrics done
-(0.0.5); the formula-based estimates remain.*
+*Status: done. Interaction entropy (0.0.4), atom and residue dielectrics
+(0.0.5); the formula-based estimate and PB-fitted residue dielectrics were
+dropped (last point).*
 * `pbsolve.interaction_entropy` gives IE and its second-order cumulant C2,
   σ, standard errors over blocks of frames and `reliable` (σ ≤ 15 kJ/mol), as
   [Ekberg & Ryde 2021] recommend; `pbsolve.interaction_energy` the Coulomb +
@@ -566,7 +567,18 @@ or residue-dependent interior dielectric as an option, not a default.
   interaction. Uniform values are bit-identical to `pdie`; one and two
   spheres with their own interiors agree with the exact solutions (two
   spheres 0.3–0.7 % at 0.25 Å).
-* Remaining: the formula-based estimates; values fitted for PB.
+* Dropped: the formulaic entropy of [Dong, Li & Wang 2025]. The authors'
+  scripts (github.com/LinaDongXMU/MM_S, MIT) compute −0.1152 ΔSASA_apolar +
+  0.0304 ΔSASA_polar − 1.76 N_rb + 0.414 N_atoms, but they take both ΔSASA
+  terms as P2 − P2dl − P2dp of deltaVinaXGB's buried-area features. P2 is
+  the sum of the other two (deltaVinaXGB's own example: 484.96 − 312.62 −
+  172.33 = 0.01), so with those scripts the entropy is the rotatable-bond
+  and atom-count terms only. A term like that is better fitted and checked
+  against experiment in the binding benchmark (4.19). I found no residue
+  dielectrics fitted for PB. The "two-valued" interior dielectric of
+  [Akkus et al. 2023] is ε = 1 (or 2) for the Coulomb term and 2–4 for the
+  polar term, which an MM-PBSA run with pbsolve already does (ΔE_MM from the
+  force field, `pdie` for PB).
 
 **4.17 Membranes.** Implicit membrane slab with a depth-dependent dielectric,
 which correlates better with experiment than a uniform slab [Greene et al.
@@ -758,6 +770,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Achondo MAP, Chaudhry JH, Cooper CD. An investigation of physics informed neural networks to solve the Poisson–Boltzmann equation in molecular electrostatics. arXiv:2410.12810 (2024).
 * AIQM-PBSA: integrating machine learning interatomic potentials with MMPBSA for protein–ligand binding free energies. ChemRxiv, doi:10.26434/chemrxiv-2026-h0kn1 (2026, preprint).
 * Adams M, Brezina M, Hu J, Tuminaro R. Parallel multigrid smoothing: polynomial versus Gauss–Seidel. J. Comput. Phys. 188, 593 (2003).
+* Akkus E, Tayfuroglu O, Yildiz M, Kocak A. Revisiting MMPBSA by adoption of MC-based surface area/volume, ANI-ML potentials, and two-valued interior dielectric constant. J. Phys. Chem. B 127, 4415 (2023).
 * Alcouffe RE, Brandt A, Dendy JE, Painter JW. The multi-grid method for the diffusion equation with strongly discontinuous coefficients. SIAM J. Sci. Stat. Comput. 2, 430 (1981).
 * Bashford D, Karplus M. pKa's of ionizable groups in proteins: atomic detail from a continuum electrostatic model. Biochemistry 29, 10219 (1990).
 * Borukhov I, Andelman D, Orland H. Steric effects in electrolytes: a modified Poisson–Boltzmann equation. Phys. Rev. Lett. 79, 435 (1997).
@@ -777,6 +790,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Decherchi S, Rocchia W. A general and robust ray-casting-based algorithm for triangulating surfaces at the nanoscale. PLoS One 8, e59744 (2013).
 * Dembo RS, Eisenstat SC, Steihaug T. Inexact Newton methods. SIAM J. Numer. Anal. 19, 400 (1982).
 * Di Florio V, Ansalone P, Siryk SV, Decherchi S, de Falco C, Rocchia W. NextGenPB: an analytically-enhanced finite element solver for the linearized Poisson–Boltzmann equation. Comput. Phys. Commun. 317, 109816 (2025).
+* Dong L, Li P, Wang B. Enhancing MM/P(G)BSA methods: integration of formulaic entropy for improved binding free energy calculations. J. Comput. Chem. 46, e70093 (2025); preprint ChemRxiv, doi:10.26434/chemrxiv-2024-9308m.
 * Duan L, Liu X, Zhang JZH. Interaction entropy: a new paradigm for highly efficient and reliable computation of protein–ligand binding free energy. J. Am. Chem. Soc. 138, 5722 (2016).
 * Dzubiella J, Swanson JMJ, McCammon JA. Coupling hydrophobicity, dispersion, and electrostatics in continuum solvent models. Phys. Rev. Lett. 96, 087802 (2006).
 * Ekberg V, Ryde U. On the use of interaction entropy and related methods to estimate binding entropies. J. Chem. Theory Comput. 17, 5379 (2021).
@@ -852,7 +866,6 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Zhou Z, Payne P, Vasquez M, Kuhn N, Levitt M. Finite-difference solution of the Poisson–Boltzmann equation: complete elimination of self-energy. J. Comput. Chem. 17, 1344 (1996).
 * Achieving all-atom molecular dynamics accuracy from the Poisson–Boltzmann method through machine learning. J. Chem. Phys. 164, 054107 (2026).
 * Improving the predictive performance of binding affinities and poses for protein–cyclic peptide complexes through fine-tuned MM/PBSA(GBSA)-based methods. Brief. Bioinform. 26, bbaf632 (2025).
-* Enhancing MM/P(G)BSA methods: integration of formulaic entropy. ChemRxiv, doi:10.26434/chemrxiv-2024-9308m (2024, preprint).
 
 This list was compiled from abstracts and bibliographic indexes (November
 2026); volume and page numbers have not been checked
