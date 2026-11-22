@@ -485,6 +485,24 @@ et al.'s (vacuum beyond the contour).
 *Evidence:* every difference in the maps explained to the last digit or by a
 stated difference in definition (e.g. DelPhi's cutoff at 3σ, the sign of the
 Born penalty).
+*Status (0.1.5): done.* `scripts/compare_pydelphi.py` runs pyDelPhi 0.2.0
+[Panday, Zhao & Alexov 2026] as a separate program on shared grids
+(synthetic molecule, 1YCR; pdie 1; 0 and 0.15 M); `tests/test_pydelphi.py`
+repeats it when pyDelPhi is installed.
+* Every face of both runs equals pyDelPhi's maps to their 6 digits once its
+  four definitions are applied. The definitions:
+  * the Gaussians are cut at max(3σR_max, R_max + r_ion) + √3/2·h (at a
+    face, also from the node below);
+  * faces of density < 0.02 take the outer ε;
+  * the six faces around a node are averaged where they differ by < 2 %;
+  * the vacuum contour is drawn on the density.
+* Ions: pyDelPhi uses the Born penalty with pbsolve's sign (keeping ions
+  out). The difference is its Debye constant (+0.082 % length).
+* Boundary and constants: a screened-Coulomb boundary without (1+κa), and
+  CODATA 2006 constants (1.83e-7).
+* Energies: with all of these, every pyDelPhi energy to its last printed
+  digit. Without them, ΔG_polar of 1YCR differs by 5e-6 and its salt effect
+  by 1.0 % (docs/VALIDATION.md, "Cross-check with pyDelPhi").
 
 ### v0.4 — End-point free energies (MM-PBSA and related)
 
@@ -795,6 +813,7 @@ Observables     energies, potential at points / on grids, forces, adjoint gradie
 * Notay Y. Flexible conjugate gradients. SIAM J. Sci. Comput. 22, 1444 (2000).
 * Qi R, Botello-Smith WM, Luo R. Acceleration of linear finite-difference Poisson–Boltzmann methods on graphics processing units. J. Chem. Theory Comput. 13, 3378 (2017).
 * Qi R, Luo R. Robustness and efficiency of Poisson–Boltzmann modeling on graphics processing units. J. Chem. Inf. Model. 59, 409 (2019).
+* Panday SK, Zhao S, Alexov E. Accurate and scalable continuum electrostatics for large biomolecular systems: the pyDelPhi Poisson–Boltzmann framework. J. Chem. Inf. Model. 66, 488 (2026).
 * Parsegian VA. Energy of an ion crossing a low dielectric membrane: solutions to four relevant electrostatic problems. Nature 221, 844 (1969).
 * Quan C, Stamm B, Maday Y. A domain decomposition method for the Poisson–Boltzmann solvation models. SIAM J. Sci. Comput. 41, B320 (2019).
 * Reis PBPS, Vila-Viçosa D, Rocchia W, Machuqueiro M. PypKa: a flexible Python module for Poisson–Boltzmann-based pKa calculations. J. Chem. Inf. Model. 60, 4442 (2020).

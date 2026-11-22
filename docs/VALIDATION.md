@@ -51,6 +51,7 @@ should update the status table below.
 | Born ion, `harmonic`, same spacings | −4.16 % / −1.08 % / −1.65 % / −1.09 % (unchanged) |
 | Spline surfaces and forces (0.0.2): `surface="spl2"`/`"spl4"`, `Solver.polar_forces` | APBS 3.4.1 spline maps equal to the 7 digits of its DX files, energies ≤ 1e-9 (solvated) and 3e-10 (ΔG, `bcfl zero`) in APBS units; forces (qf, db, ib; `lpbe`, `npbe`, `smpbe`) = the exact gradient of the discrete energy on one level with `bcfl zero` (2e-9 to 4e-9), APBS `calcforce comps` to ≤ 4e-7 of the largest force (≤ 6e-10 with `zero`); a charge in a dielectric sphere: Kirkwood's force at the surface's Born radius to 0.08 %, momentum balanced to 1 %; db scatters 5–10 % over grid placements; spline surfaces are a different model (Born −11…−16 %, 1YCR −2609 vs −1231 kcal/mol with `mol`); 14/14 mutations; default path bit-identical; `coulomb="analytic"` on spline surfaces fixed (now equal to `coulomb="grid"` within 1e-4 on an exact radial case); see *Spline surfaces and forces* |
 | Gaussian dielectric (0.0.2): `surface="gauss"`, `gauss_sigma`, `gauss_contour` | maps = the formulas to 1e-9 (ε and the ions' Born accessibility); reference state with the Gaussian ε inside the ε ≤ 20 contour (Li et al. 2014): one Gaussian atom against its exact radial solution within 1.0–3.2 % at 0.5 Å and 0.45–1.4 % at 0.18 Å, salt effect to 0.07 %; with a homogeneous reference 17–63 % off (charges' grid self-energies); 1YCR ΔΔG_polar 385.9 / 383.3 / 383.5 kcal/mol at 0.49 / 0.35 / 0.25 Å (`mol` 434.9 / 429.0 / 427.6); `npbe` refused (Born penalty bounded, density diverges at charges); CPU = CUDA; 9/9 mutations; default path bit-identical; see *Gaussian dielectric* |
+| Gaussian dielectric vs pyDelPhi 0.2.0 (0.1.5, ROADMAP R4): `scripts/compare_pydelphi.py`, `tests/test_pydelphi.py` | shared grids, pdie 1, 0 and 0.15 M, synthetic molecule and 1YCR: every face of both runs equal to pyDelPhi's cubes (6 digits) once its four definitions are applied (Gaussians cut at max(3σR_max, R_max + r_ion) + √3/2·h, density floor 0.02, 2 % smoothing, contour on the density); Born-penalty ions with pbsolve's sign (potential rms 1.4e-6 kT/e); Debye constant 0.01990076478 (+0.082 % length), screened-Coulomb boundary, CODATA 2006 (1.83e-7); with them every energy to pyDelPhi's last digit (≤ 4.1e-5 kT); without them ΔG_polar 5e-6 apart, salt effect 1.0 %; see *Cross-check with pyDelPhi (R4)* |
 | Non-polar terms (0.0.2): `apolar_energy` (γ·SASA + p·SAV + WCA dispersion, as APBS `apolar`) | APBS' 11 alkane examples to every printed digit (totals ≤ 2.2e-13); APBS 3.4.1 live on neopentane, a synthetic molecule with radius-0 atoms and 1YCR (1670 atoms) ≤ 1.3e-12, volumes identical, per atom ≤ 5e-13; one sphere, two spheres and one atom's dispersion against closed forms (0.2–0.5 %); Lennard-Jones from OpenMM = APBS' AMBER parameters to 1e-9; 10/10 mutations; 1YCR 0.75 s on 18 threads (APBS 12.7 s); see *Non-polar terms* |
 | Per-atom and per-residue decomposition (0.0.3): `PolarResult.atom_energies`, `PBSAFrame.atom_terms`/`residue_terms`, `pbsolve mmpbsa --per-residue` | shares sum to ΔG_polar (1e-12; `spl0`, `spl2`, `spl4`, `coulomb="analytic"`, forces path identical); linear response: E_i of all charges = E_i alone + pair terms from single and pair solves (1e-8, focusing and `mdh`), pair terms symmetric with one level and `zero` (1e-8); APBS 3.4.1 `calcenergy comps` per atom ≤ 2.8e-6 of the largest share with `mdh`, 1e-9 (synthetic) and 3.2e-8 (1YCR) with `zero`; 9/9 mutations; energies bit-identical (CPU, CUDA), the shares add ≤ 50 ms to 5DK3; see *Per-atom and per-residue decomposition* |
 | Interaction entropy (0.0.4): `interaction_entropy`, `interaction_energy` | IE and C2 of two-level energy distributions = closed form (1e-12); normal energies: C2 = σ²/2kT, IE → C2, and the low bias of IE at large σ reproduces Ekberg & Ryde 2021 (σ = 3 kcal/mol: IE 7.0 ± 0.4 vs exact 7.60 with 10⁵ frames, C2 7.59 ± 0.03); no overflow at σ = 200 kcal/mol; E_int = OpenMM 8.6 (Reference platform, ff14SB peptides from tleap, bonds and 1-4 exceptions inside the molecules) to 1.7e-12, and = an explicit pair sum to 1e-12; 16/16 mutations; see *Interaction entropy* |
@@ -3201,6 +3202,113 @@ The Gaussian maps are built on the host for both states (the reference
 needs them for its contour). One `exp` per atom and point took 2.05 s (CPU)
 and 2.29 s (CUDA); the per-axis factors halved that, and restricting each row
 to the cutoff sphere saved nothing measurable.
+
+### Cross-check with pyDelPhi (R4)
+
+pyDelPhi 0.2.0 [Panday, Zhao & Alexov 2026] is the Python version of DelPhi,
+whose Gaussian dielectric and salt model `surface="gauss"` follows. It is
+AGPL-3.0, so `scripts/compare_pydelphi.py` runs its `pydelphi-static` as a
+separate program and reads only its output files: cube maps with 6
+significant digits and energies with 4 decimals. `tests/test_pydelphi.py`
+runs the same check when pyDelPhi is installed.
+
+**Setup.** Both programs get one grid: pyDelPhi `grid_size`, `scale`,
+`acent`, and a single-level `GridSpec`. Shared settings:
+* σ = 0.93, ε_in = `pdie` = 1, ε_out = `sdie` = 80, 298.15 K;
+* ion radius 2 Å, 0 and 0.15 M;
+* pyDelPhi `gaussiancutoff` with the density cutoff (80 − 20)/79. That is
+  the contour ε = 20 with vacuum beyond it in the reference run, which for
+  `pdie=1` is pbsolve's contour reference.
+
+Systems:
+* a synthetic 4-atom molecule on 65³ nodes;
+* 1YCR (pdb2pqr CHARMM radii, 1670 atoms, no radius 0) on 97³ nodes;
+* both at 0.5 Å spacing.
+
+pyDelPhi ran on the CPU with numba's CUDA simulator. Its numba 0.61 crashes
+while initialising CUDA 13, even for `-P cpu`.
+
+**Definitions.** pyDelPhi's maps differ from the formula pbsolve evaluates
+(to 5e-13) in four ways, first found from its outputs and then confirmed
+against its source:
+1. *Cutoff.* Every atom's Gaussian is cut at one distance,
+   max(3σR_max, R_max + max(r_ion, r_probe)) + √3/2·h; here 5.734 and
+   6.780 Å. At a face, the atom must also lie within reach of the node
+   below. pbsolve cuts each atom where g ≤ 1e-12.
+2. *Density floor.* Faces with ρ < 0.02 take the outer ε (ε_out, or 1 in the
+   vacuum run). pbsolve keeps 80 − 79ρ, down to 78.42 at ρ = 0.02.
+3. *Smoothing.* Where one of the six faces around a node has ρ > 0.02 and
+   their values differ by less than 2 % (largest / smallest), the six faces
+   take their mean: first the nodes of even, then of odd i + j + k.
+4. *Vacuum contour.* It is drawn on the density, ρ ≥ ρ_c, not on ε ≤ 20.
+   This is the same up to the cutoff.
+
+| Faces beyond the cubes' rounding | synthetic (811 200 faces) | 1YCR (2 709 792 faces) |
+|---|---|---|
+| solvated run, pbsolve as is | 27 400 (max \|Δε\| 1.58) | 1 056 234 (1.59) |
+| reference run, pbsolve as is | 0 | 294 235 (19: faces on either side of the contour) |
+| either run, with the four definitions | 0 | 0 |
+
+With the definitions, every face of both runs agrees with pyDelPhi to the
+last printed digit, at 0 and 0.15 M. The full-protein node density matches
+too.
+
+**Ions.** pyDelPhi writes no ion map. Its potential acts as a fingerprint
+instead: pbsolve's solver run on pyDelPhi's dielectric maps and boundary
+values reproduces pyDelPhi's potential (rms 1.4e-6 kT/e, synthetic) only
+with pbsolve's Born accessibility K = exp(−l_B/(2 r_ion)·(1/ε − 1/ε_out)).
+The other candidates are far off:
+* the sign printed in Jia et al. (2017): 124 kT/e;
+* no exclusion: 2.4 kT/e;
+* DelPhi's R + r_ion spheres: 0.05 kT/e.
+
+So pyDelPhi keeps the ions out, as pbsolve does. Its κ comes from a Debye
+length of 0.01990076478·√(ε T / I) Å. That is 7.9357 Å at 0.15 M, 80 and
+298.15 K, against 7.9292 Å from CODATA (+0.082 %); with it the rms drops
+from 2.4e-5 to 1.4e-6 kT/e.
+
+**Boundary.** pyDelPhi's coulombic boundary is Σ q e^(−κr)/(ε_out r), and in
+the vacuum run Σ q/r. With its κ it matches to 4e-6 of the largest value.
+pbsolve's `mdh` uses e^(−κ(r−a))/(1+κa): the same without ions, 15 % apart
+at the box faces of 1YCR with 0.15 M.
+
+**Constants.** pyDelPhi uses CODATA 2006: e²/(4πε₀k) = 167 100.9163 Å K
+against 167 100.9469 (CODATA 2018, pbsolve). The difference is 1.83e-7, and
+energies in kT scale with it.
+
+**Energies (kT).** In each block the rows are:
+* pyDelPhi as reported;
+* pbsolve's solver on pyDelPhi's maps, ion term and boundary values;
+* pbsolve's own pipeline with the four definitions, pyDelPhi's κ and its
+  boundary formula;
+* the same scaled to pyDelPhi's constant;
+* pbsolve as it is.
+
+| 1YCR | solvated | reference | ΔG_polar | salt effect |
+|---|---|---|---|---|
+| pyDelPhi, 0 M | 56 473.0626 | 58 094.5869 | −1621.5243 | |
+| pbsolve on pyDelPhi's maps | 56 473.0719 | 58 094.5966 | −1621.5247 | |
+| pbsolve, pyDelPhi's definitions | 56 473.0729 | 58 094.5975 | −1621.5246 | |
+| … and pyDelPhi's constant | 56 473.0626 | 58 094.5869 | −1621.5243 | |
+| pbsolve | 56 473.9043 | 58 095.4205 | −1621.5163 | |
+| pyDelPhi, 0.15 M | 56 469.6978 | 58 094.5869 | −1624.8891 | −3.3648 |
+| pbsolve on pyDelPhi's maps | 56 469.7072 | 58 094.5966 | −1624.8895 | −3.3647 |
+| pbsolve, pyDelPhi's definitions | 56 469.7082 | 58 094.5975 | −1624.8894 | −3.3647 |
+| … and pyDelPhi's constant | 56 469.6978 | 58 094.5869 | −1624.8891 | −3.3647 |
+| pbsolve | 56 470.5041 | 58 095.4205 | −1624.9164 | −3.4002 |
+
+* **Solvers agree.** On the same maps the solvers agree to 1.6e-7 relative:
+  the source constant and the cubes' 6 digits.
+* **Definitions and constant explain the rest.** With all of them, pbsolve
+  reproduces every pyDelPhi energy to its last printed digit: within 4.1e-5
+  kT for 1YCR and 3e-5 kT for the synthetic molecule.
+* **What the definitions themselves change:**
+  * ΔG_polar by 5e-6 relative (1YCR, 0 M);
+  * the salt effect by 1.0 % (−3.3648 against −3.4002 kT), from the Debye
+    constant, the boundary formula and the smoothed ion term.
+
+  None of this is a discretisation difference: the maps differ only where
+  the definitions say.
 
 ## Per-atom and per-residue decomposition
 

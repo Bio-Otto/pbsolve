@@ -148,6 +148,24 @@ consequences:
   `pdie=1`), the potential next to a point charge is not, so the Boltzmann
   ion density diverges at the charges inside the molecule. `"smpbe"` bounds
   the density and works.
+
+**Compared with DelPhi.** pbsolve evaluates the formulas above as they stand.
+DelPhi's Gaussian model, as implemented in pyDelPhi [Panday, Zhao & Alexov
+2026], differs from them in a few definitions:
+* it cuts the atomic Gaussians at max(3σR_max, R_max + r_ion) plus half a
+  grid diagonal;
+* it gives faces of density below 0.02 the solvent value;
+* it averages the six faces around a node where they differ by less than
+  2 %;
+* it uses a slightly different Debye length and a screened-Coulomb boundary
+  without the (1 + κa) factor.
+
+With these definitions pbsolve reproduces pyDelPhi's maps face for face and
+its energies to the last printed digit. Without them, ΔG_polar of 1YCR
+differs by 5e-6 (relative) and the salt effect by 1 %
+(`scripts/compare_pydelphi.py`, [validation](../VALIDATION)). pyDelPhi
+applies the ions' Born penalty with the sign that keeps them out, as
+pbsolve does.
 * All ion species need one valence and one radius (one penalty).
 
 A calculation takes about 1.5 times as long as with `"mol"` on a GPU (the

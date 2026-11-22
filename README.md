@@ -35,7 +35,8 @@ solution methods and integrations can be added.
 * **Gaussian dielectric** — `surface="gauss"` grades ε from the atoms'
   Gaussian densities instead of a surface (Li et al. 2013), with ions kept
   out by their Born energy; the reference state keeps the molecule's interior
-  dielectric (Li et al. 2014), which makes the energies converge.
+  dielectric (Li et al. 2014), which makes the energies converge. Checked
+  against pyDelPhi (DelPhi's Gaussian model) face for face.
 * **Membranes** — `zmem`/`lmem` add an implicit membrane slab (APBS'
   `draw_membrane2` rule, maps identical), uniform or with the depth profile
   of Greene et al. (2019), with automatic pore filling, and periodic

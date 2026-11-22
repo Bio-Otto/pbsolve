@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Validation
+
+- Cross-check of the Gaussian dielectric with pyDelPhi 0.2.0 (ROADMAP R4).
+  `scripts/compare_pydelphi.py` runs it as a separate program on shared
+  grids, and `tests/test_pydelphi.py` runs the check when it is installed.
+  - Maps: every face equals pyDelPhi's once its definitions are applied —
+    the Gaussian cutoff, the density floor 0.02, the 2 % smoothing and the
+    contour on the density.
+  - Energies: with those definitions, plus its Debye constant, boundary
+    formula and CODATA 2006 constants, pbsolve reproduces pyDelPhi's
+    energies to its last digit. pyDelPhi uses the Born penalty with
+    pbsolve's sign.
+
 ### Packaging
 
 - The conda recipe declares the `pbsolve` command
