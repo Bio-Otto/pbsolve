@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.8 — 2026-11-23
+
+Exact gradients of ΔG_polar with respect to the charges and the dielectric
+constants (ROADMAP 4.20, first stage) and a clearer logo.
+
 ### Added
 
 - `Solver.polar_gradient` (ROADMAP 4.20, first stage): ΔG_polar with its
