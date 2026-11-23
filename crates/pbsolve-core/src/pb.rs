@@ -133,14 +133,19 @@ pub fn coefficient_maps(grid: &Grid, atoms: &[Atom], params: &PbParams, medium: 
 }
 
 /// Maps of one level; `surf` is the solvated state's surface (None: reference).
-fn maps_with(grid: &Grid, atoms: &[Atom], params: &PbParams, surf: Option<&MolecularSurface>) -> CoefficientMaps {
+pub(crate) fn maps_with(
+    grid: &Grid,
+    atoms: &[Atom],
+    params: &PbParams,
+    surf: Option<&MolecularSurface>,
+) -> CoefficientMaps {
     match surf {
         Some(s) => CoefficientMaps::solvated_with(grid, atoms, params, s),
         None => CoefficientMaps::reference(grid, atoms, params),
     }
 }
 
-fn boundary_medium(params: &PbParams, medium: Medium) -> BoundaryMedium {
+pub(crate) fn boundary_medium(params: &PbParams, medium: Medium) -> BoundaryMedium {
     let lb0 = bjerrum_length_vacuum(params.temperature);
     match medium {
         Medium::Reference => BoundaryMedium {
@@ -501,7 +506,7 @@ fn nonlinear_energy(
     }
 }
 
-fn solver_options(params: &PbParams) -> SolverOptions {
+pub(crate) fn solver_options(params: &PbParams) -> SolverOptions {
     SolverOptions {
         tol: params.tol,
         max_iter: params.max_iter,
@@ -637,7 +642,7 @@ fn surface_of(atoms: &[Atom], params: &PbParams, medium: Medium) -> Option<Molec
 /// The analytic boundary values of the outermost of the focusing `levels`;
 /// on a laterally periodic level those of its z faces, from the periodic
 /// image sum ([`periodic_boundary_values`]).
-fn outer_boundary_of(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium: Medium) -> Vec<f64> {
+pub(crate) fn outer_boundary_of(levels: &[Grid], atoms: &[Atom], params: &PbParams, medium: Medium) -> Vec<f64> {
     let m = boundary_medium(params, medium);
     if levels[0].is_periodic() {
         return periodic_boundary_values(&levels[0], atoms, &m);
@@ -996,15 +1001,10 @@ pub fn polar_forces<B: Backend>(be: &B, atoms: &[Atom], params: &PbParams, spec:
     })
 }
 
-/// [`polar_solvation`], with `forces` also each state's forces (solvated,
-/// reference).
-fn polar<B: Backend>(
-    be: &B,
-    atoms: &[Atom],
-    params: &PbParams,
-    spec: &GridSpec,
-    forces: bool,
-) -> Result<(PolarSolvation, Option<[ForceTerms; 2]>)> {
+/// With `surface = gauss`, every charged atom of radius 0 must lie inside
+/// the contour: outside it the atom sees the Gaussian ε in one state and pdie
+/// in the other, and its grid self-energy does not cancel.
+pub(crate) fn check_gaussian_charges(atoms: &[Atom], params: &PbParams) -> Result<()> {
     if params.surface == SurfaceMethod::Gaussian {
         // A charge outside the contour sees the Gaussian ε in one state and pdie in the other.
         for (n, a) in atoms
@@ -1024,6 +1024,19 @@ fn polar<B: Backend>(
             }
         }
     }
+    Ok(())
+}
+
+/// [`polar_solvation`], with `forces` also each state's forces (solvated,
+/// reference).
+fn polar<B: Backend>(
+    be: &B,
+    atoms: &[Atom],
+    params: &PbParams,
+    spec: &GridSpec,
+    forces: bool,
+) -> Result<(PolarSolvation, Option<[ForceTerms; 2]>)> {
+    check_gaussian_charges(atoms, params)?;
     let lb0 = bjerrum_length_vacuum(params.temperature);
     // The finest level's energy and, with `forces`, the forces from its full
     // potential (whose values at the charged nodes are those `energy_at_charges` reads).

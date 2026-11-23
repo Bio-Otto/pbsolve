@@ -150,7 +150,7 @@ const NODES: usize = 4;
 
 /// Radial factors of the monopole, dipole and quadrupole potentials outside a
 /// sphere of radius `rad` and dielectric ε_p in a medium (ε_w, κ) — APBS `multipolebc`.
-fn multipole_factors(r: f64, m: &BoundaryMedium, rad: f64) -> [f64; 3] {
+pub(crate) fn multipole_factors(r: f64, m: &BoundaryMedium, rad: f64) -> [f64; 3] {
     let eps_r = m.eps / m.eps_solute;
     let r2 = r * r;
     let r3 = r2 * r;
@@ -175,16 +175,16 @@ fn multipole_factors(r: f64, m: &BoundaryMedium, rad: f64) -> [f64; 3] {
 }
 
 /// Charge, dipole and traceless quadrupole (APBS convention, already divided by 3).
-struct Multipoles {
-    center: [f64; 3],
-    radius: f64,
+pub(crate) struct Multipoles {
+    pub(crate) center: [f64; 3],
+    pub(crate) radius: f64,
     charge: f64,
     dipole: [f64; 3],
     quad: [[f64; 3]; 3],
 }
 
 impl Multipoles {
-    fn of(atoms: &[Atom]) -> Self {
+    pub(crate) fn of(atoms: &[Atom]) -> Self {
         let (lo, hi) = bounding_box(atoms, false);
         let center = [0, 1, 2].map(|a| 0.5 * (hi[a] + lo[a]));
         let radius = atoms

@@ -696,6 +696,20 @@ differentiable PB reference. Machine-learned level-set surfaces [Wei, Zhao &
 Luo 2021] show how surface computation can become GPU-friendly and
 differentiable. pbsolve provides the solver and data pipeline; trained
 models are separate, optional packages.
+*Status (0.1.8): charges and dielectric constants done; radii, positions and
+the array interfaces remain.*
+* `Solver.polar_gradient` (`gradient.rs`): dΔG_polar/dq of every atom and
+  dΔG_polar/d pdie, d sdie, exact for the discrete energy through every
+  focusing level and the outer boundary condition: one adjoint solve per
+  level and state, the boundary cotangent carried to the coarser level by the
+  transposed focusing. The energy equals `polar_solvation`'s bit for bit.
+* 1YCR: central differences to 4e-9 of the largest charge derivative and
+  2e-8 for the dielectric constants; Σ q ∂ΔG/∂q = 2ΔG to 4e-13; 1.9–2.3× the
+  energy's time (docs/VALIDATION.md, "Exact gradients").
+* Next: radii and positions on the spline surfaces through every level (the
+  exact counterpart of `polar_forces`); then DLPack arrays and PyTorch/JAX
+  wrappers (`torch.autograd.Function`, `jax.custom_vjp`); the nonlinear
+  equations last.
 
 ### v0.6+ — Further solution methods
 

@@ -150,6 +150,21 @@ def test_preload_can_be_disabled(monkeypatch, tmp_path):
 
 
 @needs_cuda
+def test_cuda_gradient_matches_cpu():
+    """The adjoint solves of `polar_gradient` on the GPU."""
+    coords, charges, radii = pbsolve.read_pqr("tests/data/1ycr_amber_opt_pdb2pqr.pqr")
+    sel = slice(1500, None)
+    kw = dict(grid_spacing=0.45, ionic_strength=0.15, pdie=2.0, fadd=12.0)
+    args = (coords[sel], charges[sel], radii[sel])
+    cpu = pbsolve.Solver(platform="CPU", **kw).polar_gradient(*args, dielectric_constants=True)
+    gpu = pbsolve.Solver(platform="CUDA", **kw).polar_gradient(*args, dielectric_constants=True)
+    assert gpu.result.platform == "CUDA"
+    assert gpu.energy == pytest.approx(cpu.energy, rel=1e-10)
+    assert np.abs(gpu.charges - cpu.charges).max() < 1e-7 * np.abs(cpu.charges).max()
+    assert gpu.pdie == pytest.approx(cpu.pdie, rel=1e-7) and gpu.sdie == pytest.approx(cpu.sdie, rel=1e-7)
+
+
+@needs_cuda
 @pytest.mark.parametrize("pre", ["multigrid", "multigrid-f32", "jacobi"])
 def test_cuda_matches_cpu_on_a_peptide(pre):
     """Multilevel hierarchy (Galerkin operators, transfers, coarsest solve) on the GPU."""

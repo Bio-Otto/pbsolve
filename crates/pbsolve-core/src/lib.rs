@@ -36,6 +36,7 @@ pub mod cpu;
 pub mod error;
 pub mod forces;
 pub mod gaussian;
+pub mod gradient;
 pub mod grid;
 pub mod membrane;
 pub mod molecule;
@@ -56,6 +57,7 @@ pub use autogrid::{apbs_effective_dime, DimePolicy, GridSpec};
 pub use backend::Backend;
 pub use cpu::{CpuBackend, CpuSingle};
 pub use error::{PbError, Result};
+pub use gradient::{polar_gradient, PolarGradient};
 pub use grid::Grid;
 pub use molecule::Atom;
 pub use params::{

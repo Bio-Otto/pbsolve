@@ -104,6 +104,18 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   following APBS `qfForceSpline1/2/4`, `Vpmg_dbForce`, `Vpmg_ibForce`; it
   needs a spline surface. Without forces `polar` reads only the charged
   nodes, as before.
+* **Gradients** (`gradient.rs`, `polar_gradient`): the exact derivative of
+  ΔG_polar with respect to the charges and to pdie and sdie by the adjoint
+  method. A forward pass repeats `polar`'s focusing with host maps through
+  `solve_with_maps` (same maps, charges, boundary values and solver: the
+  same energy bit for bit) and keeps every level's potential; the adjoint
+  pass solves A λ = r on each level, finest first, with zero boundary values
+  on the same backend, carries the boundary cotangent r + Σ c ε λ to the
+  coarser level through the transposed trilinear focusing and ends in the
+  derivative of the analytic boundary (`mdh`, `sdh` for the charges).
+  ∂ε_f/∂pdie and ∂ε_f/∂sdie come from the maps rebuilt with pdie = 1,
+  sdie = 2. One state at a time; the `mdh` term is a direct sum over atoms
+  and boundary nodes.
 * **Non-polar terms** (`apolar.rs`, `pbsolve.apolar_energy`): APBS
   `apolar`'s area (reference-sphere points on r + srad, the surface code's
   `Accessibility` test), volume (trapezoidal rule over APBS' cell-list box)

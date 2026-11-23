@@ -32,6 +32,10 @@ solution methods and integrations can be added.
 * **Forces on the atoms** — `Solver.polar_forces` gives −dΔG_polar/dr on APBS'
   smooth spline surfaces (`surface="spl2"`/`"spl4"`), split into charge–field,
   dielectric-boundary and ionic-boundary parts as APBS `calcforce`.
+* **Exact gradients** — `Solver.polar_gradient` gives dΔG_polar/dq of every
+  atom and the derivatives with respect to `pdie` and `sdie`, exact for the
+  discrete energy through all focusing levels and the boundary condition
+  (adjoint method), for fitting parameters and training models against PB.
 * **Gaussian dielectric** — `surface="gauss"` grades ε from the atoms'
   Gaussian densities instead of a surface (Li et al. 2013), with ions kept
   out by their Born energy; the reference state keeps the molecule's interior

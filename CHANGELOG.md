@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- `Solver.polar_gradient` (ROADMAP 4.20, first stage): ΔG_polar with its
+  exact derivatives with respect to every atom's charge and, with
+  `dielectric_constants=True`, to `pdie` and `sdie`. They are exact for the
+  discrete energy, through every focusing level and the outer boundary
+  condition (adjoint method: one more linear solve per level and state,
+  about twice the cost of the energy); the energy equals `polar_solvation`'s
+  bit for bit. Result class `PolarGradient`.
+
 ### Documentation
 
 - The logo draws the protein's ribbon cartoon and the ligand's rings in

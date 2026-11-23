@@ -93,6 +93,7 @@ should update the status table below.
 | Batched solves (0.0.2) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (0.0.2): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark (0.1.7, ROADMAP 4.19): `scripts/binding_benchmark.py` | Open Force Field protein–ligand benchmark, 14 targets, 359 ligands, single minimised structures: mean Pearson R 0.60 at interior dielectric 2 (ρ 0.63, τ 0.48; 0.28 on the poses as given); per-residue dielectrics 0.59, fractional interface 0.59, Gaussian dielectric 0.48, dispersion term 0.37; APBS 3.4.1 = pbsolve on mcl1 to 0.0002 kcal/mol (same R); 1.7–11.5 s per calculation on a shared CPU; see *Binding benchmark against experiment* |
+| Exact gradients (0.1.8, ROADMAP 4.20): `Solver.polar_gradient` | energy = `polar_solvation` bit for bit; dΔG/dq against central differences ≤ 4.1e-9 of the largest derivative on 1YCR (`mol`/`mdh`, fractional/`mdh-fast`, `spl2`/`sdh`; two focusing levels), dΔG/dpdie and dΔG/dsdie ≤ 2.4e-8 relative; Σ q ∂ΔG/∂q = 2ΔG to 4e-13; one level with `zero`: the reaction potential (1e-9); 12/12 mutations; 1.9–2.3× the energy's time; see *Exact gradients* |
 
 ### APBS parity: 1YCR (h ≈ 0.46/0.46/0.38 Å, dime 129³, 2 focusing levels, `cfac 1.7`, `fadd 20`)
 
@@ -4495,6 +4496,83 @@ an hour on 12 cores, the minimisation 3 minutes.
 states as given. Correlations within a series do not test absolute
 affinities (MM-PBSA values are offset per target). An MD-averaged protocol
 and GPU timings remain (ROADMAP 4.19).
+
+## Exact gradients (`Solver.polar_gradient`, ROADMAP 4.20)
+
+**Change.** `polar_gradient` (`gradient.rs`) returns ΔG_polar with its
+derivatives with respect to every atom's charge and to `pdie` and `sdie`.
+They are the derivatives of the discrete energy pbsolve reports, through
+every focusing level and the outer boundary condition.
+
+**Method.** One state's energy is G = ½ wᵀu_L, the energy weights w (the
+charges spread with the energy's weights W) times the finest level's
+potential. On every level the interior nodes solve A_ℓ u_ℓ = 4π l_B0 S_ℓ q
+(S: the `chgm` weights) with boundary values g_0 (the analytic condition) or
+g_ℓ = P_ℓ u_ℓ₋₁ (trilinear focusing). The adjoint pass runs from the finest
+level to the outermost: A_ℓ λ_ℓ = r_ℓ (r_L = ½ w, zero boundary values, the
+same operator), the boundary cotangent c_ℓ = r_ℓ + Σ c_a ε_f λ_ℓ (over the
+boundary nodes' interior neighbours) and r_ℓ₋₁ = P_ℓᵀ c_ℓ. Then
+
+```text
+dG/dq_i  = ½ W_iᵀ u_L + 4π l_B0 Σ_ℓ S_ℓ,iᵀ λ_ℓ + Σ_b c_0,b ∂g_0,b/∂q_i
+dG/dε    = −Σ_ℓ Σ_faces c_a (∂ε_f/∂ε)(λ_i − λ_j)(u_i − u_j) + c_0ᵀ ∂g_0/∂ε      (ε = pdie, sdie)
+```
+
+The forward pass repeats `polar_solvation`'s arithmetic (same maps, charge
+weights, boundary values and solver), so the energy is the same bit for bit
+(tested). ∂ε_f/∂pdie and ∂ε_f/∂sdie come from the maps rebuilt with pdie = 1,
+sdie = 2: ε = pdie + (sdie − pdie) H with the sharp and spline surfaces,
+ε = 1/((1 − θ)/pdie + θ/sdie) with the fractional interface. The `mdh`
+boundary depends on sdie through 1/ε and κ = √(κ̄²/ε); `mdh-fast` is
+differentiated as `mdh` (≤ 1e-10 apart). The cost is one adjoint solve per
+level and state.
+
+**Checks (unit tests, 5 atoms, three focusing levels and one level).**
+* ΔG_polar is quadratic in the charges, so central differences in q are exact
+  up to rounding and the solver tolerance: the adjoint agrees to < 1e-7 of the
+  largest derivative for `mol` + `mdh`, `fractional` + `mdh-fast`, `spl2` +
+  `chgm spl4` + `zero` on one level, `vdw` + `chgm spl2`, `sdh` and `gauss`.
+* Euler's relation Σ q_i ∂ΔG/∂q_i = 2 ΔG to 1e-9.
+* On one level with `bcfl zero` and W = S the derivative is the reaction
+  potential at the atom, to 1e-9.
+* dΔG/dpdie and dΔG/dsdie against central differences (h = 1e-4 ε) to 1e-6
+  relative, with ions; without ions pdie ∂ΔG/∂pdie + sdie ∂ΔG/∂sdie = −ΔG
+  (ΔG scales as 1/ε) to 1e-9.
+* 12/12 mutations caught (boundary terms, transposed focusing, κ dependence,
+  fractional θ, spreading vs energy weights, sdh dipole and quadrupole, the
+  cotangent, signs, the ½).
+
+**Checks on a protein (1YCR, 1670 atoms, 0.15 M, default grid: two levels of
+121 × 121 × 105, tol 1e-12).** Central differences of `polar_solvation` on the
+same grid with h = 1e-3 e for eight atoms (the two largest charges and six
+others, among them atom 1206 with −0.0007 e) and h = 1e-4 ε for the
+dielectric constants:
+
+| Setup | ΔG_polar (kcal/mol) | max \|adjoint − difference\| / max \|dΔG/dq\| | dΔG/dpdie: adjoint, difference | dΔG/dsdie: adjoint, difference | Σ q ∂ΔG/∂q vs 2ΔG |
+|---|---|---|---|---|---|
+| `mol`, pdie 1, `mdh` | −1231.3481 | 4.1e-9 | +1261.214300, +1261.214311 | −0.37427614, −0.37427615 | 2.0e-13 |
+| `mol` fractional, pdie 4, `mdh-fast` | −274.3415 | 3.4e-9 | +74.121404, +74.121405 | −0.27620886, −0.27620886 | 3.6e-13 |
+| `spl2`, `chgm spl2`, pdie 2, `sdh` | −1176.9829 | 2.4e-9 | (sdh: charges only) | | 1.3e-13 |
+
+* **Reaction potential.** With `chgm spl0` dΔG/dq_i is within 0.002
+  kcal/mol/e of the reaction potential at the atom (φ_solvated − φ_reference,
+  trilinear; RMS 0.001 against an RMS derivative of 63): focusing and `mdh`
+  make the discrete energy only slightly asymmetric in the charges. With
+  `chgm spl2` the energy weights are not trilinear, and the trilinearly
+  interpolated reaction potential is off by up to 2.6 kcal/mol/e; the adjoint
+  uses the energy's own weights.
+* **Solver tolerance.** At the default tol 1e-8 the charge derivatives differ
+  from those at 1e-12 by ≤ 2e-6 kcal/mol/e.
+* **Cost.** 5.2, 4.6 and 4.8 s against 2.7, 2.1 and 2.1 s for the energy
+  alone (1.9–2.3×; 18 CPU threads on a machine shared with other jobs).
+* **CPU and CUDA** agree (`tests/test_platforms.py`, part of 1YCR at 0.45 Å:
+  energy 1e-10, derivatives 1e-7 of the largest).
+
+**Not yet (ROADMAP 4.20).** Radii and atom positions through every level (the
+forces of `polar_forces` ignore the coarser levels and the boundary, as
+APBS), the nonlinear equations, membranes and lateral periods, per-atom
+dielectric constants, `sdh` dielectric derivatives; zero-copy arrays for
+PyTorch and JAX.
 
 ## Sensitivity of the sharp dielectric boundary
 

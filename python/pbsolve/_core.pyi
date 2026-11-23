@@ -167,6 +167,24 @@ class PolarForces:
     result: PolarResult
     """The energy calculation (iterations, timings, grid)."""
 
+class PolarGradient:
+    """Polar solvation free energy and its gradient (:meth:`Solver.polar_gradient`).
+
+    The derivatives are exact for the discrete energy, through every focusing
+    level and the outer boundary condition (adjoint method).
+    """
+
+    energy: float
+    """Polar solvation free energy ΔG_polar in kcal/mol."""
+    charges: npt.NDArray[np.float64]
+    """dΔG_polar/dq of every atom in kcal/mol/e, shape (N,), uncharged atoms included."""
+    pdie: Optional[float]
+    """dΔG_polar/d pdie in kcal/mol (None unless ``dielectric_constants=True``)."""
+    sdie: Optional[float]
+    """dΔG_polar/d sdie in kcal/mol (None unless ``dielectric_constants=True``)."""
+    result: PolarResult
+    """The energy calculation (iterations, timings, grid)."""
+
 class Solver:
     """Linearized Poisson–Boltzmann solver with APBS ``mg-auto`` style focusing.
 
@@ -492,6 +510,58 @@ class Solver:
             If the surface is not "spl2" or "spl4", ``coulomb`` is not "grid", the
             arrays do not match, or an atom lies too close to the edge of the
             finest grid.
+        ConvergenceError
+            If a linear solve does not converge.
+        """
+    def polar_gradient(
+        self,
+        coords: npt.ArrayLike,
+        charges: npt.ArrayLike,
+        radii: npt.ArrayLike,
+        grid: Optional[GridSpec] = None,
+        dielectrics: Optional[npt.ArrayLike] = None,
+        dielectric_constants: bool = False,
+    ) -> PolarGradient:
+        """Polar solvation free energy ΔG_polar and its exact gradient.
+
+        Computes :meth:`polar_solvation` (the same energy, bit for bit) and the
+        derivatives of ΔG_polar with respect to every atom's charge and, with
+        ``dielectric_constants=True``, to ``pdie`` and ``sdie``. They are exact for
+        the discrete energy, through every focusing level and the outer boundary
+        condition (adjoint method: one extra linear solve per grid level and state,
+        about twice the cost of the energy). ``bcfl="mdh-fast"`` is differentiated
+        as ``"mdh"``, which it reproduces to 1e-10. On a single grid with
+        ``bcfl="zero"`` the charge derivative is the reaction potential at the atom.
+
+        Parameters
+        ----------
+        coords : array_like, shape (N, 3)
+            Atom positions in Å.
+        charges : array_like, shape (N,)
+            Atomic charges in e.
+        radii : array_like, shape (N,)
+            Atomic radii in Å.
+        grid : GridSpec, optional
+            Grid of the calculation; by default :meth:`make_grid` of the atoms.
+        dielectrics : array_like, shape (N,), optional
+            Interior dielectric of every atom in place of ``pdie``, as in
+            :meth:`polar_solvation`.
+        dielectric_constants : bool, optional
+            Also dΔG_polar/d pdie and dΔG_polar/d sdie. Needs ``surface`` "mol",
+            "vdw", "spl2" or "spl4", no ``dielectrics`` and ``bcfl`` "zero", "mdh"
+            or "mdh-fast".
+
+        Returns
+        -------
+        PolarGradient
+
+        Raises
+        ------
+        ValueError
+            For ``equation`` "npbe" or "smpbe" with ions, ``coulomb="analytic"``, a
+            membrane or a lateral period; for ``dielectric_constants`` with other
+            options than those above; if the arrays do not match or a charge lies
+            outside the grid.
         ConvergenceError
             If a linear solve does not converge.
         """

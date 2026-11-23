@@ -746,3 +746,38 @@ parts [Gilson et al. 1993; Im, Beglov & Roux 1998]:
 
 The [validation record](../VALIDATION) has the derivation and the checks
 (finite differences, APBS, a charge in a dielectric sphere).
+
+## Gradients
+
+{py:meth}`~pbsolve.Solver.polar_gradient` computes ΔG_polar (the number
+`polar_solvation` gives, bit for bit) with its derivative with respect to
+every atom's charge (kcal/mol/e) and, with `dielectric_constants=True`, to
+`pdie` and `sdie` (kcal/mol):
+
+```python
+g = solver.polar_gradient(coords, charges, radii, dielectric_constants=True)
+print(f"ΔG_polar {g.energy:.2f} kcal/mol, dΔG/dpdie {g.pdie:.3f}, dΔG/dsdie {g.sdie:.5f} kcal/mol")
+print(f"largest |dΔG/dq| {abs(g.charges).max():.2f} kcal/mol/e")
+```
+
+* **Exact.** The derivatives are those of the discrete energy, through every
+  focusing level and the outer boundary condition, by the adjoint method:
+  one more linear solve per grid level and state, about twice the time of
+  the energy (CPU). On 1YCR they agree with central differences to a few
+  1e-9 of the largest charge derivative and to 2e-8 (relative) for the
+  dielectric constants.
+* **Charges.** dΔG/dq_i is the reaction potential at atom i, corrected for
+  the slight asymmetry that focusing and the boundary condition give the
+  discrete energy (0.002 kcal/mol/e on 1YCR with `chgm="spl0"`), and taken
+  with the energy's own charge weights. ΔG_polar is quadratic in the
+  charges: Σ q_i dΔG/dq_i = 2 ΔG_polar. Uses: fitting charges, polarisable
+  models, training machine-learned models against PB energies.
+* **Dielectric constants.** For fitting `pdie` or `sdie` against experiment
+  or explicit solvent. Needs `surface` "mol", "vdw", "spl2" or "spl4", no
+  per-atom `dielectrics` and `bcfl` "zero", "mdh" or "mdh-fast".
+* **Not available.** The nonlinear equations with ions, `coulomb="analytic"`,
+  membranes and lateral periods. Derivatives with respect to radii and
+  positions through all levels are the next step (ROADMAP 4.20); until then
+  {py:meth}`~pbsolve.Solver.polar_forces` gives APBS' forces.
+
+The [validation record](../VALIDATION) has the derivation and the checks.

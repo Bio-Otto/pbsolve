@@ -11,10 +11,11 @@ use pbsolve_core::molecule::{atoms_from_arrays, read_pqr as core_read_pqr};
 use pbsolve_core::pb::{electrostatic_energy_kt, FieldSolution};
 use pbsolve_core::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol, kt_in_kj_per_mol};
 use pbsolve_core::{
-    apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_forces, polar_solvation, solve_focused,
-    solve_with_maps, solve_with_maps_nonlinear, Atom, Backend, BoundaryCondition, ChargeMethod, CoefficientMaps,
-    CoulombMethod, CpuBackend, DimePolicy, Equation, Grid, GridSpec, InterfaceMethod, IonSpecies, Medium, PbError,
-    PbParams, PolarForces, PolarSolvation, Preconditioner, SolveStats, SolverOptions, SurfaceMethod,
+    apbs_effective_dime as core_apbs_effective_dime, coefficient_maps, polar_forces, polar_gradient, polar_solvation,
+    solve_focused, solve_with_maps, solve_with_maps_nonlinear, Atom, Backend, BoundaryCondition, ChargeMethod,
+    CoefficientMaps, CoulombMethod, CpuBackend, DimePolicy, Equation, Grid, GridSpec, InterfaceMethod, IonSpecies,
+    Medium, PbError, PbParams, PolarForces, PolarGradient, PolarSolvation, Preconditioner, SolveStats, SolverOptions,
+    SurfaceMethod,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
@@ -119,6 +120,16 @@ impl Engine {
 
     fn forces(&self, atoms: &[Atom], params: &PbParams, spec: &GridSpec) -> Result<PolarForces, PbError> {
         dispatch!(self, be => polar_forces(be, atoms, params, spec))
+    }
+
+    fn gradient(
+        &self,
+        atoms: &[Atom],
+        params: &PbParams,
+        spec: &GridSpec,
+        dielectrics: bool,
+    ) -> Result<PolarGradient, PbError> {
+        dispatch!(self, be => polar_gradient(be, atoms, params, spec, dielectrics))
     }
 
     fn field(
@@ -504,6 +515,31 @@ struct PyPolarForces {
 impl PyPolarForces {
     fn __repr__(&self) -> String {
         format!("PolarForces(energy={:.4} kcal/mol)", self.energy)
+    }
+}
+
+/// Polar solvation free energy and its gradient (:meth:`Solver.polar_gradient`).
+///
+/// The derivatives are exact for the discrete energy, through every focusing
+/// level and the outer boundary condition (adjoint method).
+#[pyclass(name = "PolarGradient", module = "pbsolve", frozen, get_all)]
+struct PyPolarGradient {
+    /// Polar solvation free energy ΔG_polar in kcal/mol.
+    energy: f64,
+    /// dΔG_polar/dq of every atom in kcal/mol/e, shape (N,), uncharged atoms included.
+    charges: Py<PyArray1<f64>>,
+    /// dΔG_polar/d pdie in kcal/mol (None unless ``dielectric_constants=True``).
+    pdie: Option<f64>,
+    /// dΔG_polar/d sdie in kcal/mol (None unless ``dielectric_constants=True``).
+    sdie: Option<f64>,
+    /// The energy calculation (iterations, timings, grid).
+    result: Py<PyPolarResult>,
+}
+
+#[pymethods]
+impl PyPolarGradient {
+    fn __repr__(&self) -> String {
+        format!("PolarGradient(energy={:.4} kcal/mol)", self.energy)
     }
 }
 
@@ -1182,6 +1218,79 @@ impl PySolver {
             qf: array(&res.qf)?,
             db: array(&res.db)?,
             ib: array(&res.ib)?,
+            result: Py::new(py, PyPolarResult::from_core(py, res.solvation, self.engine.platform()))?,
+        })
+    }
+
+    /// Polar solvation free energy ΔG_polar and its exact gradient.
+    ///
+    /// Computes :meth:`polar_solvation` (the same energy, bit for bit) and the
+    /// derivatives of ΔG_polar with respect to every atom's charge and, with
+    /// ``dielectric_constants=True``, to ``pdie`` and ``sdie``. They are exact for
+    /// the discrete energy, through every focusing level and the outer boundary
+    /// condition (adjoint method: one extra linear solve per grid level and state,
+    /// about twice the cost of the energy). ``bcfl="mdh-fast"`` is differentiated
+    /// as ``"mdh"``, which it reproduces to 1e-10. On a single grid with
+    /// ``bcfl="zero"`` the charge derivative is the reaction potential at the atom.
+    ///
+    /// Parameters
+    /// ----------
+    /// coords : array_like, shape (N, 3)
+    ///     Atom positions in Å.
+    /// charges : array_like, shape (N,)
+    ///     Atomic charges in e.
+    /// radii : array_like, shape (N,)
+    ///     Atomic radii in Å.
+    /// grid : GridSpec, optional
+    ///     Grid of the calculation; by default :meth:`make_grid` of the atoms.
+    /// dielectrics : array_like, shape (N,), optional
+    ///     Interior dielectric of every atom in place of ``pdie``, as in
+    ///     :meth:`polar_solvation`.
+    /// dielectric_constants : bool, optional
+    ///     Also dΔG_polar/d pdie and dΔG_polar/d sdie. Needs ``surface`` "mol",
+    ///     "vdw", "spl2" or "spl4", no ``dielectrics`` and ``bcfl`` "zero", "mdh"
+    ///     or "mdh-fast".
+    ///
+    /// Returns
+    /// -------
+    /// PolarGradient
+    ///
+    /// Raises
+    /// ------
+    /// ValueError
+    ///     For ``equation`` "npbe" or "smpbe" with ions, ``coulomb="analytic"``, a
+    ///     membrane or a lateral period; for ``dielectric_constants`` with other
+    ///     options than those above; if the arrays do not match or a charge lies
+    ///     outside the grid.
+    /// ConvergenceError
+    ///     If a linear solve does not converge.
+    #[pyo3(signature = (coords, charges, radii, grid = None, dielectrics = None, dielectric_constants = false))]
+    #[allow(clippy::too_many_arguments)]
+    fn polar_gradient(
+        &self,
+        py: Python<'_>,
+        coords: PyReadonlyArray2<'_, f64>,
+        charges: PyReadonlyArray1<'_, f64>,
+        radii: PyReadonlyArray1<'_, f64>,
+        grid: Option<PyGridSpec>,
+        dielectrics: Option<PyReadonlyArray1<'_, f64>>,
+        dielectric_constants: bool,
+    ) -> PyResult<PyPolarGradient> {
+        let atoms = atoms_from(&coords, &charges, &radii)?;
+        let params = self.params_with(dielectrics.map(|d| d.as_array().to_vec()), atoms.len())?;
+        let spec = self.spec_for(&atoms, grid)?;
+        let res = py
+            .detach(|| self.engine.gradient(&atoms, &params, &spec, dielectric_constants))
+            .map_err(to_py)?;
+        let [pdie, sdie] = match res.dielectrics {
+            Some([p, s]) => [Some(p), Some(s)],
+            None => [None, None],
+        };
+        Ok(PyPolarGradient {
+            energy: res.solvation.energy_kcal,
+            charges: PyArray1::from_vec(py, res.charges).unbind(),
+            pdie,
+            sdie,
             result: Py::new(py, PyPolarResult::from_core(py, res.solvation, self.engine.platform()))?,
         })
     }
@@ -1951,6 +2060,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGridSpec>()?;
     m.add_class::<PyPolarResult>()?;
     m.add_class::<PyPolarForces>()?;
+    m.add_class::<PyPolarGradient>()?;
     m.add_function(wrap_pyfunction!(available_platforms, m)?)?;
     m.add_function(wrap_pyfunction!(cuda_info, m)?)?;
     m.add_function(wrap_pyfunction!(sasa, m)?)?;
