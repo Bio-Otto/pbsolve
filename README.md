@@ -1,4 +1,4 @@
-<h1 align="center"><img src="https://raw.githubusercontent.com/Bio-Otto/pbsolve/main/docs/_static/pbsolve-logo.svg" alt="pbsolve" width="520"></h1>
+<h1 align="center"><img src="https://raw.githubusercontent.com/Bio-Otto/pbsolve/main/docs/_static/pbsolve-logo.svg" alt="pbsolve: MMPBSA Analysis Suite" width="720"></h1>
 
 **Fast Poisson–Boltzmann electrostatics and solvation energies — Rust core, CPU/CUDA backends, Python API.**
 

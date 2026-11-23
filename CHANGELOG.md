@@ -4,6 +4,10 @@
 
 ### Documentation
 
+- A new logo (ROADMAP R5) in the README, the documentation site's header and
+  its icon: the protein and the ligand in their shells of ions and water,
+  with the tagline "MMPBSA Analysis Suite".
+
 - ROADMAP 4.16 is closed. The formula-based entropy estimate and PB-fitted
   residue dielectrics are not implemented; the ROADMAP says why.
 

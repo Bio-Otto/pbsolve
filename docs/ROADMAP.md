@@ -48,7 +48,7 @@ with an error estimate. Four properties set the direction:
 | v0.1 | Performance foundation | multigrid-preconditioned CG (CPU + GPU), robust NVRTC loading, batched multi-frame solves, mixed precision |
 | v0.2 | Accuracy | reaction-field decomposition, B-spline charges, analytic test suite, second-order interface method, error estimates |
 | v0.3 | Physics | nonlinear and size-modified PB, forces, smooth dielectric models |
-| First public release | Release | public repository and documentation site, PyPI wheels and the conda-forge recipe, speed on an idle machine and several GPUs, cross-check of the Gaussian dielectric |
+| First public release | Release | public repository and documentation site, PyPI wheels and the conda-forge recipe, speed on an idle machine and several GPUs, cross-check of the Gaussian dielectric, the logo |
 | v0.4 | End-point free energies | nonpolar models, per-residue decomposition, entropy options, membranes, uncertainty, public benchmark |
 | v0.5 | Gradients and ML | adjoint gradients, PyTorch/JAX interop, dataset generation, Δ-learning hooks |
 | v0.6+ | New solution methods | boundary-element (FMM/treecode), domain-decomposition LPB, PB-based pKa, AMD/HIP |
@@ -503,6 +503,20 @@ repeats it when pyDelPhi is installed.
 * Energies: with all of these, every pyDelPhi energy to its last printed
   digit. Without them, ΔG_polar of 1YCR differs by 5e-6 and its salt effect
   by 1.0 % (docs/VALIDATION.md, "Cross-check with pyDelPhi").
+
+**R5 Logo.** One logo, after the maintainer's design, everywhere a logo
+appears: the README banner on GitHub, the documentation site's header and
+its icon. A dark indigo banner shows the protein (blue, as a ribbon cartoon)
+in a shell of ions and water (orange) and the ligand (orange, two aromatic
+rings) in its own shell (blue), next to the name "PBsolve" and the tagline
+"MMPBSA Analysis Suite". Vector graphics with the text as outlines, so that
+it looks the same in every browser.
+*Evidence:* it renders at full size, at phone width and as a 16 px icon, on
+GitHub's light and dark themes and in the site's header.
+*Status (0.1.7): done.* `docs/_static/pbsolve-logo.svg` (banner, 930 × 217),
+`pbsolve-logo-header.svg` (transparent, for the header, shown 52 px high)
+and `pbsolve-mark.svg` (icon). The text is Liberation Sans (SIL Open Font
+License 1.1) converted to outlines.
 
 ### v0.4 — End-point free energies (MM-PBSA and related)
 
