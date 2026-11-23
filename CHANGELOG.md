@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Documentation
+
+- The logo draws the protein's ribbon cartoon and the ligand's rings in
+  white; drawn dark on the coloured discs (0.1.7), they did not read in the
+  documentation site's header and in its icon.
+
 ## 0.1.7 — 2026-11-23
 
 MM-PBSA against experiment on the Open Force Field protein–ligand benchmark

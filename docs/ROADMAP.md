@@ -506,17 +506,19 @@ repeats it when pyDelPhi is installed.
 
 **R5 Logo.** One logo, after the maintainer's design, everywhere a logo
 appears: the README banner on GitHub, the documentation site's header and
-its icon. A dark indigo banner shows the protein (blue, as a ribbon cartoon)
-in a shell of ions and water (orange) and the ligand (orange, two aromatic
-rings) in its own shell (blue), next to the name "PBsolve" and the tagline
-"MMPBSA Analysis Suite". Vector graphics with the text as outlines, so that
+its icon. A dark indigo banner shows the protein (blue, with its ribbon
+cartoon in white) in a shell of ions and water (orange) and the ligand
+(orange, two aromatic rings in white) in its own shell (blue), next to the
+name "PBsolve" and the tagline "MMPBSA Analysis Suite". Vector graphics with the text as outlines, so that
 it looks the same in every browser.
 *Evidence:* it renders at full size, at phone width and as a 16 px icon, on
 GitHub's light and dark themes and in the site's header.
 *Status (0.1.7): done.* `docs/_static/pbsolve-logo.svg` (banner, 930 × 217),
 `pbsolve-logo-header.svg` (transparent, for the header, shown 52 px high)
 and `pbsolve-mark.svg` (icon). The text is Liberation Sans (SIL Open Font
-License 1.1) converted to outlines.
+License 1.1) converted to outlines. After 0.1.7 the cartoon and the rings
+became white: drawn dark on the blue and orange discs, they did not read in
+the site's header and in the icon.
 
 ### v0.4 — End-point free energies (MM-PBSA and related)
 
