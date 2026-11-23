@@ -2,7 +2,7 @@ schema_version: 1
 
 context:
   name: pbsolve
-  version: "0.1.6"
+  version: "0.1.7"
   # CUDA variants get build number + 200, so the solver prefers them whenever
   # the __cuda virtual package (an NVIDIA driver) is present.
   build_number: ${{ 200 if cuda_compiler_version != "None" else 0 }}

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.7 — 2026-11-23
+
+MM-PBSA against experiment on the Open Force Field protein–ligand benchmark
+(ROADMAP 4.19) and the new logo (R5).
+
 ### Validation
 
 - MM-PBSA against experiment (ROADMAP 4.19): `scripts/binding_benchmark.py`
