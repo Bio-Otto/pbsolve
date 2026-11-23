@@ -92,7 +92,7 @@ should update the status table below.
 | Fused CG steps (0.0.2) | The CG update (x, r, ‖r‖², rᵀz, the f32 copy of r), the widening of the V-cycle's result with rᵀz and, on the CPU, A p with pᵀAp run as one pass each (`Backend::cg_update`, `promote_dot`, `apply_dot`), with the summation order of `dot`: the new CG loop equals the old one (kept in the tests) and a solve through `backend::Stepwise` bit for bit (3 preconditioners, 5 grids, CPU and CUDA), and so does every step (CPU and CUDA, both precisions); every result bit-identical to the previous commit (13 cases + maps, potentials, MM-PBSA species; CPU and CUDA; cuda-12 and cuda-13 builds); 12/12 mutations caught; Born table and APBS 1YCR on CUDA unchanged; CPU 1.03–1.07× per calculation (1.13× with `jacobi`), CUDA f64 CG kernels 1.11× (2–4 % of the solve stage) on a shared GPU, solve stage 1.00–1.06× on an idle one; see *Fused CG steps* |
 | Batched solves (0.0.2) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (0.0.2): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
-| MM-PBSA benchmark | **not yet run** |
+| MM-PBSA benchmark (0.1.7, ROADMAP 4.19): `scripts/binding_benchmark.py` | Open Force Field protein–ligand benchmark, 14 targets, 359 ligands, single minimised structures: mean Pearson R 0.60 at interior dielectric 2 (ρ 0.63, τ 0.48; 0.28 on the poses as given); per-residue dielectrics 0.59, fractional interface 0.59, Gaussian dielectric 0.48, dispersion term 0.37; APBS 3.4.1 = pbsolve on mcl1 to 0.0002 kcal/mol (same R); 1.7–11.5 s per calculation on a shared CPU; see *Binding benchmark against experiment* |
 
 ### APBS parity: 1YCR (h ≈ 0.46/0.46/0.38 Å, dime 129³, 2 focusing levels, `cfac 1.7`, `fadd 20`)
 
@@ -4365,6 +4365,136 @@ nonlinearity, and Newton needs fewer steps. On 1YCR 6 Å ions raise
 Reproduce: `pytest tests/test_size_modified.py`; the cavity table with
 `Solver(equation="smpbe", ion_size=a, pdie=4.0, sdie=78.5,
 ionic_strength=0.1, ion_radius=0.0, surface="vdw")`.
+
+## Binding benchmark against experiment
+
+Single-structure MM-PBSA against measured affinities (ROADMAP 4.19) on the
+Open Force Field protein–ligand benchmark, the set behind the community
+guidelines of Hahn et al. (2022) (github.com/openforcefield/protein-ligand-benchmark
+at commit fd88824; code MIT, data CC BY 4.0): 14 targets and 359 ligands in
+congeneric series, ΔG_exp spanning 3.2–5.8 kcal/mol per target. cdk2 is left
+out: its phosphothreonine has no template in OpenMM's ff14SB files.
+`scripts/binding_benchmark.py` downloads the files (`fetch`), assigns the
+force-field parameters (`prepare`), minimises (`minimize`), runs every
+protocol (`run`), repeats one with APBS (`apbs`) and reports (`report`); each
+stage continues where it stopped. `tests/test_binding_benchmark.py` checks how
+it reads the measurements and structures, the energies it adds up, the merge
+of the OpenMM systems and the statistics (6 tests, 18/18 mutations).
+
+**Protocol.**
+
+* Receptor: `protein.pdb` as provided (hydrogens and protonation states kept,
+  crystal waters removed), Amber ff14SB in OpenMM 8.6; the metal ions of pde2
+  and tnks2 with OpenMM's amber14 ion parameters; the cofactors of eg5 and
+  pfkfb3 with GAFF2 and AM1-BCC charges.
+* Ligands: the poses as provided, GAFF2 with AM1-BCC charges (AmberTools 26:
+  antechamber, sqm), net charge from the formal charges in the SDF.
+* Minimisation of every complex in OpenMM with a 12 Å cutoff and a reaction
+  field of ε 78.54, heavy atoms restrained to their positions (½k·d²,
+  k = 10 kcal/mol/Å²). Heavy atoms move by 0.12 Å (RMSD, median; at most
+  0.14 Å, largest single shift 1.2 Å), hydrogens by up to 2.2 Å.
+* ΔG_calc = ΔE_Coulomb/ε_in + ΔE_LJ + ΔΔG_polar + ΔΔG_nonpolar on the
+  minimised complex, with receptor and ligand cut out of it (bonded terms
+  cancel); no entropy term. PB: mbondi2 radii, `mol` surface, sdie 78.54,
+  0.15 M, 0.5 Å with the default focusing and `mdh` boundary. Non-polar term
+  γ·SASA + β, or `apolar_energy` (adds the volume and WCA dispersion terms)
+  where marked.
+* One grid per target, around the receptor and all its ligands, so that the
+  receptor is discretised the same way in every complex.
+* Per target: Pearson R, Spearman ρ and Kendall τ against ΔG_exp = RT ln K
+  (Ki and IC50 alike, as the benchmark does), with 95 % percentile bootstrap
+  intervals (1000 resamples). Means weight every target equally.
+
+**Correlation with experiment** (Pearson R; ε = interior dielectric; all
+columns but the first on the minimised structures):
+
+| Target (ligands) | ε 2, poses as given | ε 1 | ε 2 | ε 4 | ε 2 + dispersion | ε 2 fractional | ε 4 fractional | Gaussian | residues 2.7/1.1 |
+|---|---|---|---|---|---|---|---|---|---|
+| cdk8 (31) | 0.49 | 0.32 | 0.45 | 0.46 | 0.26 | 0.47 | 0.46 | 0.60 | 0.38 |
+| cmet (5) | 0.21 | 0.60 | 0.94 | 0.97 | -0.22 | 0.94 | 0.97 | 0.88 | 0.84 |
+| eg5 (27) | 0.22 | 0.25 | 0.55 | 0.61 | 0.06 | 0.54 | 0.61 | 0.72 | 0.63 |
+| hif2a (37) | 0.26 | 0.38 | 0.46 | 0.46 | 0.45 | 0.45 | 0.45 | 0.43 | 0.39 |
+| mcl1 (25) | 0.55 | 0.77 | 0.74 | 0.70 | 0.71 | 0.73 | 0.69 | 0.77 | 0.74 |
+| p38 (29) | 0.16 | 0.33 | 0.46 | 0.53 | 0.24 | 0.47 | 0.53 | 0.40 | 0.38 |
+| pde2 (21) | 0.41 | 0.68 | 0.42 | -0.12 | 0.72 | 0.24 | -0.20 | -0.50 | 0.60 |
+| pfkfb3 (32) | 0.11 | 0.23 | 0.47 | 0.60 | 0.32 | 0.47 | 0.60 | 0.56 | 0.33 |
+| ptp1b (22) | 0.42 | -0.03 | 0.68 | 0.76 | -0.22 | 0.71 | 0.76 | 0.83 | 0.64 |
+| shp2 (24) | 0.54 | 0.70 | 0.71 | 0.66 | 0.70 | 0.72 | 0.66 | 0.66 | 0.71 |
+| syk (44) | 0.47 | 0.35 | 0.29 | 0.26 | 0.06 | 0.29 | 0.26 | 0.27 | 0.31 |
+| thrombin (22) | 0.09 | 0.72 | 0.70 | 0.41 | 0.66 | 0.72 | 0.44 | 0.72 | 0.69 |
+| tnks2 (27) | -0.65 | 0.65 | 0.71 | 0.64 | 0.44 | 0.70 | 0.64 | -0.21 | 0.66 |
+| tyk2 (13) | 0.70 | 0.96 | 0.84 | 0.70 | 0.93 | 0.86 | 0.72 | 0.63 | 0.92 |
+| **mean R** | **0.28** | **0.49** | **0.60** | **0.54** | **0.37** | **0.59** | **0.54** | **0.48** | **0.59** |
+| **mean ρ** | **0.39** | **0.57** | **0.63** | **0.56** | **0.45** | **0.61** | **0.56** | **0.50** | **0.64** |
+| **mean τ** | **0.29** | **0.44** | **0.48** | **0.42** | **0.34** | **0.47** | **0.42** | **0.38** | **0.50** |
+
+* *Minimise first.* The poses as provided were prepared with another force
+  field. With Amber/GAFF2, clashes dominate the Lennard-Jones energy of some
+  complexes (thrombin lig_3a +141 kcal/mol, closest contact 0.46 R_min;
+  tnks2's contacts are tight throughout, R −0.65). The restrained
+  minimisation removes them and raises the mean R at ε 2 from 0.28 to 0.60
+  (ε 1: 0.25 → 0.49; ε 4: 0.28 → 0.54).
+* *Interior dielectric.* ε 2 gives the best mean (R 0.60, ρ 0.63, τ 0.48),
+  but the best value differs between targets: ε 1 for mcl1, pde2, syk,
+  thrombin and tyk2, ε 4 for cmet, eg5, p38, pfkfb3 and ptp1b.
+* *Per-residue dielectrics (4.16):* 2.7 in charged and 1.1 in the other
+  residues (fitted for GB, Liu, Peng & Zhang 2019) do as well as ε 2 on
+  average (R 0.59, τ 0.50) and avoid pde2's sensitivity to ε (0.60, against
+  −0.12 at ε 4). The electrostatic term is the grid's Δ(reference energy) +
+  ΔΔG_polar (`PBSAFrame.delta_reference`).
+* *Fractional interface (4.8):* R changes by at most 0.18 (pde2) and the mean
+  by 0.01. Within a series on one grid, the sharp interface's placement
+  errors largely cancel.
+* *Gaussian dielectric (4.13),* σ 0.93, contour 20, pdie 1: mean R 0.48,
+  between ε 1 and ε 2, with the widest spread between targets (−0.50 for
+  pde2, 0.88 for cmet). Its electrostatic term must be Coulomb/pdie +
+  ΔΔG_polar, as in Li et al.: the other molecule's Gaussians change ε next to
+  each charge, so the grid self-energies cancel in ΔΔG_polar but not in
+  Δ(reference energy). Δ(reference energy) + ΔΔG_polar gave a mean R of 0.09.
+* *Dispersion (4.14):* `apolar_energy`'s volume and dispersion terms lower R
+  (ε 2: 0.60 → 0.37), as Dong, Li & Wang (2025) found for MM/PBSA with a
+  dispersion term.
+* *APBS:* mcl1 at ε 2, each complex on its own APBS grid
+  (`dime_policy="apbs"`). APBS 3.4.1 and pbsolve agree on every ΔΔG_polar to
+  0.0002 kcal/mol in APBS units (25/25 binding verdicts), so both give
+  R 0.71 [0.53, 0.85]; on the shared target grid R is 0.74.
+* *Electrostatic consistency:* with one interior dielectric, the grid's
+  Δ(reference energy) equals ΔE_Coulomb/ε_in to within 0.99 kcal/mol (the
+  reference state's discretisation at 0.5 Å).
+
+At ε 2, per target, with 95 % bootstrap intervals:
+
+| Target | R | ρ | τ |
+|---|---|---|---|
+| cdk8 | 0.45 [0.12, 0.77] | 0.55 [0.25, 0.76] | 0.40 [0.19, 0.59] |
+| cmet | 0.94 [0.58, 1.00] | 0.90 [0.11, 1.00] | 0.80 [0.00, 1.00] |
+| eg5 | 0.55 [0.30, 0.72] | 0.55 [0.20, 0.78] | 0.41 [0.14, 0.64] |
+| hif2a | 0.46 [0.22, 0.68] | 0.43 [0.16, 0.68] | 0.31 [0.12, 0.51] |
+| mcl1 | 0.74 [0.56, 0.87] | 0.74 [0.52, 0.86] | 0.54 [0.37, 0.71] |
+| p38 | 0.46 [0.36, 0.69] | 0.69 [0.46, 0.81] | 0.47 [0.30, 0.61] |
+| pde2 | 0.42 [0.11, 0.72] | 0.51 [0.12, 0.75] | 0.30 [0.03, 0.57] |
+| pfkfb3 | 0.47 [0.17, 0.70] | 0.55 [0.21, 0.78] | 0.40 [0.15, 0.60] |
+| ptp1b | 0.68 [0.28, 0.96] | 0.84 [0.56, 0.97] | 0.72 [0.47, 0.91] |
+| shp2 | 0.71 [0.46, 0.88] | 0.72 [0.43, 0.89] | 0.56 [0.32, 0.76] |
+| syk | 0.29 [0.07, 0.50] | 0.16 [-0.15, 0.45] | 0.10 [-0.11, 0.31] |
+| thrombin | 0.70 [0.37, 0.89] | 0.71 [0.34, 0.90] | 0.54 [0.25, 0.76] |
+| tnks2 | 0.71 [0.41, 0.86] | 0.61 [0.31, 0.85] | 0.46 [0.22, 0.70] |
+| tyk2 | 0.84 [0.63, 0.94] | 0.86 [0.58, 0.98] | 0.69 [0.46, 0.92] |
+
+Small sets have wide intervals (cmet, 5 ligands: R 0.94 [0.58, 1.00]); syk
+is the weakest series (ρ 0.16).
+
+**Timing.** On the CPU (18 threads, shared with two GROMACS jobs; the GPU was
+busy and was not used): 1.7–11.5 s per PB calculation on grids of 2.1–9.4 M
+nodes, 1077 calculations per protocol (complex, receptor and ligand of every
+complex) in 1.3–1.6 h. Against ε 2: fractional interface +3 %, per-residue
+dielectrics +13 %, Gaussian dielectric −6 %. The AM1-BCC charges took about
+an hour on 12 cores, the minimisation 3 minutes.
+
+**Limits.** One structure per complex, no entropy term, poses and protonation
+states as given. Correlations within a series do not test absolute
+affinities (MM-PBSA values are offset per target). An MD-averaged protocol
+and GPU timings remain (ROADMAP 4.19).
 
 ## Sensitivity of the sharp dielectric boundary
 

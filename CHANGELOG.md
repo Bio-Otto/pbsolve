@@ -2,7 +2,21 @@
 
 ## Unreleased
 
+### Validation
+
+- MM-PBSA against experiment (ROADMAP 4.19): `scripts/binding_benchmark.py`
+  runs single-structure MM-PBSA on 14 targets (359 ligands) of the Open Force
+  Field protein–ligand benchmark and reports Pearson, Spearman and Kendall
+  correlations with bootstrap intervals per target. The mean R is 0.60 at an
+  interior dielectric of 2 after a restrained minimisation (0.28 on the
+  poses as given); per-residue dielectrics give 0.59, the fractional
+  interface 0.59, the Gaussian dielectric 0.48, the dispersion term 0.37.
+  APBS 3.4.1 gives the same ΔΔG_polar on mcl1.
+
 ### Documentation
+
+- The user guide recommends minimising docked poses and one grid per
+  receptor when ranking a series of ligands.
 
 - A new logo (ROADMAP R5) in the README, the documentation site's header and
   its icon: the protein and the ligand in their shells of ions and water,

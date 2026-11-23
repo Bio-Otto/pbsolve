@@ -260,6 +260,33 @@ entropy = pbsolve.interaction_entropy(e_int)
 minus_t_ds = entropy.ie if entropy.reliable else entropy.c2
 ```
 
+### Ranking a series of ligands
+
+For a series of ligands in one receptor, two choices mattered more than any
+PB option in the [binding benchmark](../VALIDATION.md#binding-benchmark-against-experiment):
+
+* minimise the complexes first when the poses come from docking or another
+  force field, since clashes otherwise dominate the Lennard-Jones term of
+  ΔE_MM;
+* solve every ligand on one grid built around the receptor and all the
+  ligands, so that the receptor is discretised the same way in every complex.
+
+```{code-block} python
+everything = np.vstack([rec_xyz] + [lig["xyz"] for lig in ligands])
+grid = solver.make_grid(everything, np.concatenate([rec_radii] + [lig["radii"] for lig in ligands]))
+for lig in ligands:
+    xyz = np.vstack([rec_xyz, lig["xyz"]])
+    terms = pbsolve.pbsa_solvation_frame(
+        solver, xyz, np.concatenate([rec_q, lig["q"]]), np.concatenate([rec_radii, lig["radii"]]),
+        range(len(rec_xyz), len(xyz)), grid=grid,
+    )
+```
+
+On 14 targets of the Open Force Field protein–ligand benchmark (one minimised
+structure per complex, no entropy term), an interior dielectric of 2 gave
+the best mean correlation with experiment (Pearson R 0.60), but the best
+value differs between targets.
+
 ## How many frames
 
 Consecutive frames are correlated, so the standard error of an average is

@@ -661,6 +661,20 @@ MM/GBSA for some classes (e.g. cyclic peptides) after protocol tuning [Brief.
 Bioinform. 2025], and that PBSA solvation can be combined with machine-learned
 potentials for the gas-phase term [AIQM-PBSA, ChemRxiv 2026]: pbsolve should
 be the solvation engine in such workflows, not a fixed protocol.
+*Status (0.1.7): done for single structures; an MD-averaged protocol and GPU
+timings remain.*
+* `scripts/binding_benchmark.py` runs the Open Force Field protein–ligand
+  benchmark (commit fd88824; 14 targets, 359 ligands): Amber ff14SB and
+  GAFF2/AM1-BCC, a restrained minimisation, one grid per target; Pearson R,
+  Spearman ρ and Kendall τ per target with bootstrap intervals
+  (docs/VALIDATION.md, "Binding benchmark against experiment").
+* Mean R 0.60 at interior dielectric 2 (0.28 without the minimisation);
+  per-residue dielectrics 0.59, fractional interface 0.59, Gaussian
+  dielectric 0.48, dispersion term 0.37. APBS gives the same ΔΔG_polar on
+  mcl1 (0.0002 kcal/mol).
+* Remaining: frames from MD with the interaction entropy; cdk2 (its
+  phosphothreonine); GPU timings on an idle machine (R3); an entropy or
+  ligand-size term fitted against experiment (from 4.16).
 
 ### v0.5 — Gradients and machine learning
 

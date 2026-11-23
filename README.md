@@ -202,8 +202,10 @@ pbsolve solvation protein.pqr --spacing 0.5 --ionic-strength 0.15 --dx pot.dx
 
 `docs/VALIDATION.md` records the current checks: analytic references, grid
 convergence, cross-checks against other Poisson–Boltzmann software (the
-`pbsolve apbs` subcommand runs such comparisons when APBS is installed), and
-tests of the readers and the structure preparation against reference tools.
+`pbsolve apbs` subcommand runs such comparisons when APBS is installed),
+tests of the readers and the structure preparation against reference tools,
+and an MM-PBSA benchmark against experiment on 14 targets of the Open Force
+Field protein–ligand benchmark (`scripts/binding_benchmark.py`).
 
 ## Status
 
