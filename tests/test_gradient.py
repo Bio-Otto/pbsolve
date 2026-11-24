@@ -16,15 +16,17 @@ def test_polar_gradient_api():
     g = s.polar_gradient(x, q, r)
     assert isinstance(g, pbsolve.PolarGradient) and isinstance(g.result, pbsolve.PolarResult)
     assert g.charges.shape == q.shape and np.isfinite(g.charges).all()
-    assert g.pdie is None and g.sdie is None
+    assert g.pdie is None and g.sdie is None and g.positions is None and g.radii is None
     # The same energy as polar_solvation, bit for bit.
     e = s.polar_solvation(x, q, r)
     assert g.energy == e.energy == g.result.energy
     assert np.array_equal(g.result.atom_energies, e.atom_energies)
     assert "PolarGradient(energy=" in repr(g)
-    d = s.polar_gradient(x, q, r, dielectric_constants=True)
+    d = s.polar_gradient(x, q, r, wrt=["dielectric_constants"])
     assert np.array_equal(d.charges, g.charges)
     assert d.pdie > 0 and d.sdie < 0  # a weaker contrast costs solvation energy
+    with pytest.raises(ValueError, match="unknown wrt"):
+        s.polar_gradient(x, q, r, wrt=["coords"])
 
 
 def test_charge_derivatives_equal_central_differences():
@@ -50,7 +52,7 @@ def test_dielectric_derivatives_equal_central_differences():
         kw = {**KW, **extra}
         s = pbsolve.Solver(**kw)
         grid = s.make_grid(x, r)
-        g = s.polar_gradient(x, q, r, grid=grid, dielectric_constants=True)
+        g = s.polar_gradient(x, q, r, grid=grid, wrt=("dielectric_constants",))
         for name in ("pdie", "sdie"):
             v = kw.get(name, 78.54)
             h = 1e-4 * v
@@ -67,7 +69,7 @@ def test_per_atom_dielectrics_give_charge_derivatives():
     assert g.energy == s.polar_solvation(x, q, r, dielectrics=eps).energy
     assert np.dot(q, g.charges) == pytest.approx(2 * g.energy, rel=1e-9)
     with pytest.raises(ValueError, match="per-atom dielectrics"):
-        s.polar_gradient(x, q, r, dielectrics=eps, dielectric_constants=True)
+        s.polar_gradient(x, q, r, dielectrics=eps, wrt=("dielectric_constants",))
 
 
 def test_unsupported_options_are_refused():
@@ -84,4 +86,51 @@ def test_unsupported_options_are_refused():
         s = pbsolve.Solver(**{**KW, **bad})
         assert np.isfinite(s.polar_gradient(x, q, r).charges).all()
         with pytest.raises(ValueError, match=match):
-            s.polar_gradient(x, q, r, dielectric_constants=True)
+            s.polar_gradient(x, q, r, wrt=("dielectric_constants",))
+
+
+def test_position_and_radius_derivatives_equal_central_differences():
+    x, q, r = synthetic_molecule()
+    s = pbsolve.Solver(**KW, surface="spl2", chgm="spl2")
+    grid = s.make_grid(x, r)
+    g = s.polar_gradient(x, q, r, grid=grid, wrt=("positions", "radii"))
+    assert g.positions.shape == (len(q), 3) and g.radii.shape == q.shape
+    scale = np.abs(g.positions).max()
+
+    def richardson(shifted, h=1e-4):
+        central = lambda d: (shifted(d) - shifted(-d)) / (2 * d)  # noqa: E731
+        return (4 * central(h / 2) - central(h)) / 3
+
+    for i in (0, 5, 11):  # 5 has radius 0
+        for axis in range(3):
+            def moved(d):
+                y = x.copy()
+                y[i, axis] += d
+                return s.polar_solvation(y, q, r, grid=grid).energy
+
+            assert g.positions[i, axis] == pytest.approx(richardson(moved), abs=1e-7 * scale), (i, axis)
+
+        def grown(d):
+            rr = r.copy()
+            rr[i] += d
+            return s.polar_solvation(x, q, rr, grid=grid).energy
+
+        if r[i] > 0:
+            assert g.radii[i] == pytest.approx(richardson(grown), abs=1e-7 * scale), i
+
+
+def test_on_one_grid_the_position_derivative_is_minus_the_force():
+    x, q, r = synthetic_molecule()
+    s = pbsolve.Solver(**{**KW, "bcfl": "zero"}, surface="spl2", chgm="spl2")
+    g0 = s.make_grid(x, r)
+    one = pbsolve.GridSpec(g0.center, g0.dims, g0.fine_length)
+    g = s.polar_gradient(x, q, r, grid=one, wrt=("positions",))
+    f = s.polar_forces(x, q, r, grid=one)
+    assert np.abs(g.positions + f.forces).max() < 1e-9 * np.abs(f.forces).max()
+
+
+def test_positions_and_radii_need_a_spline_surface():
+    x, q, r = synthetic_molecule()
+    for bad, match in ((dict(surface="mol"), "spl2"), (dict(surface="spl2", bcfl="sdh"), "mdh")):
+        with pytest.raises(ValueError, match=match):
+            pbsolve.Solver(**{**KW, **bad}).polar_gradient(x, q, r, wrt=("radii",))

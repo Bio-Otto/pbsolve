@@ -272,6 +272,31 @@ fn dielectric_boundary_force(
         // A uniform dielectric, or an atom that does not shape the surface.
         return Ok([0.0; 3]);
     }
+    let [x, y, z, _] = dielectric_boundary_sums(grid, n, atom, eps, u, u, params)?;
+    let h = grid.spacing;
+    Ok([x, y, z].map(|f| -f * h[0] * h[1] * h[2] * (epsw - epsp) * 0.5 * izmagic))
+}
+
+/// Σ_c v_c Σ_faces of c ∂H_f (u_nbr − u_c) / h² over the nodes whose faces
+/// atom `n` reaches (APBS `Vpmg_dbForce` with two fields): ∂H_f with respect
+/// to the atom's position (components 0–2) and its radius (3). With v = u
+/// it is the dielectric-boundary force before its factor; with v the
+/// adjoint, λᵀ(∂A/∂R)u = −V (sdie − pdie) times it ([`crate::gradient`]).
+/// Zero in a uniform dielectric and for an atom of radius 0.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dielectric_boundary_sums(
+    grid: &Grid,
+    n: usize,
+    atom: &Atom,
+    eps: &[Vec<f64>; 3],
+    v: &[f64],
+    u: &[f64],
+    params: &PbParams,
+) -> Result<[f64; 4]> {
+    let (epsp, epsw) = (params.pdie, params.sdie);
+    if (epsp - epsw).abs() < VPMGSMALL || atom.radius <= 0.0 {
+        return Ok([0.0; 4]);
+    }
     let deps = epsw - epsp;
     let depsi = 1.0 / deps;
     let (lo, h) = (grid.origin, grid.spacing);
@@ -282,14 +307,17 @@ fn dielectric_boundary_force(
         r[a] = reach(pos[a], rtot, h[a], grid.dims[a], n, atom)?;
     }
     let grad = LogGradient::new(params.surface, atom, params.swin, 0.0);
-    // dH at a face: ∇ ln S_a times the face's H (from its ε).
-    let d_h = |map: &[f64], c: usize, point: [f64; 3]| -> [f64; 3] {
+    // dH at a face: ∇ ln S_a times the face's H (from its ε); the radius
+    // derivative of ln S is its gradient's component along the radius.
+    let d_h = |map: &[f64], c: usize, point: [f64; 3]| -> [f64; 4] {
         let hf = (map[c] - epsp) * depsi;
-        grad.at(point).map(|g| g * hf)
+        let g = grad.at(point);
+        let [x, y, z] = g.map(|g| g * hf);
+        [x, y, z, radial(g, atom.position, point) * hf]
     };
     let [nx, ny, _] = grid.dims;
     let (sx, sy, sz) = (1, nx, nx * ny);
-    let mut force = [0.0; 3];
+    let mut force = [0.0; 4];
     for i in r[0].0..=r[0].1 {
         let (x, xp, xm) = (
             i as f64 * h[0] + lo[0],
@@ -319,16 +347,29 @@ fn dielectric_boundary_force(
                 let (dxp, dxm) = (u[c + sx] - uc, u[c - sx] - uc);
                 let (dyp, dym) = (u[c + sy] - uc, u[c - sy] - uc);
                 let (dzp, dzm) = (u[c + sz] - uc, u[c - sz] - uc);
-                for l in 0..3 {
+                for l in 0..4 {
                     let tgrad = (hx[l] * dxp + hxm[l] * dxm) / (h[0] * h[0])
                         + (hy[l] * dyp + hym[l] * dym) / (h[1] * h[1])
                         + (hz[l] * dzp + hzm[l] * dzm) / (h[2] * h[2]);
-                    force[l] += uc * tgrad;
+                    force[l] += v[c] * tgrad;
                 }
             }
         }
     }
-    Ok(force.map(|f| -f * h[0] * h[1] * h[2] * deps * 0.5 * izmagic))
+    Ok(force)
+}
+
+/// The component of ∇_R ln S (at `point`) along the radius through `point`:
+/// ∂ ln S/∂r, as S depends on the distance minus the radius.
+#[inline]
+fn radial(g: [f64; 3], centre: [f64; 3], point: [f64; 3]) -> f64 {
+    let d = [0, 1, 2].map(|a| point[a] - centre[a]);
+    let norm = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    if norm > 0.0 {
+        (g[0] * d[0] + g[1] * d[1] + g[2] * d[2]) / norm
+    } else {
+        0.0
+    }
 }
 
 /// V Σ_n ∂κ̄²_n/∂R ρ(u_n) / 4π l_B for atom `n` (APBS `Vpmg_ibForce`), with
@@ -347,6 +388,29 @@ fn ionic_boundary_force(
 ) -> Result<[f64; 3]> {
     if kbar2 < VPMGSMALL || atom.radius <= 0.0 {
         return Ok([0.0; 3]);
+    }
+    let weight = |c: usize| twice_density(u[c]);
+    let [x, y, z, _] = ionic_boundary_sums(grid, n, atom, access, &weight, params, kbar2)?;
+    let h = grid.spacing;
+    Ok([x, y, z].map(|f| f * 0.5 * h[0] * h[1] * h[2] * izmagic))
+}
+
+/// Σ_nodes κ̄² w_c K_c ∂ln S/∂R over the nodes atom `n` reaches (APBS
+/// `Vpmg_ibForce` with any node weight w): with respect to the atom's
+/// position (components 0–2) and its radius (3). With w = 2ρ(u) it is the
+/// ionic-boundary force before its factor; with w = λu, λᵀ(∂A/∂R)u = V times
+/// it ([`crate::gradient`]). Zero without ions and for an atom of radius 0.
+pub(crate) fn ionic_boundary_sums(
+    grid: &Grid,
+    n: usize,
+    atom: &Atom,
+    access: &[f64],
+    weight: &(impl Fn(usize) -> f64 + Sync),
+    params: &PbParams,
+    kbar2: f64,
+) -> Result<[f64; 4]> {
+    if kbar2 < VPMGSMALL || atom.radius <= 0.0 {
+        return Ok([0.0; 4]);
     }
     let (lo, up, h) = (grid.origin, grid.upper(), grid.spacing);
     if (0..3).any(|a| atom.position[a] <= lo[a] || atom.position[a] >= up[a]) {
@@ -367,7 +431,7 @@ fn ionic_boundary_force(
     };
     let sq = |x: f64| x * x;
     let grad = LogGradient::new(params.surface, atom, params.swin, irad);
-    let mut force = [0.0; 3];
+    let mut force = [0.0; 4];
     for i in range(pos[0], rtot + 0.5 * h[0], h[0], grid.dims[0]) {
         let dx2 = sq(pos[0] - h[0] * i as f64);
         let dy = if rtot2 > dx2 {
@@ -392,15 +456,16 @@ fn ionic_boundary_force(
                     ];
                     let tgrad = grad.at(point);
                     let c = grid.index(i, j, k);
-                    let fmag = twice_density(u[c]) * access[c];
+                    let fmag = weight(c) * access[c];
                     for l in 0..3 {
                         force[l] += kbar2 * fmag * tgrad[l];
                     }
+                    force[3] += kbar2 * fmag * radial(tgrad, atom.position, point);
                 }
             }
         }
     }
-    Ok(force.map(|f| f * 0.5 * h[0] * h[1] * h[2] * izmagic))
+    Ok(force)
 }
 
 #[cfg(test)]

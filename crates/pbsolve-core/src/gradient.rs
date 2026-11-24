@@ -42,6 +42,7 @@ use crate::backend::Backend;
 use crate::boundary::{focus_boundary_values, multipole_factors, Multipoles};
 use crate::charge::{atom_energies, spread_charges_sparse_with, spread_charges_with};
 use crate::error::{invalid, PbError, Result};
+use crate::forces::{charge_field_forces, dielectric_boundary_sums, ionic_boundary_sums};
 use crate::grid::Grid;
 use crate::molecule::{dist2, Atom};
 use crate::nonlinear::IonTerms;
@@ -53,7 +54,7 @@ use crate::pb::{
 };
 use crate::solver::SolveStats;
 use crate::surface::MolecularSurface;
-use crate::units::{bjerrum_length_vacuum, kt_in_kcal_per_mol};
+use crate::units::{bjerrum_length_vacuum, kappa_bar_squared, kt_in_kcal_per_mol};
 use rayon::prelude::*;
 use std::f64::consts::PI;
 use std::time::Instant;
@@ -67,45 +68,53 @@ pub struct PolarGradient {
     pub charges: Vec<f64>,
     /// dΔG_polar/d pdie and dΔG_polar/d sdie in kcal/mol, if asked for.
     pub dielectrics: Option<[f64; 2]>,
+    /// dΔG_polar/dr of every atom in kcal/mol/Å (minus the force), if asked for.
+    pub positions: Option<Vec<[f64; 3]>>,
+    /// dΔG_polar/d radius of every atom in kcal/mol/Å, if asked for.
+    pub radii: Option<Vec<f64>>,
+}
+
+/// What [`polar_gradient`] differentiates besides the charges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Wrt {
+    /// pdie and sdie.
+    pub dielectric_constants: bool,
+    /// Every atom's position (spline surfaces).
+    pub positions: bool,
+    /// Every atom's radius (spline surfaces).
+    pub radii: bool,
 }
 
 /// [`crate::pb::polar_solvation`] and its gradient with respect to every
-/// atom's charge and, with `dielectrics`, to pdie and sdie: exact for the
-/// discrete energy, through every focusing level and the outer boundary
-/// condition (`mdh-fast` is differentiated as `mdh`, which it reproduces to
-/// 1e-10). Needs the linearized equation and `coulomb = grid`, no membrane
-/// and no lateral period; the dielectric derivatives need surface `mol`,
-/// `vdw`, `spl2` or `spl4` without per-atom dielectrics and `bcfl` `zero`,
-/// `mdh` or `mdh-fast`. Costs about twice the energy: one adjoint solve per
-/// level and state.
+/// atom's charge and, as `wrt` asks, to pdie and sdie, the atoms' positions
+/// and their radii: exact for the discrete energy, through every focusing
+/// level and the outer boundary condition (`mdh-fast` is differentiated as
+/// `mdh`, which it reproduces to 1e-10). Needs the linearized equation and
+/// `coulomb = grid`, no membrane and no lateral period. The dielectric
+/// derivatives need surface `mol`, `vdw`, `spl2` or `spl4` without per-atom
+/// dielectrics, positions and radii a spline surface (`spl2`, `spl4`), and
+/// both `bcfl` `zero`, `mdh` or `mdh-fast`. Costs about twice the energy: one
+/// adjoint solve per level and state.
 pub fn polar_gradient<B: Backend>(
     be: &B,
     atoms: &[Atom],
     params: &PbParams,
     spec: &GridSpec,
-    dielectrics: bool,
+    wrt: Wrt,
 ) -> Result<PolarGradient> {
-    check(params, dielectrics)?;
+    check(params, wrt)?;
     params.validate()?;
     check_gaussian_charges(atoms, params)?;
     let levels = spec.levels()?;
     let mut timings = Timings::default();
     // One state at a time: only its levels' potentials are kept.
     let reference = State::solve(be, &levels, atoms, params, Medium::Reference, None, &mut timings)?;
-    let dref = reference.gradient(be, atoms, params, Medium::Reference, None, dielectrics, &mut timings)?;
+    let dref = reference.gradient(be, atoms, params, Medium::Reference, None, wrt, &mut timings)?;
     let t = Instant::now();
     let surf = MolecularSurface::for_params(atoms, params);
     timings.maps += t.elapsed().as_secs_f64();
     let solvated = State::solve(be, &levels, atoms, params, Medium::Solvated, Some(&surf), &mut timings)?;
-    let dsolv = solvated.gradient(
-        be,
-        atoms,
-        params,
-        Medium::Solvated,
-        Some(&surf),
-        dielectrics,
-        &mut timings,
-    )?;
+    let dsolv = solvated.gradient(be, atoms, params, Medium::Solvated, Some(&surf), wrt, &mut timings)?;
     let kt = kt_in_kcal_per_mol(params.temperature);
     let energy_kt = solvated.energy_kt - reference.energy_kt;
     let solvation = PolarSolvation {
@@ -135,12 +144,25 @@ pub fn polar_gradient<B: Backend>(
             .zip(&dref.charges)
             .map(|(s, r)| (s - r) * kt)
             .collect(),
-        dielectrics: dielectrics.then(|| [0, 1].map(|p| (dsolv.dielectrics[p] - dref.dielectrics[p]) * kt)),
+        dielectrics: wrt
+            .dielectric_constants
+            .then(|| [0, 1].map(|p| (dsolv.dielectrics[p] - dref.dielectrics[p]) * kt)),
+        positions: wrt.positions.then(|| {
+            dsolv
+                .positions
+                .iter()
+                .zip(&dref.positions)
+                .map(|(s, r)| [0, 1, 2].map(|l| (s[l] - r[l]) * kt))
+                .collect()
+        }),
+        radii: wrt
+            .radii
+            .then(|| dsolv.radii.iter().zip(&dref.radii).map(|(s, r)| (s - r) * kt).collect()),
     })
 }
 
 /// The options [`polar_gradient`] supports.
-fn check(params: &PbParams, dielectrics: bool) -> Result<()> {
+fn check(params: &PbParams, wrt: Wrt) -> Result<()> {
     if params.coulomb == CoulombMethod::Analytic {
         return invalid("gradients need coulomb 'grid'");
     }
@@ -153,7 +175,19 @@ fn check(params: &PbParams, dielectrics: bool) -> Result<()> {
     if params.period.is_some() {
         return invalid("gradients with periodic lateral boundaries are not available");
     }
-    if dielectrics {
+    if wrt.positions || wrt.radii {
+        if !params.surface.is_spline() {
+            return invalid(format!(
+                "derivatives with respect to positions and radii need surface 'spl2' or 'spl4' (smooth in the \
+                 atoms), not '{}'",
+                params.surface.as_str()
+            ));
+        }
+        if params.bcfl == BoundaryCondition::Sdh {
+            return invalid("derivatives with respect to positions and radii need bcfl 'zero', 'mdh' or 'mdh-fast'");
+        }
+    }
+    if wrt.dielectric_constants {
         if params.atom_pdie.is_some() {
             return invalid("dielectric derivatives with per-atom dielectrics are not available");
         }
@@ -192,6 +226,8 @@ struct StateGradient {
     charges: Vec<f64>,
     /// d/d pdie, d/d sdie.
     dielectrics: [f64; 2],
+    positions: Vec<[f64; 3]>,
+    radii: Vec<f64>,
 }
 
 /// g on the boundary nodes (in `boundary_indices` order) as a full-length vector.
@@ -265,7 +301,7 @@ impl State {
         params: &PbParams,
         medium: Medium,
         surf: Option<&MolecularSurface>,
-        dielectrics: bool,
+        wrt: Wrt,
         timings: &mut Timings,
     ) -> Result<StateGradient> {
         let opts = solver_options(params);
@@ -281,21 +317,38 @@ impl State {
         let t = Instant::now();
         let finest = self.levels.last().expect("at least one level");
         let method = params.chgm.energy_method();
-        let mut charges: Vec<f64> = weighted(&finest.grid, method, &finest.u)?
-            .into_iter()
-            .map(|x| 0.5 * x)
-            .collect();
+        let mut out = StateGradient {
+            charges: weighted(&finest.grid, method, &finest.u)?
+                .into_iter()
+                .map(|x| 0.5 * x)
+                .collect(),
+            dielectrics: [0.0; 2],
+            positions: vec![[0.0; 3]; atoms.len()],
+            radii: vec![0.0; atoms.len()],
+        };
+        if wrt.positions {
+            // ½ (∂w/∂r)ᵀ u_L: the energy weights move with the atoms
+            // (`charge_field_forces` is −q ∇(Wᵀu)).
+            for (p, f) in out
+                .positions
+                .iter_mut()
+                .zip(charge_field_forces(&finest.grid, atoms, method, &finest.u))
+            {
+                (0..3).for_each(|l| p[l] -= 0.5 * f[l]);
+            }
+        }
         let mut r: Vec<f64> = spread_charges_with(&finest.grid, atoms, method)?
             .into_iter()
             .map(|w| 0.5 * w)
             .collect();
-        let mut eps_terms = [0.0; 2];
+        let geometry = (wrt.positions || wrt.radii) && surf.is_some();
         timings.energy += t.elapsed().as_secs_f64();
         for (index, level) in self.levels.iter().enumerate().rev() {
             let grid = &level.grid;
             let t = Instant::now();
             let maps = maps_with(grid, atoms, params, surf);
             let eps = [maps.eps_x.clone(), maps.eps_y.clone(), maps.eps_z.clone()];
+            let kappa_sq = geometry.then(|| maps.kappa_sq.clone());
             timings.maps += t.elapsed().as_secs_f64();
             let rhs: Vec<f64> = r.iter().map(|v| v / source).collect();
             let (mut lambda, s) =
@@ -307,27 +360,85 @@ impl State {
             for &b in &boundary {
                 lambda[b] = 0.0;
             }
-            for (d, w) in charges.iter_mut().zip(weighted(grid, params.chgm, &lambda)?) {
+            for (d, w) in out.charges.iter_mut().zip(weighted(grid, params.chgm, &lambda)?) {
                 *d += source * w;
             }
-            if dielectrics {
+            if wrt.dielectric_constants {
                 let face = face_derivatives(grid, atoms, params, surf, &eps);
                 let [p, s] = face_sums(grid, &face, &lambda, &level.u);
-                eps_terms[0] -= p;
-                eps_terms[1] -= s;
+                out.dielectrics[0] -= p;
+                out.dielectrics[1] -= s;
+            }
+            if wrt.positions {
+                // 4π l_B0 λᵀ ∂(S q)/∂r: the spread charges move with the atoms.
+                for (p, f) in out
+                    .positions
+                    .iter_mut()
+                    .zip(charge_field_forces(grid, atoms, params.chgm, &lambda))
+                {
+                    (0..3).for_each(|l| p[l] -= source * f[l]);
+                }
+            }
+            if let Some(kappa_sq) = &kappa_sq {
+                let terms = map_terms(grid, atoms, params, &eps, kappa_sq, &lambda, &level.u)?;
+                for ((p, r), d) in out.positions.iter_mut().zip(out.radii.iter_mut()).zip(&terms) {
+                    (0..3).for_each(|l| p[l] += d[l]);
+                    *r += d[3];
+                }
             }
             let c = boundary_cotangent(grid, &boundary, &eps, &lambda, &r);
             match index {
-                0 => outer_boundary_terms(grid, &boundary, atoms, params, medium, &c, &mut charges, &mut eps_terms),
+                0 => outer_boundary_terms(grid, &boundary, atoms, params, medium, &c, &mut out),
                 _ => r = transposed_focus(grid, &boundary, &self.levels[index - 1].grid, &c)?,
             }
             timings.energy += t.elapsed().as_secs_f64();
         }
-        Ok(StateGradient {
-            charges,
-            dielectrics: eps_terms,
-        })
+        if !wrt.positions {
+            out.positions.clear();
+        }
+        if !wrt.radii {
+            out.radii.clear();
+        }
+        Ok(out)
     }
+}
+
+/// −λᵀ(∂A/∂R)u on one level of the solvated state of a spline surface, for
+/// every atom: its position (0–2) and radius (3). The dielectric and ionic
+/// boundary sums of [`crate::forces`] with the adjoint λ as the first field;
+/// ∂ε_f = (sdie − pdie) ∂H_f and ∂κ̄²_n = κ̄² ∂K_n.
+#[allow(clippy::too_many_arguments)]
+fn map_terms(
+    grid: &Grid,
+    atoms: &[Atom],
+    params: &PbParams,
+    eps: &[Vec<f64>; 3],
+    kappa_sq: &[f64],
+    lambda: &[f64],
+    u: &[f64],
+) -> Result<Vec<[f64; 4]>> {
+    let vol = grid.cell_volume();
+    let deps = params.sdie - params.pdie;
+    let kbar2 = kappa_bar_squared(&params.ions, params.temperature);
+    let access: Vec<f64> = if kbar2 > 0.0 {
+        kappa_sq.par_iter().map(|k| k / kbar2).collect()
+    } else {
+        Vec::new()
+    };
+    let weight = |c: usize| lambda[c] * u[c];
+    atoms
+        .par_iter()
+        .enumerate()
+        .map(|(n, a)| {
+            let d = dielectric_boundary_sums(grid, n, a, eps, lambda, u, params)?;
+            let i = if kbar2 > 0.0 {
+                ionic_boundary_sums(grid, n, a, &access, &weight, params, kbar2)?
+            } else {
+                [0.0; 4]
+            };
+            Ok([0, 1, 2, 3].map(|l| vol * (deps * d[l] - i[l])))
+        })
+        .collect()
 }
 
 /// ∂ε_f/∂pdie and ∂ε_f/∂sdie of every face, per axis.
@@ -462,10 +573,9 @@ fn transposed_focus(fine: &Grid, boundary: &[usize], coarse: &Grid, c: &[f64]) -
     Ok(r)
 }
 
-/// c_0ᵀ ∂g_0/∂q_i (into `charges`) and c_0ᵀ ∂g_0/∂ε (into `eps_terms`: pdie
-/// for the reference state, sdie for the solvated one) of the analytic
-/// boundary condition on the outermost level.
-#[allow(clippy::too_many_arguments)]
+/// c_0ᵀ ∂g_0/∂p of the analytic boundary condition on the outermost level:
+/// for every charge, ε (pdie in the reference state, sdie in the solvated
+/// one) and, with `mdh`, every atom's position and radius.
 fn outer_boundary_terms(
     grid: &Grid,
     boundary: &[usize],
@@ -473,8 +583,7 @@ fn outer_boundary_terms(
     params: &PbParams,
     medium: Medium,
     c: &[f64],
-    charges: &mut [f64],
-    eps_terms: &mut [f64; 2],
+    out: &mut StateGradient,
 ) {
     let m = boundary_medium(params, medium);
     let points: Vec<[f64; 3]> = boundary
@@ -490,32 +599,50 @@ fn outer_boundary_terms(
             // shortcut: a direct sum over atoms × boundary nodes (as `mdh` itself); a
             // transposed `mdh-fast` would make it cheaper for very large proteins.
             let k = m.kappa;
-            let sums: Vec<[f64; 2]> = atoms
+            let sums: Vec<[f64; 6]> = atoms
                 .par_iter()
                 .map(|a| {
-                    let mut s = [0.0; 2];
+                    let mut s = [0.0; 6];
                     for (p, cb) in points.iter().zip(c) {
                         let d = dist2(*p, a.position).sqrt();
-                        // The response to a unit charge and its derivative in ε (κ = √(κ̄²/ε)).
-                        let (g, dg) = if k > 0.0 {
+                        // The response g to a unit charge and its derivatives in ε (κ =
+                        // √(κ̄²/ε)), in the distance and in the atom's radius.
+                        let (g, dg, dd, da) = if k > 0.0 {
                             let g = m.lb0 / m.eps * (-k * (d - a.radius)).exp() / ((1.0 + k * a.radius) * d);
                             let slope = (d - a.radius) + a.radius / (1.0 + k * a.radius);
-                            (g, g / m.eps * (0.5 * k * slope - 1.0))
+                            (
+                                g,
+                                g / m.eps * (0.5 * k * slope - 1.0),
+                                -g * (k + 1.0 / d),
+                                g * k * k * a.radius / (1.0 + k * a.radius),
+                            )
                         } else {
                             let g = m.lb0 / (m.eps * d);
-                            (g, -g / m.eps)
+                            (g, -g / m.eps, -g / d, 0.0)
                         };
                         s[0] += cb * g;
                         s[1] += cb * dg;
+                        for l in 0..3 {
+                            s[2 + l] += cb * dd * (a.position[l] - p[l]) / d;
+                        }
+                        s[5] += cb * da;
                     }
                     s
                 })
                 .collect();
-            for (d, s) in charges.iter_mut().zip(&sums) {
+            for (d, s) in out.charges.iter_mut().zip(&sums) {
                 *d += s[0];
             }
             let de: f64 = atoms.iter().zip(&sums).map(|(a, s)| a.charge * s[1]).sum();
-            eps_terms[if medium == Medium::Reference { 0 } else { 1 }] += de;
+            out.dielectrics[if medium == Medium::Reference { 0 } else { 1 }] += de;
+            for (n, (a, s)) in atoms.iter().zip(&sums).enumerate() {
+                if let Some(p) = out.positions.get_mut(n) {
+                    (0..3).for_each(|l| p[l] += a.charge * s[2 + l]);
+                }
+                if let Some(r) = out.radii.get_mut(n) {
+                    *r += a.charge * s[5];
+                }
+            }
         }
         BoundaryCondition::Sdh => {
             // ∂g/∂q_i of the multipole condition: its charge, dipole and
@@ -535,7 +662,7 @@ fn outer_boundary_terms(
                     }
                 }
             }
-            for (d, at) in charges.iter_mut().zip(atoms) {
+            for (d, at) in out.charges.iter_mut().zip(atoms) {
                 let r = [0, 1, 2].map(|a| at.position[a] - mp.center[a]);
                 let r2 = r[0] * r[0] + r[1] * r[1] + r[2] * r[2];
                 let mut g = t0;
@@ -604,7 +731,20 @@ mod tests {
     }
 
     fn gradient(atoms: &[Atom], params: &PbParams, spec: &GridSpec, dielectrics: bool) -> PolarGradient {
-        polar_gradient(&CpuBackend::new(), atoms, params, spec, dielectrics).unwrap()
+        let wrt = Wrt {
+            dielectric_constants: dielectrics,
+            ..Wrt::default()
+        };
+        polar_gradient(&CpuBackend::new(), atoms, params, spec, wrt).unwrap()
+    }
+
+    fn geometry(atoms: &[Atom], params: &PbParams, spec: &GridSpec) -> PolarGradient {
+        let wrt = Wrt {
+            positions: true,
+            radii: true,
+            ..Wrt::default()
+        };
+        polar_gradient(&CpuBackend::new(), atoms, params, spec, wrt).unwrap()
     }
 
     /// The configurations the finite-difference tests run: surfaces, interfaces,
@@ -787,13 +927,114 @@ mod tests {
         }
     }
 
+    /// Positions and radii on the spline surfaces, through three focusing
+    /// levels and `mdh` with ions, against central differences
+    /// (Richardson-extrapolated, as the force tests: the spl2 switch is C¹).
+    #[test]
+    fn position_and_radius_derivatives_equal_central_differences() {
+        let atoms = atoms();
+        for (surface, chgm, rtol) in [
+            (SurfaceMethod::Spline2, ChargeMethod::Spline2, 1e-7),
+            (SurfaceMethod::Spline2, ChargeMethod::Trilinear, 1e-7),
+            // spl4 maps carry APBS' rounding noise (up to 2e-7).
+            (SurfaceMethod::Spline4, ChargeMethod::Spline4, 5e-6),
+        ] {
+            let params = PbParams {
+                surface,
+                chgm,
+                ..params()
+            };
+            let spec = focused();
+            let g = geometry(&atoms, &params, &spec);
+            let (dx, dr) = (g.positions.unwrap(), g.radii.unwrap());
+            let scale = dx.iter().flatten().fold(0.0f64, |m, x| m.max(x.abs()));
+            let delta = 1e-4;
+            let richardson = |shifted: &dyn Fn(f64) -> f64| {
+                let central = |d: f64| (shifted(d) - shifted(-d)) / (2.0 * d);
+                (4.0 * central(0.5 * delta) - central(delta)) / 3.0
+            };
+            for (n, adjoint) in dx.iter().enumerate() {
+                for (l, &adjoint) in adjoint.iter().enumerate() {
+                    let fd = richardson(&|d: f64| {
+                        let mut a = atoms.clone();
+                        a[n].position[l] += d;
+                        energy(&a, &params, &spec)
+                    });
+                    assert!(
+                        (adjoint - fd).abs() < rtol * scale,
+                        "{surface:?}/{chgm:?} atom {n} axis {l}: adjoint {adjoint} vs {fd}"
+                    );
+                }
+                let fd = richardson(&|d: f64| {
+                    let mut a = atoms.clone();
+                    a[n].radius += d;
+                    energy(&a, &params, &spec)
+                });
+                assert!(
+                    (dr[n] - fd).abs() < rtol * scale,
+                    "{surface:?}/{chgm:?} atom {n} radius: adjoint {} vs {fd}",
+                    dr[n]
+                );
+            }
+        }
+    }
+
+    /// On one level with zero boundary values and W = S the position
+    /// derivative is minus APBS' force, which is exact there.
+    #[test]
+    fn on_one_level_the_position_derivative_is_minus_the_force() {
+        let atoms = atoms();
+        let params = PbParams {
+            surface: SurfaceMethod::Spline2,
+            chgm: ChargeMethod::Spline2,
+            bcfl: BoundaryCondition::Zero,
+            ..params()
+        };
+        let spec = single();
+        let g = geometry(&atoms, &params, &spec).positions.unwrap();
+        let f = crate::pb::polar_forces(&CpuBackend::new(), &atoms, &params, &spec).unwrap();
+        let scale = g.iter().flatten().fold(0.0f64, |m, x| m.max(x.abs()));
+        for (n, g) in g.iter().enumerate() {
+            for (l, &g) in g.iter().enumerate() {
+                let force = f.qf[n][l] + f.db[n][l] + f.ib[n][l];
+                assert!(
+                    (g + force).abs() < 1e-9 * scale,
+                    "atom {n} axis {l}: {g} vs force {force}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn unsupported_options_are_refused() {
         let atoms = atoms();
         let spec = focused();
         let refused = |params: PbParams, dielectrics: bool| {
-            polar_gradient(&CpuBackend::new(), &atoms, &params, &spec, dielectrics).is_err()
+            let wrt = Wrt {
+                dielectric_constants: dielectrics,
+                ..Wrt::default()
+            };
+            polar_gradient(&CpuBackend::new(), &atoms, &params, &spec, wrt).is_err()
         };
+        let geometry_refused = |params: PbParams| {
+            let wrt = Wrt {
+                positions: true,
+                ..Wrt::default()
+            };
+            polar_gradient(&CpuBackend::new(), &atoms, &params, &spec, wrt).is_err()
+        };
+        for surface in [SurfaceMethod::Mol, SurfaceMethod::Vdw, SurfaceMethod::Gaussian] {
+            assert!(geometry_refused(PbParams { surface, ..params() }));
+        }
+        assert!(geometry_refused(PbParams {
+            surface: SurfaceMethod::Spline2,
+            bcfl: BoundaryCondition::Sdh,
+            ..params()
+        }));
+        assert!(!geometry_refused(PbParams {
+            surface: SurfaceMethod::Spline2,
+            ..params()
+        }));
         assert!(refused(
             PbParams {
                 coulomb: CoulombMethod::Analytic,

@@ -696,20 +696,24 @@ differentiable PB reference. Machine-learned level-set surfaces [Wei, Zhao &
 Luo 2021] show how surface computation can become GPU-friendly and
 differentiable. pbsolve provides the solver and data pipeline; trained
 models are separate, optional packages.
-*Status (0.1.8): charges and dielectric constants done; radii, positions and
+*Status (0.1.9): charges, dielectric constants, positions and radii done;
 the array interfaces remain.*
 * `Solver.polar_gradient` (`gradient.rs`): dΔG_polar/dq of every atom and
   dΔG_polar/d pdie, d sdie, exact for the discrete energy through every
   focusing level and the outer boundary condition: one adjoint solve per
   level and state, the boundary cotangent carried to the coarser level by the
   transposed focusing. The energy equals `polar_solvation`'s bit for bit.
-* 1YCR: central differences to 4e-9 of the largest charge derivative and
-  2e-8 for the dielectric constants; Σ q ∂ΔG/∂q = 2ΔG to 4e-13; 1.9–2.3× the
-  energy's time (docs/VALIDATION.md, "Exact gradients").
-* Next: radii and positions on the spline surfaces through every level (the
-  exact counterpart of `polar_forces`); then DLPack arrays and PyTorch/JAX
-  wrappers (`torch.autograd.Function`, `jax.custom_vjp`); the nonlinear
-  equations last.
+* Positions and radii on the spline surfaces (0.1.9, `wrt=("positions",
+  "radii")`): the force code's boundary sums with the adjoint as a second
+  field, on every level, plus the `mdh` kernel's derivatives; the exact
+  counterpart of `polar_forces`, which takes the finest level only.
+* 1YCR: central differences to 4e-9 of the largest charge derivative, 2e-8
+  for the dielectric constants and 2e-7 of the largest position derivative;
+  the summed position derivatives equal a rigid shift's derivative to 2e-6;
+  Σ q ∂ΔG/∂q = 2ΔG to 4e-13; 2.1–2.2× the energy's time on the CPU
+  (docs/VALIDATION.md, "Exact gradients").
+* Next: DLPack arrays and PyTorch/JAX wrappers (`torch.autograd.Function`,
+  `jax.custom_vjp`); the nonlinear equations last.
 
 ### v0.6+ — Further solution methods
 

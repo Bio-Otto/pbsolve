@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- `Solver.polar_gradient` also differentiates with respect to every atom's
+  position and radius on the spline surfaces (`surface="spl2"`, `"spl4"`;
+  ROADMAP 4.20, second stage): `PolarGradient.positions` (minus the force)
+  and `PolarGradient.radii`, exact through every focusing level and the
+  `mdh` boundary, where `polar_forces` (as APBS) takes the finest level only.
+
+### Changed
+
+- `polar_gradient` selects the derivatives besides the charges with
+  `wrt=("dielectric_constants", "positions", "radii")`; this replaces the
+  `dielectric_constants=True` of 0.1.8.
+- The boundary sums of the force code take two fields and also return the
+  radius derivative; `polar_forces` is unchanged bit for bit.
+
 ## 0.1.8 — 2026-11-23
 
 Exact gradients of ΔG_polar with respect to the charges and the dielectric

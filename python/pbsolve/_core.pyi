@@ -179,9 +179,13 @@ class PolarGradient:
     charges: npt.NDArray[np.float64]
     """dΔG_polar/dq of every atom in kcal/mol/e, shape (N,), uncharged atoms included."""
     pdie: Optional[float]
-    """dΔG_polar/d pdie in kcal/mol (None unless ``dielectric_constants=True``)."""
+    """dΔG_polar/d pdie in kcal/mol (None unless ``wrt`` has "dielectric_constants")."""
     sdie: Optional[float]
-    """dΔG_polar/d sdie in kcal/mol (None unless ``dielectric_constants=True``)."""
+    """dΔG_polar/d sdie in kcal/mol (None unless ``wrt`` has "dielectric_constants")."""
+    positions: Optional[npt.NDArray[np.float64]]
+    """dΔG_polar/dr of every atom in kcal/mol/Å, shape (N, 3), minus the force (None unless ``wrt`` has "positions")."""
+    radii: Optional[npt.NDArray[np.float64]]
+    """dΔG_polar/d radius of every atom in kcal/mol/Å, shape (N,) (None unless ``wrt`` has "radii")."""
     result: PolarResult
     """The energy calculation (iterations, timings, grid)."""
 
@@ -520,18 +524,20 @@ class Solver:
         radii: npt.ArrayLike,
         grid: Optional[GridSpec] = None,
         dielectrics: Optional[npt.ArrayLike] = None,
-        dielectric_constants: bool = False,
+        wrt: Sequence[str] = (),
     ) -> PolarGradient:
         """Polar solvation free energy ΔG_polar and its exact gradient.
 
         Computes :meth:`polar_solvation` (the same energy, bit for bit) and the
-        derivatives of ΔG_polar with respect to every atom's charge and, with
-        ``dielectric_constants=True``, to ``pdie`` and ``sdie``. They are exact for
-        the discrete energy, through every focusing level and the outer boundary
-        condition (adjoint method: one extra linear solve per grid level and state,
-        about twice the cost of the energy). ``bcfl="mdh-fast"`` is differentiated
-        as ``"mdh"``, which it reproduces to 1e-10. On a single grid with
-        ``bcfl="zero"`` the charge derivative is the reaction potential at the atom.
+        derivatives of ΔG_polar with respect to every atom's charge and, on
+        request, to ``pdie`` and ``sdie``, to the atoms' positions and to their
+        radii. They are exact for the discrete energy, through every focusing
+        level and the outer boundary condition (adjoint method: one extra linear
+        solve per grid level and state, about twice the cost of the energy).
+        ``bcfl="mdh-fast"`` is differentiated as ``"mdh"``, which it reproduces to
+        1e-10. On a single grid with ``bcfl="zero"`` the charge derivative is the
+        reaction potential at the atom and the position derivative is minus
+        :meth:`polar_forces`.
 
         Parameters
         ----------
@@ -546,10 +552,18 @@ class Solver:
         dielectrics : array_like, shape (N,), optional
             Interior dielectric of every atom in place of ``pdie``, as in
             :meth:`polar_solvation`.
-        dielectric_constants : bool, optional
-            Also dΔG_polar/d pdie and dΔG_polar/d sdie. Needs ``surface`` "mol",
-            "vdw", "spl2" or "spl4", no ``dielectrics`` and ``bcfl`` "zero", "mdh"
-            or "mdh-fast".
+        wrt : sequence of str, optional
+            What to differentiate besides the charges:
+
+            * "dielectric_constants": ``pdie`` and ``sdie``; needs ``surface``
+              "mol", "vdw", "spl2" or "spl4", no ``dielectrics`` and ``bcfl``
+              "zero", "mdh" or "mdh-fast".
+            * "positions": every atom's position (minus the force); needs
+              ``surface`` "spl2" or "spl4" and ``bcfl`` "zero", "mdh" or
+              "mdh-fast", and every atom's surface window inside the finest grid.
+            * "radii": every atom's radius, with the same needs. Atoms of radius
+              0 do not shape the surface; only the boundary condition sees their
+              radius.
 
         Returns
         -------
@@ -559,8 +573,8 @@ class Solver:
         ------
         ValueError
             For ``equation`` "npbe" or "smpbe" with ions, ``coulomb="analytic"``, a
-            membrane or a lateral period; for ``dielectric_constants`` with other
-            options than those above; if the arrays do not match or a charge lies
+            membrane or a lateral period; for an unknown name in ``wrt`` or one
+            whose needs are not met; if the arrays do not match or a charge lies
             outside the grid.
         ConvergenceError
             If a linear solve does not converge.

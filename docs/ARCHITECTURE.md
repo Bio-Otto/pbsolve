@@ -114,8 +114,13 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   coarser level through the transposed trilinear focusing and ends in the
   derivative of the analytic boundary (`mdh`, `sdh` for the charges).
   ∂ε_f/∂pdie and ∂ε_f/∂sdie come from the maps rebuilt with pdie = 1,
-  sdie = 2. One state at a time; the `mdh` term is a direct sum over atoms
-  and boundary nodes.
+  sdie = 2. Positions and radii (spline surfaces) take, on every level, the
+  force code's charge–field derivative with λ and the dielectric- and
+  ionic-boundary sums with two fields (`forces::dielectric_boundary_sums`,
+  `ionic_boundary_sums`: λ and u, plus a fourth component, the radius
+  derivative = ∇ ln S along the radius); the forces call them with u, u and
+  stay bit-identical. One state at a time; the `mdh` term is a direct sum
+  over atoms and boundary nodes.
 * **Non-polar terms** (`apolar.rs`, `pbsolve.apolar_energy`): APBS
   `apolar`'s area (reference-sphere points on r + srad, the surface code's
   `Accessibility` test), volume (trapezoidal rule over APBS' cell-list box)

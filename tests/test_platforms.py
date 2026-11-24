@@ -156,12 +156,16 @@ def test_cuda_gradient_matches_cpu():
     sel = slice(1500, None)
     kw = dict(grid_spacing=0.45, ionic_strength=0.15, pdie=2.0, fadd=12.0)
     args = (coords[sel], charges[sel], radii[sel])
-    cpu = pbsolve.Solver(platform="CPU", **kw).polar_gradient(*args, dielectric_constants=True)
-    gpu = pbsolve.Solver(platform="CUDA", **kw).polar_gradient(*args, dielectric_constants=True)
+    kw.update(surface="spl2", chgm="spl2")
+    wrt = ("dielectric_constants", "positions", "radii")
+    cpu = pbsolve.Solver(platform="CPU", **kw).polar_gradient(*args, wrt=wrt)
+    gpu = pbsolve.Solver(platform="CUDA", **kw).polar_gradient(*args, wrt=wrt)
     assert gpu.result.platform == "CUDA"
     assert gpu.energy == pytest.approx(cpu.energy, rel=1e-10)
     assert np.abs(gpu.charges - cpu.charges).max() < 1e-7 * np.abs(cpu.charges).max()
     assert gpu.pdie == pytest.approx(cpu.pdie, rel=1e-7) and gpu.sdie == pytest.approx(cpu.sdie, rel=1e-7)
+    assert np.abs(gpu.positions - cpu.positions).max() < 1e-7 * np.abs(cpu.positions).max()
+    assert np.abs(gpu.radii - cpu.radii).max() < 1e-7 * np.abs(cpu.radii).max()
 
 
 @needs_cuda

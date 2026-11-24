@@ -751,21 +751,24 @@ The [validation record](../VALIDATION) has the derivation and the checks
 
 {py:meth}`~pbsolve.Solver.polar_gradient` computes ΔG_polar (the number
 `polar_solvation` gives, bit for bit) with its derivative with respect to
-every atom's charge (kcal/mol/e) and, with `dielectric_constants=True`, to
-`pdie` and `sdie` (kcal/mol):
+every atom's charge (kcal/mol/e) and, as `wrt` asks, to `pdie` and `sdie`
+(kcal/mol) and to every atom's position and radius (kcal/mol/Å):
 
 ```python
-g = solver.polar_gradient(coords, charges, radii, dielectric_constants=True)
+g = solver.polar_gradient(coords, charges, radii, wrt=("dielectric_constants",))
 print(f"ΔG_polar {g.energy:.2f} kcal/mol, dΔG/dpdie {g.pdie:.3f}, dΔG/dsdie {g.sdie:.5f} kcal/mol")
 print(f"largest |dΔG/dq| {abs(g.charges).max():.2f} kcal/mol/e")
+
+gs = smooth.polar_gradient(coords, charges, radii, wrt=("positions", "radii"))
+print(f"largest |dΔG/dr| {abs(gs.positions).max():.2f}, |dΔG/dR| {abs(gs.radii).max():.2f} kcal/mol/Å")
 ```
 
 * **Exact.** The derivatives are those of the discrete energy, through every
   focusing level and the outer boundary condition, by the adjoint method:
   one more linear solve per grid level and state, about twice the time of
   the energy (CPU). On 1YCR they agree with central differences to a few
-  1e-9 of the largest charge derivative and to 2e-8 (relative) for the
-  dielectric constants.
+  1e-9 of the largest charge derivative, to 2e-8 (relative) for the
+  dielectric constants and to 1e-7 of the largest position derivative.
 * **Charges.** dΔG/dq_i is the reaction potential at atom i, corrected for
   the slight asymmetry that focusing and the boundary condition give the
   discrete energy (0.002 kcal/mol/e on 1YCR with `chgm="spl0"`), and taken
@@ -775,9 +778,17 @@ print(f"largest |dΔG/dq| {abs(g.charges).max():.2f} kcal/mol/e")
 * **Dielectric constants.** For fitting `pdie` or `sdie` against experiment
   or explicit solvent. Needs `surface` "mol", "vdw", "spl2" or "spl4", no
   per-atom `dielectrics` and `bcfl` "zero", "mdh" or "mdh-fast".
+* **Positions and radii.** On the spline surfaces, which move smoothly with
+  the atoms (`surface` "spl2" or "spl4", `bcfl` "zero", "mdh" or
+  "mdh-fast"). `gs.positions` is minus the force, through every level and
+  the `mdh` boundary; {py:meth}`~pbsolve.Solver.polar_forces`, like APBS,
+  takes the finest level only, which on 1YCR changes the forces by at most
+  5e-4 kcal/mol/Å. The radius derivatives serve fitting radii; atoms of
+  radius 0 do not shape the surface. The sum of all position derivatives
+  is not zero: it is how the energy changes when the molecule moves on a
+  fixed grid (the grid's noise, see Forces).
 * **Not available.** The nonlinear equations with ions, `coulomb="analytic"`,
-  membranes and lateral periods. Derivatives with respect to radii and
-  positions through all levels are the next step (ROADMAP 4.20); until then
-  {py:meth}`~pbsolve.Solver.polar_forces` gives APBS' forces.
+  membranes and lateral periods, and positions or radii on the surfaces that
+  are not smooth in the atoms (`mol`, `vdw`, `gauss`).
 
 The [validation record](../VALIDATION) has the derivation and the checks.
