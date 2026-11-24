@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.9 — 2026-11-24
+
+Exact derivatives of ΔG_polar with respect to the atoms' positions and radii
+on the spline surfaces (ROADMAP 4.20, second stage).
+
 ### Added
 
 - `Solver.polar_gradient` also differentiates with respect to every atom's
