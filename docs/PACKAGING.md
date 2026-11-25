@@ -135,6 +135,10 @@ the maintainer has done three things:
 3. In *Settings → Secrets and variables → Actions → Variables*, set
    `PUBLISH_PYPI` = `true`.
 
+A release tagged before that is uploaded afterwards by running CI on its tag
+again, `gh workflow run ci.yml --ref vX.Y.0`: the `release` job keeps the
+GitHub release it finds, and `pypi` uploads that run's files.
+
 Local check of a manylinux wheel without a container (zig as the linker):
 
 ```bash

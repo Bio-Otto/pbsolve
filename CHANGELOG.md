@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-26
+
+The second minor release, checked by CI on Linux, macOS and Windows: exact
+gradients of ΔG_polar with PyTorch and JAX interfaces (ROADMAP 4.20). Since
+0.1.0: wheels for every platform (0.1.1–0.1.2), the conda-forge recipe
+(0.1.3–0.1.4), the cross-check of the Gaussian dielectric with pyDelPhi
+(0.1.5), residue pairs of the polar term (0.1.6), the MM-PBSA benchmark
+against experiment and the logo (0.1.7), and the gradients (0.1.8–0.1.9).
+
 ### Added
 
 - `pbsolve.torch.polar_energy` and `pbsolve.jax.polar_energy` (ROADMAP 4.20,
@@ -11,6 +20,12 @@
   `jax.custom_vjp` with `jax.pure_callback`, so it works under `jax.jit`,
   `jax.grad` and `jax.vmap`). PyTorch and JAX stay optional; nothing changes
   without them.
+
+### Changed
+
+- The GitHub release step keeps a release that already exists, so that CI
+  can run again on a released tag to upload it to PyPI later
+  (`docs/PACKAGING.md`).
 
 ## 0.1.9 — 2026-11-24
 

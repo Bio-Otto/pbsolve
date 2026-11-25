@@ -405,7 +405,7 @@ of Gaussian-dielectric pKa methods (4.21).
 ### First public release
 
 v0.1–v0.3 are done; the repository is public since 2026-11-15, and the latest
-tag is v0.1.9. The first release makes the work usable and checkable by
+tag is v0.2.0. The first release makes the work usable and checkable by
 others. Releases are vX.Y.0 tags that pass CI (decision 5, section 8).
 
 **R1 Public repository and documentation site.** The repository is public
@@ -432,8 +432,8 @@ How pip users choose the CUDA major (separate package names or extras) is
 part of the work.
 *Evidence:* `pip install` in a clean environment passes `pbsolve test` on a
 machine without a GPU and on one with a GPU.
-*Status (0.1.1): the wheels are done; the first upload waits for the
-maintainer and v0.2.0.*
+*Status (0.2.0): the wheels are done and attached to the v0.2.0 release; the
+first PyPI upload waits for the maintainer's trusted publisher.*
 * One `pbsolve` wheel per CPython version (3.10–3.14), for Linux x86_64 and
   manylinux2014, built with `cuda-12`; plus the sdist. The `cuda12` extra
   adds pip's NVRTC.
@@ -462,7 +462,8 @@ maintainer and v0.2.0.*
   for Python 3.11–3.14, once the recipe declares the `pbsolve` entry point
   (Windows); the PR waits for review.
 * Remaining:
-  * the first upload (v0.2.0, by the release cadence);
+  * the first PyPI upload: v0.2.0, once the publisher is registered
+    (`gh workflow run ci.yml --ref v0.2.0`, docs/PACKAGING.md);
   * GPU runs of the aarch64 and Windows wheels (no such GPU at hand);
   * the staged-recipes PR (the maintainer's account) and the feedstock.
 

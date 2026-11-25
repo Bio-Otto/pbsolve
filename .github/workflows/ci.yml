@@ -156,9 +156,13 @@ jobs:
           pattern: dist-*
           merge-multiple: true
           path: dist
+      # A run repeated on the tag (gh workflow run ci.yml --ref vX.Y.0, e.g. to
+      # upload to PyPI later) keeps the release it finds.
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+        run: >
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
 
   pypi:
     # Trusted publishing (no token): needs the publisher registered on PyPI,

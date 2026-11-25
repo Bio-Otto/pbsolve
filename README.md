@@ -216,7 +216,7 @@ Field protein–ligand benchmark (`scripts/binding_benchmark.py`).
 
 ## Status
 
-pbsolve is an early preview (0.0.x); the API may still change. Validation numbers and
+pbsolve is young (0.x); the API may still change. Validation numbers and
 the GPU status are in `docs/VALIDATION.md`, the design in `docs/ARCHITECTURE.md`,
 the development plan in `docs/ROADMAP.md`, packaging in `docs/PACKAGING.md`.
 
