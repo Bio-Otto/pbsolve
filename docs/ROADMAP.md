@@ -696,8 +696,7 @@ differentiable PB reference. Machine-learned level-set surfaces [Wei, Zhao &
 Luo 2021] show how surface computation can become GPU-friendly and
 differentiable. pbsolve provides the solver and data pipeline; trained
 models are separate, optional packages.
-*Status (0.1.9): charges, dielectric constants, positions and radii done;
-the array interfaces remain.*
+*Status (0.2.0): done; the nonlinear equations remain outside it.*
 * `Solver.polar_gradient` (`gradient.rs`): dΔG_polar/dq of every atom and
   dΔG_polar/d pdie, d sdie, exact for the discrete energy through every
   focusing level and the outer boundary condition: one adjoint solve per
@@ -712,8 +711,16 @@ the array interfaces remain.*
   the summed position derivatives equal a rigid shift's derivative to 2e-6;
   Σ q ∂ΔG/∂q = 2ΔG to 4e-13; 2.1–2.2× the energy's time on the CPU
   (docs/VALIDATION.md, "Exact gradients").
-* Next: DLPack arrays and PyTorch/JAX wrappers (`torch.autograd.Function`,
-  `jax.custom_vjp`); the nonlinear equations last.
+* `pbsolve.torch.polar_energy` and `pbsolve.jax.polar_energy` (0.2.0):
+  ΔG_polar as a differentiable function of charges, positions, radii and
+  dielectric constants (`torch.autograd.Function`; `jax.custom_vjp` around
+  `jax.pure_callback`, under `jit`, `grad` and `vmap`); their gradients are
+  those of `polar_gradient` bit for bit. Arrays go to the host and back
+  through NumPy, not DLPack: a few kilobytes per molecule against the linear
+  solves, so zero-copy device arrays would gain nothing until potentials on
+  the grid are exchanged, which nothing needs yet.
+* Not covered: `npbe`/`smpbe` with ions (the adjoint of the Newton system),
+  membranes, lateral periods, `coulomb="analytic"`.
 
 ### v0.6+ — Further solution methods
 

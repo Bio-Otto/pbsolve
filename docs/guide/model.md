@@ -791,4 +791,45 @@ print(f"largest |dΔG/dr| {abs(gs.positions).max():.2f}, |dΔG/dR| {abs(gs.radii
   membranes and lateral periods, and positions or radii on the surfaces that
   are not smooth in the atoms (`mol`, `vdw`, `gauss`).
 
+### PyTorch and JAX
+
+`pbsolve.torch.polar_energy` and `pbsolve.jax.polar_energy` make ΔG_polar
+a differentiable function for PyTorch or JAX (install either yourself; pbsolve
+does not depend on them). The gradient is that of `polar_gradient`, so the
+same options apply; fix the grid when positions or radii change, so that the
+energy is smooth in them. With PyTorch, fitting the interior dielectric
+constant to a target energy:
+
+```{code-block} python
+import torch
+import pbsolve.torch as pt
+
+target = -1100.0  # kcal/mol, e.g. from explicit solvent
+grid = solver.make_grid(coords, radii)
+pdie = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+optimiser = torch.optim.Adam([pdie], lr=0.1)
+for step in range(20):
+    optimiser.zero_grad()
+    loss = (pt.polar_energy(solver, coords, charges, radii, pdie=pdie, grid=grid) - target) ** 2
+    loss.backward()
+    optimiser.step()
+```
+
+With JAX the function works under `jax.grad`, `jax.jit` and `jax.vmap` (one
+solve per element of a batch):
+
+```{code-block} python
+import jax
+import pbsolve.jax as pj
+
+jax.config.update("jax_enable_x64", True)
+smooth_grid = smooth.make_grid(coords, radii)
+forces = -jax.grad(lambda x: pj.polar_energy(smooth, x, charges, radii, grid=smooth_grid))(coords)
+```
+
+Tensors on a GPU are copied to the host and back (a few kilobytes per
+molecule; the solves dominate). PyTorch learns which derivatives a call needs
+and asks for those only; JAX does not say, so its forward pass computes every
+derivative the options allow and marks the others NaN.
+
 The [validation record](../VALIDATION) has the derivation and the checks.

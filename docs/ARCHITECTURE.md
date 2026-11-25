@@ -3,7 +3,8 @@
 ```
 python/pbsolve/         pure-Python API: io (load/select/frames), prep (PDB -> PQR),
         │               MM-PBSA helpers, interaction entropy, OpenMM bridge,
-        │               APBS parity, DX I/O, CLI
+        │               APBS parity, DX I/O, CLI, PyTorch/JAX wrappers of the
+        │               gradient (torch.py, jax.py; optional imports)
         │  (PyO3, GIL released during solves and file reads)
 crates/pbsolve-py       thin bindings: argument conversion + platform selection
         │
@@ -120,7 +121,9 @@ LPBE in APBS' dimensionless form (u in kT/e, lengths in Å):
   `ionic_boundary_sums`: λ and u, plus a fourth component, the radius
   derivative = ∇ ln S along the radius); the forces call them with u, u and
   stay bit-identical. One state at a time; the `mdh` term is a direct sum
-  over atoms and boundary nodes.
+  over atoms and boundary nodes. `pbsolve.torch` (`torch.autograd.Function`)
+  and `pbsolve.jax` (`jax.custom_vjp` around `jax.pure_callback`) wrap it as
+  a differentiable function; arrays go to the host and back.
 * **Non-polar terms** (`apolar.rs`, `pbsolve.apolar_energy`): APBS
   `apolar`'s area (reference-sphere points on r + srad, the surface code's
   `Accessibility` test), volume (trapezoidal rule over APBS' cell-list box)

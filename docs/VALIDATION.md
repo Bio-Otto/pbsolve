@@ -93,7 +93,7 @@ should update the status table below.
 | Batched solves (0.0.2) | MM-PBSA frames/s on 1YCR: 1.4× (CPU, 2 workers) and 2.2× (CUDA, 3 workers), results bit-identical to sequential calls (see *Batched solves*) |
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (0.0.2): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark (0.1.7, ROADMAP 4.19): `scripts/binding_benchmark.py` | Open Force Field protein–ligand benchmark, 14 targets, 359 ligands, single minimised structures: mean Pearson R 0.60 at interior dielectric 2 (ρ 0.63, τ 0.48; 0.28 on the poses as given); per-residue dielectrics 0.59, fractional interface 0.59, Gaussian dielectric 0.48, dispersion term 0.37; APBS 3.4.1 = pbsolve on mcl1 to 0.0002 kcal/mol (same R); 1.7–11.5 s per calculation on a shared CPU; see *Binding benchmark against experiment* |
-| Exact gradients (0.1.8–0.1.9, ROADMAP 4.20): `Solver.polar_gradient` | energy = `polar_solvation` bit for bit; 1YCR (two focusing levels): dΔG/dq against central differences ≤ 4.1e-9 of the largest derivative (`mol`/`mdh`, fractional/`mdh-fast`, `spl2`/`sdh`), dΔG/dpdie and dΔG/dsdie ≤ 2.4e-8 relative, positions and radii (`spl2`) ≤ 2e-7 of the largest, their sum = a rigid shift's derivative to 2e-6; Σ q ∂ΔG/∂q = 2ΔG to 4e-13; one level with `zero`: the reaction potential and minus `polar_forces` (1e-9); `polar_forces` unchanged bit for bit and within 5.3e-4 kcal/mol/Å of the exact derivative; 24/24 mutations; 2.1–2.2× the energy's time; see *Exact gradients* |
+| Exact gradients (0.1.8–0.2.0, ROADMAP 4.20): `Solver.polar_gradient`, `pbsolve.torch`, `pbsolve.jax` | energy = `polar_solvation` bit for bit; 1YCR (two focusing levels): dΔG/dq against central differences ≤ 4.1e-9 of the largest derivative (`mol`/`mdh`, fractional/`mdh-fast`, `spl2`/`sdh`), dΔG/dpdie and dΔG/dsdie ≤ 2.4e-8 relative, positions and radii (`spl2`) ≤ 2e-7 of the largest, their sum = a rigid shift's derivative to 2e-6; Σ q ∂ΔG/∂q = 2ΔG to 4e-13; one level with `zero`: the reaction potential and minus `polar_forces` (1e-9); `polar_forces` unchanged bit for bit and within 5.3e-4 kcal/mol/Å of the exact derivative; 24/24 mutations; 2.1–2.2× the energy's time; PyTorch and JAX gradients = `polar_gradient`'s bit for bit (`jit`, `vmap`); see *Exact gradients* |
 
 ### APBS parity: 1YCR (h ≈ 0.46/0.46/0.38 Å, dime 129³, 2 focusing levels, `cfac 1.7`, `fadd 20`)
 
@@ -4615,9 +4615,19 @@ is minus `polar_forces` to 1e-9 (unit test).
   distance, radius and sign, the radial component, the first field) are all
   caught.
 
-**Not yet (ROADMAP 4.20).** The nonlinear equations, membranes and lateral
-periods, per-atom dielectric constants, `sdh` dielectric and geometric
-derivatives; zero-copy arrays for PyTorch and JAX.
+**PyTorch and JAX (0.2.0).** `pbsolve.torch.polar_energy`
+(`torch.autograd.Function`) and `pbsolve.jax.polar_energy` (`jax.custom_vjp`
+around `jax.pure_callback`) return ΔG_polar; their gradients with respect to
+charges, positions, radii, pdie and sdie equal `polar_gradient`'s bit for bit
+(`tests/test_interop.py`, PyTorch 2.15.0 CPU and JAX 0.12.0.1 in a separate
+environment; skipped without them). The chain rule scales them (3·ΔG gives
+3·dΔG/dq to 1e-15), float32 tensors keep their dtype, `jax.jit` and
+`jax.vmap` give the same energies (half the charges: a quarter of ΔG, 1e-9),
+a derivative the options cannot give raises in PyTorch and is NaN in JAX.
+
+**Not covered (ROADMAP 4.20).** The nonlinear equations with ions,
+membranes and lateral periods, per-atom dielectric constants, `sdh`
+dielectric and geometric derivatives.
 
 ## Sensitivity of the sharp dielectric boundary
 

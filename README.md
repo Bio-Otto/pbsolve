@@ -37,7 +37,8 @@ solution methods and integrations can be added.
   and, on the spline surfaces, to every atom's position and radius, exact
   for the discrete energy through all focusing levels and the boundary
   condition (adjoint method), for fitting parameters and training models
-  against PB.
+  against PB; `pbsolve.torch` and `pbsolve.jax` make ΔG_polar a
+  differentiable PyTorch or JAX function.
 * **Gaussian dielectric** — `surface="gauss"` grades ε from the atoms'
   Gaussian densities instead of a surface (Li et al. 2013), with ions kept
   out by their Born energy; the reference state keeps the molecule's interior

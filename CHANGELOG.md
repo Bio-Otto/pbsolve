@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- `pbsolve.torch.polar_energy` and `pbsolve.jax.polar_energy` (ROADMAP 4.20,
+  last stage): ΔG_polar as a differentiable PyTorch or JAX function of the
+  charges, positions, radii and dielectric constants, with the exact
+  derivatives of `polar_gradient` (`torch.autograd.Function`;
+  `jax.custom_vjp` with `jax.pure_callback`, so it works under `jax.jit`,
+  `jax.grad` and `jax.vmap`). PyTorch and JAX stay optional; nothing changes
+  without them.
+
 ## 0.1.9 — 2026-11-24
 
 Exact derivatives of ΔG_polar with respect to the atoms' positions and radii
