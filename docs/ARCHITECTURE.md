@@ -4,7 +4,8 @@
 python/pbsolve/         pure-Python API: io (load/select/frames), prep (PDB -> PQR),
         │               MM-PBSA helpers, interaction entropy, OpenMM bridge,
         │               APBS parity, DX I/O, CLI, PyTorch/JAX wrappers of the
-        │               gradient (torch.py, jax.py; optional imports)
+        │               gradient (torch.py, jax.py; optional imports), pKa values
+        │               (pka.py: site energies from polar_gradient, titration)
         │  (PyO3, GIL released during solves and file reads)
 crates/pbsolve-py       thin bindings: argument conversion + platform selection
         │

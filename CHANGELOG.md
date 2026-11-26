@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- `pbsolve.pka` (ROADMAP 4.21, stage A): pKa values by the method of
+  Bashford & Karplus. `site_energies` gives the intrinsic pKa of every
+  titratable site and the site–site interactions from Poisson–Boltzmann
+  (the reaction field from `polar_gradient`, Coulomb's law analytically),
+  `titrate` the protonation of every site over pH (exact sum up to 14
+  sites, Monte Carlo beyond). Sites are defined by hand for now; the
+  residue library follows.
+
 ## 0.2.0 — 2026-11-26
 
 The second minor release, checked by CI on Linux, macOS and Windows: exact

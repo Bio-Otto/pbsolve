@@ -734,6 +734,26 @@ Gaussian dielectric (4.13) as in DelPhiPKa [Wang, Li & Alexov 2015] and in
 the PB-based PypKa workflow [Reis et al. 2020]. Benchmarks show no single
 fast method dominates [Wei, Hogues & Sulea 2023], so this is a research
 track, compared with PROPKA, which stays an optional external tool.
+*Status: stage A (the engine) done; the residue library, structure
+preparation and the benchmark against experiment remain.*
+* `pbsolve.pka` (stage A): sites with a neutral and a charged state
+  (`Site`), intrinsic pKa values and site–site interactions
+  (`site_energies`) and the titration (`titrate`: all 2^N microstates up to
+  14 sites, Metropolis Monte Carlo with pair moves beyond). The reaction
+  field of each site's charge change at every atom is the charge derivative
+  of `polar_gradient` (exact through focusing, symmetric); molecule and
+  model compound share the molecule's grid; Coulomb's law in pdie is added
+  analytically.
+* Checks: the terms equal differences of `polar_solvation` energies plus
+  Coulomb's law (1e-8), Henderson–Hasselbalch and a two-site partition
+  function exactly, Monte Carlo against the exact sum (≤ 0.015), a uniform
+  dielectric leaves Coulomb's law alone; 9/9 mutations (docs/VALIDATION.md,
+  "pKa values").
+* Next (stage B): titratable residues from a structure with the PARSE
+  charges of both states (`ASP`/`AS0`, `GLU`/`GL0`, `LYS`/`LY0`, `ARG`/`AR0`,
+  `TYR`/`TY-`, `CYS`/`CY-`, histidine, termini), hydrogens for both states
+  from `pbsolve.prep`, model pKa values from the literature, histidine
+  tautomers; then experimental pKa values of a few proteins and PROPKA.
 
 **4.22 Boundary-element solver.** Surface-only unknowns, exact far field,
 no grid: treecode/FMM-accelerated BEM reaches virus-scale systems [Wilson,

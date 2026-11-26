@@ -94,6 +94,7 @@ should update the status table below.
 | CUDA backend | **first GPU run** (RTX 2080 SUPER, cc 7.5, driver 595.99 = CUDA 13.2, `--features cuda-13`, conda NVRTC 13.2): `pbsolve test` and `tests/test_platforms.py` pass, CPU vs CUDA 9.8e-15; APBS comparison on CUDA identical to CPU. Multigrid on the GPU: CPU vs CUDA ≤ 2.8e-14 (identical iteration counts, `tests/test_platforms.py`). NVRTC selection and CUBIN output (0.0.2): the GPU now works with NVRTC 12.9, 13.2, 13.3 and 13.4 on the 13.2 driver, with energies bit-identical across all of them and to the earlier runs; CUDA 12 build run on the GPU (see *GPU runtime* below) |
 | MM-PBSA benchmark (0.1.7, ROADMAP 4.19): `scripts/binding_benchmark.py` | Open Force Field protein–ligand benchmark, 14 targets, 359 ligands, single minimised structures: mean Pearson R 0.60 at interior dielectric 2 (ρ 0.63, τ 0.48; 0.28 on the poses as given); per-residue dielectrics 0.59, fractional interface 0.59, Gaussian dielectric 0.48, dispersion term 0.37; APBS 3.4.1 = pbsolve on mcl1 to 0.0002 kcal/mol (same R); 1.7–11.5 s per calculation on a shared CPU; see *Binding benchmark against experiment* |
 | Exact gradients (0.1.8–0.2.0, ROADMAP 4.20): `Solver.polar_gradient`, `pbsolve.torch`, `pbsolve.jax` | energy = `polar_solvation` bit for bit; 1YCR (two focusing levels): dΔG/dq against central differences ≤ 4.1e-9 of the largest derivative (`mol`/`mdh`, fractional/`mdh-fast`, `spl2`/`sdh`), dΔG/dpdie and dΔG/dsdie ≤ 2.4e-8 relative, positions and radii (`spl2`) ≤ 2e-7 of the largest, their sum = a rigid shift's derivative to 2e-6; Σ q ∂ΔG/∂q = 2ΔG to 4e-13; one level with `zero`: the reaction potential and minus `polar_forces` (1e-9); `polar_forces` unchanged bit for bit and within 5.3e-4 kcal/mol/Å of the exact derivative; 24/24 mutations; 2.1–2.2× the energy's time; PyTorch and JAX gradients = `polar_gradient`'s bit for bit (`jit`, `vmap`); see *Exact gradients* |
+| pKa engine (stage A, ROADMAP 4.21): `pbsolve.pka` | site terms and interactions = energy differences of `polar_solvation` plus Coulomb's law (1e-8); uniform dielectric: Coulomb's law (1e-12); Henderson–Hasselbalch and a two-site partition function exact (1e-12); Monte Carlo vs exact sum ≤ 0.015; 9/9 mutations; residue library and experiment not yet; see *pKa values* |
 
 ### APBS parity: 1YCR (h ≈ 0.46/0.46/0.38 Å, dime 129³, 2 focusing levels, `cfac 1.7`, `fadd 20`)
 
@@ -4628,6 +4629,41 @@ a derivative the options cannot give raises in PyTorch and is NaN in JAX.
 **Not covered (ROADMAP 4.20).** The nonlinear equations with ions,
 membranes and lateral periods, per-atom dielectric constants, `sdh`
 dielectric and geometric derivatives.
+
+## pKa values (`pbsolve.pka`, ROADMAP 4.21)
+
+**Change (stage A).** The Bashford–Karplus method: sites with a neutral and
+a charged state differing by Δq_i, the energy of a protonation microstate
+E(q_0 + Σ x_i Δq_i) expanded into site terms Δq_iᵀ G q_0 + ½ Δq_iᵀ G Δq_i
+(molecule minus model compound, giving the intrinsic pKa) and interactions
+W_ij = Δq_iᵀ G Δq_j, with G the reaction field plus Coulomb's law in pdie.
+The reaction field R Δq_i at every atom is the charge derivative of
+`polar_gradient` (symmetrised R, exact through focusing), one call per site
+in the molecule and one in its model compound, both on the molecule's grid.
+The titration sums over all microstates up to 14 sites and samples them by
+Metropolis Monte Carlo (single-site and, for |W_ij| > 2 pK units, pair
+flips; one chain per pH, vectorised) beyond.
+
+**Checks (`tests/test_pka.py`).**
+* Born plus background terms and every W_ij equal the corresponding
+  differences of total energies (`polar_solvation` on the same grid plus
+  Coulomb's law between all pairs) to 1e-8 of the largest term: the energy
+  is quadratic in the charges, so the expansion is exact (synthetic
+  molecule, three sites, pdie 4, 0.15 M, tol 1e-12).
+* With pdie = sdie and no ions the self terms vanish (< 1e-12) and W_ij is
+  Coulomb's law (1e-12 relative).
+* Independent sites follow Henderson–Hasselbalch (1e-12), two coupled
+  sites their four-state partition function (1e-12 relative); half points
+  by linear interpolation on a 0.1 pH grid within 2e-3.
+* Monte Carlo against the exact sum for nine coupled sites (one pair at 4.5
+  kcal/mol): within 0.015 or five block errors, reproducible for a seed.
+* 9/9 mutations caught (the acid/base sign, the ½ of the self term, the
+  model compound, both Coulomb terms, the pair-move and single-flip
+  energies, the pH sign, protonation of bases).
+
+**Not yet.** The residue library (PARSE charges of both states), hydrogens
+for both states, model pKa values, tautomers and the comparison with
+experiment and PROPKA (stage B).
 
 ## Sensitivity of the sharp dielectric boundary
 
